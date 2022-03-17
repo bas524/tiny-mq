@@ -1,7 +1,7 @@
 add_subdirectory(protobuf)
 add_subdirectory(poco)
 add_subdirectory(parallel-hashmap)
-add_subdirectory(span-lite)
+add_subdirectory(span)
 if (ENABLE_ODBC)
   add_subdirectory(odbc)
 endif ()
