@@ -13,14 +13,14 @@ class BytesMessage : public Message {
  public:
   using Ptr = std::shared_ptr<BytesMessage>;
   BytesMessage() = default;
-  explicit BytesMessage(const std::vector<uint8_t> &bytes);
-  explicit BytesMessage(const uint8_t *bytes, size_t size);
+  explicit BytesMessage(const BytesVector &bytes);
+  explicit BytesMessage(const int8_t *bytes, size_t size);
   ~BytesMessage() override = default;
-  const std::vector<uint8_t> &bytes() const;
-  void setBytes(const std::vector<uint8_t> &bytes);
-  void setBytes(const uint8_t *bytes, size_t size);
-  void writeBytes(const uint8_t *bytes, size_t offset, size_t size);
-  nonstd::span<const uint8_t> readBytes(size_t offset, size_t size) const;
+  const BytesVector &bytes() const;
+  void setBytes(const BytesVector &bytes);
+  void setBytes(const int8_t *bytes, size_t size);
+  void writeBytes(const int8_t *bytes, size_t offset, size_t size);
+  nonstd::span<const int8_t> readBytes(size_t offset, size_t size) const;
   void clearData() override;
   size_t dataSize() const;
   Poco::JSON::Object toJSON() const override;

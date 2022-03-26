@@ -10,7 +10,7 @@ const std::string& TextMessage::text() const { return Poco::RefAnyCast<std::stri
 void TextMessage::setText(const std::string& text) { data = text; }
 void TextMessage::clearData() { data = std::string(); }
 Poco::JSON::Object TextMessage::toJSON() const {
-  auto json = propertytoJSON();
+  auto json = propertiesToJSON();
   json.set("data", text());
   return json;
 }

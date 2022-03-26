@@ -7,14 +7,15 @@
 #include "BytesMessage.h"
 
 using tiny_mq::BytesMessage;
+using tiny_mq::BytesVector;
 
 TEST_F(BytesMessageTest, testGetDataLength) {
   BytesMessage msg;
 
   const size_t len = 10;
-  std::vector<uint32_t> data(len, 1);
+  BytesVector data(len, 1);
 
-  EXPECT_NO_THROW(msg.setBytes((const uint8_t *)&data[0], sizeof(uint32_t) * len));
+  EXPECT_NO_THROW(msg.setBytes((const int8_t *)&data[0], sizeof(uint32_t) * len));
 
   size_t resLen = msg.dataSize();
   EXPECT_EQ(resLen, (len * sizeof(uint32_t)));
@@ -23,8 +24,8 @@ TEST_F(BytesMessageTest, testGetDataLength) {
 TEST_F(BytesMessageTest, testReadAllBytes) {
   BytesMessage msg;
 
-  uint8_t data[50];
-  for (uint8_t i = 0; i < 50; i++) {
+  int8_t data[50];
+  for (int8_t i = 0; i < 50; i++) {
     data[i] = i;
   }
   EXPECT_NO_THROW(msg.writeBytes(&data[0], 0, 50));
@@ -39,7 +40,7 @@ TEST_F(BytesMessageTest, testReadAllBytes) {
 TEST_F(BytesMessageTest, testReadBytesWithOffset) {
   BytesMessage msg;
 
-  std::vector<uint8_t> data(50);
+  BytesVector data(50);
   std::iota(data.begin(), data.end(), 0);
   EXPECT_NO_THROW(msg.setBytes(data));
   EXPECT_NO_THROW({
@@ -53,7 +54,7 @@ TEST_F(BytesMessageTest, testReadBytesWithOffset) {
 TEST_F(BytesMessageTest, testWriteBytesWithOffset) {
   BytesMessage msg;
 
-  std::vector<uint8_t> data(10, 0);
+  BytesVector data(10, 0);
   std::iota(data.begin(), data.end(), 0);
   EXPECT_NO_THROW(msg.writeBytes(&data[5], 5, 5));
   EXPECT_NO_THROW({
@@ -72,9 +73,9 @@ TEST_F(BytesMessageTest, testWriteBytesWithOffsetText) {
   BytesMessage msg;
 
   std::string data("0123456789");
-  EXPECT_NO_THROW(msg.setBytes(reinterpret_cast<const uint8_t *>(data.c_str()), data.size()));
+  EXPECT_NO_THROW(msg.setBytes(reinterpret_cast<const int8_t *>(data.c_str()), data.size()));
   data = "98765";
-  EXPECT_NO_THROW(msg.writeBytes(reinterpret_cast<const uint8_t *>(data.c_str()), 5, 5));
+  EXPECT_NO_THROW(msg.writeBytes(reinterpret_cast<const int8_t *>(data.c_str()), 5, 5));
   EXPECT_NO_THROW({
     auto refOnData = msg.bytes();
     std::string modifiedData((const char *)refOnData.data(), refOnData.size());
@@ -84,7 +85,7 @@ TEST_F(BytesMessageTest, testWriteBytesWithOffsetText) {
 
 TEST_F(BytesMessageTest, testClearBody) {
   BytesMessage msg;
-  std::vector<uint8_t> data(50);
+  BytesVector data(50);
   std::iota(data.begin(), data.end(), 0);
 
   EXPECT_NO_THROW(msg.setBytes(data));
@@ -98,7 +99,7 @@ TEST_F(BytesMessageTest, testClearBody) {
 
 TEST_F(BytesMessageTest, testToJson) {
   BytesMessage msg;
-  std::vector<uint8_t> data(5);
+  BytesVector data(5);
   std::iota(data.begin(), data.end(), 0);
 
   EXPECT_NO_THROW(msg.setBytes(data));

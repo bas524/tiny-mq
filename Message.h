@@ -23,7 +23,12 @@ class Message {
 
  protected:
   Poco::Any data;
-  Poco::JSON::Object propertytoJSON() const;
+  Poco::JSON::Object propertiesToJSON() const;
+
+  Message(const Message &) = default;
+  Message(Message &&) = default;
+  Message &operator=(const Message &) = default;
+  Message &operator=(Message &&) = default;
 
  public:
   using Ptr = std::shared_ptr<Message>;
@@ -34,6 +39,8 @@ class Message {
     std::string fileFromName;
     std::string fileToName;
   };
+
+  Message() = default;
   virtual ~Message() = default;
 
   PersistentInfo persistentInfo;
@@ -45,11 +52,11 @@ class Message {
   };
 
   template <typename T, Properties::TypeIsProperty<T> = 0>
-  void setProperty(const std::string &name, const Poco::Nullable<T> &value) {
+  void setProperty(const std::string &name, const T &value) {
     _properties.template setProperty(name, value);
   }
   template <typename T, Properties::TypeIsProperty<T> = 0>
-  const Poco::Nullable<T> &getProperty(const std::string &name) const {
+  const T &getProperty(const std::string &name) const {
     return _properties.template getProperty<T>(name);
   }
   bool hasProperty(const std::string &name) const;
