@@ -114,6 +114,6 @@ TEST_F(BytesMessageTest, testToJson) {
   std::string json = ss.str();
   EXPECT_EQ(json,
             "{\n \"data\": \"AAECAwQ=\",\n \"number\": 0,\n \"persistentInfo\": {\n  \"fileFromName\": \"\",\n  \"fileToName\": \"\"\n },\n "
-            "\"properties\": {\n  \"prop-int\": 22,\n  \"prop-null-bytes\": null\n },\n \"reliability\": \"PERSISTENT\",\n \"uuid\": "
+            "\"properties\": {\n  \"prop-int\": 22,\n  \"prop-null-bytes\": null\n },\n \"reliability\": \"NOT_PERSISTENT\",\n \"uuid\": "
             "00000000-0000-0000-0000-000000000000\n}");
 }

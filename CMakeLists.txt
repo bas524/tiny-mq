@@ -88,7 +88,9 @@ add_executable(tiny_mq
                BytesMessage.h
                PocoAnyVisitor.h
                MapMessage.cpp
-               MapMessage.h)
+               MapMessage.h
+               StreamMessage.cpp
+               StreamMessage.h)
 set(POCO_LIBS
     Poco::Foundation
     Poco::Util
@@ -108,7 +110,9 @@ if (ENABLE_TESTS)
                  tests/BytesMessageTest.cpp
                  tests/BytesMessageTest.h
                  tests/MapMessageTest.cpp
-                 tests/MapMessageTest.h)
+                 tests/MapMessageTest.h
+                 tests/StreamMessageTest.cpp
+                 tests/StreamMessageTest.h)
   set(TEST_LIBS
       GTest::GTest
       GTest::Main)

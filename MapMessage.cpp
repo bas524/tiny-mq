@@ -22,4 +22,5 @@ std::vector<std::string> MapMessage::names() const {
   }
   return names;
 }
+property::ValueType MapMessage::valueType(const std::string& name) const { return _bodyProps.propertyValueType(name); }
 }  // namespace tiny_mq

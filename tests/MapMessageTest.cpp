@@ -57,7 +57,7 @@ TEST_F(MapMessageTest, testToJson) {
   EXPECT_EQ(json,
             "{\n \"data\": {\n  \"val-int\": 33,\n  \"val-null-bytes\": null\n },\n \"number\": 0,\n \"persistentInfo\": {\n  \"fileFromName\": "
             "\"\",\n  \"fileToName\": \"\"\n },\n \"properties\": {\n  \"prop-int\": 22,\n  \"prop-null-bytes\": null\n },\n \"reliability\": "
-            "\"PERSISTENT\",\n \"uuid\": 00000000-0000-0000-0000-000000000000\n}");
+            "\"NOT_PERSISTENT\",\n \"uuid\": 00000000-0000-0000-0000-000000000000\n}");
 }
 TEST_F(MapMessageTest, testSendRecvCloneMapMessage) {
   Destination::Ptr destination = _exchange->create(tiny_mq::destination::Queue, "testSendRecvCloneMapMessage");
@@ -96,14 +96,23 @@ TEST_F(MapMessageTest, testSendRecvCloneMapMessage) {
   MapMessage::Ptr pmessage1 = Message::As<MapMessage>(consumer->recv());
   EXPECT_NE(pmessage1, nullptr);
 
+  EXPECT_EQ(pmessage1->valueType("boolean"), tiny_mq::property::BOOLEAN_TYPE);
   EXPECT_FALSE(pmessage1->get<Bool>("boolean").value());
+  EXPECT_EQ(pmessage1->valueType("byte"), tiny_mq::property::BYTE_TYPE);
   EXPECT_EQ(pmessage1->get<Byte>("byte").value(), 127);
+  EXPECT_EQ(pmessage1->valueType("char"), tiny_mq::property::CHAR_TYPE);
   EXPECT_EQ(pmessage1->get<Char>("char").value(), 'a');
+  EXPECT_EQ(pmessage1->valueType("short"), tiny_mq::property::SHORT_TYPE);
   EXPECT_EQ(pmessage1->get<Short>("short").value(), 32000);
+  EXPECT_EQ(pmessage1->valueType("int"), tiny_mq::property::INTEGER_TYPE);
   EXPECT_EQ(pmessage1->get<Int>("int").value(), 6789999);
+  EXPECT_EQ(pmessage1->valueType("long"), tiny_mq::property::LONG_TYPE);
   EXPECT_EQ(pmessage1->get<Long>("long").value(), 0xFFFAAA33345LL);
+  EXPECT_EQ(pmessage1->valueType("float"), tiny_mq::property::FLOAT_TYPE);
   EXPECT_EQ(pmessage1->get<Float>("float").value(), 0.000012F);
+  EXPECT_EQ(pmessage1->valueType("double"), tiny_mq::property::DOUBLE_TYPE);
   EXPECT_EQ(pmessage1->get<Double>("double").value(), 64.54654);
+  EXPECT_EQ(pmessage1->valueType("bytes"), tiny_mq::property::BYTE_ARRAY_TYPE);
   EXPECT_EQ(pmessage1->get<Bytes>("bytes").value(), data);
 
   MapMessage::Ptr clonedMessage = Message::As<MapMessage>(pmessage1->copy());

@@ -21,11 +21,12 @@ class MapMessage : public Message {
   }
   template <typename T>
   std::enable_if_t<property::IsValidProperty<T>, const T &> get(const std::string &name) const {
-    return _bodyProps.template getProperty<T>(name);
+    return _bodyProps.template property<T>(name);
   }
   bool has(const std::string &name) const;
   bool empty() const;
   std::vector<std::string> names() const;
+  property::ValueType valueType(const std::string &name) const;
   void clearData() override;
   Poco::JSON::Object toJSON() const override;
   Message::Ptr copy() const override;

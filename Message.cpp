@@ -9,6 +9,7 @@ namespace tiny_mq {
 
 bool Message::isPersistent() const { return reliability == PERSISTENT; }
 bool Message::hasProperty(const std::string& name) const { return _properties.hasProperty(name); }
+property::ValueType Message::propertyValueType(const std::string& name) const { return _properties.propertyValueType(name); }
 void Message::clearData() { data = {}; }
 Poco::JSON::Object Message::propertiesToJSON() const {
   Poco::JSON::Object json;

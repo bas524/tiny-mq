@@ -34,7 +34,7 @@ class Message {
   using Ptr = std::shared_ptr<Message>;
   Poco::UUID uuid;
   enum Reliability { NOT_PERSISTENT = 0, PERSISTENT };
-  Reliability reliability;
+  Reliability reliability = NOT_PERSISTENT;
   struct PersistentInfo {
     std::string fileFromName;
     std::string fileToName;
@@ -56,10 +56,11 @@ class Message {
     _properties.template setProperty(name, value);
   }
   template <typename T, Properties::TypeIsProperty<T> = 0>
-  const T &getProperty(const std::string &name) const {
-    return _properties.template getProperty<T>(name);
+  const T &property(const std::string &name) const {
+    return _properties.template property<T>(name);
   }
   bool hasProperty(const std::string &name) const;
+  property::ValueType propertyValueType(const std::string &name) const;
   virtual void clearData();
   virtual Poco::JSON::Object toJSON() const = 0;
   virtual Message::Ptr copy() const = 0;
