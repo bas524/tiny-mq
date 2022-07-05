@@ -200,8 +200,9 @@ int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
   }
-  if (argc == 2 && std::string(argv[1]) == "test-mode") {
-    for (size_t i = 0; i < strlen("test-mode"); ++i) {
+  const size_t testModeSz = strlen("--test-mode");
+  if (std::strncmp(argv[1], "--test-mode", testModeSz) == 0) {
+    for (size_t i = 0; i < testModeSz; ++i) {
       argv[1][i] = ' ';
     }
     ::testing::InitGoogleTest(&argc, argv);
