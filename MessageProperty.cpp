@@ -123,21 +123,39 @@ std::string getValueTypeName(ValueType type) {
     case UNKNOWN_TYPE:
       return "UNKNOWN";
   }
+  return {"UNKNOWN"};
 }
+ValueType getValueTypeFromString(const std::string& typeName) {
+  if (typeName == "NULL") return NULL_TYPE;
+  if (typeName == "BOOLEAN") return BOOLEAN_TYPE;
+  if (typeName == "BYTE") return BYTE_TYPE;
+  if (typeName == "CHAR") return CHAR_TYPE;
+  if (typeName == "SHORT") return SHORT_TYPE;
+  if (typeName == "INTEGER") return INTEGER_TYPE;
+  if (typeName == "LONG") return LONG_TYPE;
+  if (typeName == "DOUBLE") return DOUBLE_TYPE;
+  if (typeName == "FLOAT") return FLOAT_TYPE;
+  if (typeName == "STRING") return STRING_TYPE;
+  if (typeName == "BYTE_ARRAY") return BYTE_ARRAY_TYPE;
+  return UNKNOWN_TYPE;
+}
+
 }  // namespace property
+
 bool Properties::hasProperty(const std::string& name) const { return _properties.find(name) != _properties.end(); }
 const Properties::PropertyMap& Properties::raw() const { return _properties; }
 void Properties::clear() { _properties.clear(); }
 Poco::JSON::Object Properties::toJSON() const {
   Poco::JSON::Object properties;
-  Poco::Dynamic::Var value;
+  Poco::JSON::Object value;
   Poco::AnyVisitor visitor;
 
   auto valueExtractor = [&value](const auto& propValue) {
+    value.set("type", property::getValueTypeName(property::getValueType(propValue)));
     if (!propValue.isNull()) {
-      value = propValue.value();
+      value.set("value", propValue.value());
     } else {
-      value = {};
+      value.set("value", Poco::Dynamic::Var{});  // serializes as JSON null
     }
   };
 
@@ -158,6 +176,59 @@ Poco::JSON::Object Properties::toJSON() const {
     }
   }
   return properties;
+}
+
+void Properties::fromJSON(const Poco::JSON::Object& object) {
+  auto properties = object.getNames();
+  for (auto property : properties) {
+    auto propObj = object.getObject(property);
+    if (!propObj.isNull()) {
+      property::ValueType type = property::getValueTypeFromString(propObj->getValue<property::raw_type::string>("type"));
+      switch (type) {
+        case property::BOOLEAN_TYPE: {
+          setProperty(std::move(property), property::Bool(propObj->getValue<property::raw_type::boolean>("value")));
+        } break;
+        case property::BYTE_TYPE: {
+          setProperty(std::move(property), property::Byte(propObj->getValue<property::raw_type::byte>("value")));
+        } break;
+        case property::CHAR_TYPE: {
+          setProperty(std::move(property), property::Char(propObj->getValue<property::raw_type::character>("value")));
+        } break;
+        case property::SHORT_TYPE: {
+          setProperty(std::move(property), property::Short(propObj->getValue<property::raw_type::short_integer>("value")));
+        } break;
+        case property::INTEGER_TYPE: {
+          setProperty(std::move(property), property::Int(propObj->getValue<property::raw_type::integer>("value")));
+        } break;
+        case property::LONG_TYPE: {
+          setProperty(std::move(property), property::Long(propObj->getValue<property::raw_type::long_integer>("value")));
+        } break;
+        case property::STRING_TYPE: {
+          setProperty(std::move(property), property::String(propObj->getValue<property::raw_type::string>("value")));
+        } break;
+        case property::FLOAT_TYPE: {
+          setProperty(std::move(property), property::Float(propObj->getValue<property::raw_type::floating_point>("value")));
+        } break;
+        case property::DOUBLE_TYPE: {
+          setProperty(std::move(property), property::Double(propObj->getValue<property::raw_type::double_point>("value")));
+        } break;
+        case property::BYTE_ARRAY_TYPE: {
+          auto arr = propObj->getArray("value");
+          if (!arr.isNull()) {
+            BytesVector data(arr->size());
+            for (size_t i = 0; i < arr->size(); ++i) {
+              data[i] = arr->getElement<property::raw_type::byte>(i);
+            }
+            if (!data.empty()) {
+              setProperty(std::move(property), property::Bytes(std::move(data)));
+            }
+          }
+        } break;
+        default:
+          break;
+      }
+    }
+  }
 }
 
 property::ValueType Properties::propertyValueType(const std::string& name) const {
@@ -236,6 +307,59 @@ Poco::JSON::Object PropertiesStream::toJSON() const {
   }
   properties.set("stream", stream);
   return properties;
+}
+
+void PropertiesStream::fromJSON(const Poco::JSON::Object& object) {
+  auto stream = object.getArray("stream");
+  if (!stream.isNull()) {
+    for (size_t i = 0; i < stream->size(); ++i) {
+      auto o = stream->getObject(i);
+      property::ValueType type = property::getValueTypeFromString(o->getValue<property::raw_type::string>("type"));
+      switch (type) {
+        case property::BOOLEAN_TYPE: {
+          write(o->getValue<property::raw_type::boolean>("value"));
+        } break;
+        case property::BYTE_TYPE: {
+          write(o->getValue<property::raw_type::byte>("value"));
+        } break;
+        case property::CHAR_TYPE: {
+          write(o->getValue<property::raw_type::character>("value"));
+        } break;
+        case property::SHORT_TYPE: {
+          write(o->getValue<property::raw_type::short_integer>("value"));
+        } break;
+        case property::INTEGER_TYPE: {
+          write(o->getValue<property::raw_type::integer>("value"));
+        } break;
+        case property::LONG_TYPE: {
+          write(o->getValue<property::raw_type::long_integer>("value"));
+        } break;
+        case property::STRING_TYPE: {
+          write(o->getValue<property::raw_type::string>("value"));
+        } break;
+        case property::FLOAT_TYPE: {
+          write(o->getValue<property::raw_type::floating_point>("value"));
+        } break;
+        case property::DOUBLE_TYPE: {
+          write(o->getValue<property::raw_type::double_point>("value"));
+        } break;
+        case property::BYTE_ARRAY_TYPE: {
+          auto arr = o->getArray("value");
+          if (!arr.isNull()) {
+            BytesVector data(arr->size());
+            for (size_t j = 0; j < arr->size(); ++j) {
+              data[j] = arr->getElement<property::raw_type::byte>(j);
+            }
+            if (!data.empty()) {
+              write(data);
+            }
+          }
+        } break;
+        default:
+          break;
+      }
+    }
+  }
 }
 bool PropertiesStream::empty() const { return _properties.empty(); }
 void PropertiesStream::reset() { offset = _properties.begin(); }

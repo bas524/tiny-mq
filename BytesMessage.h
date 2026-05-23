@@ -10,12 +10,21 @@
 
 namespace tiny_mq {
 class BytesMessage : public Message {
+  BytesVector _data;
+
  public:
   using Ptr = std::shared_ptr<BytesMessage>;
   BytesMessage() = default;
-  explicit BytesMessage(const BytesVector &bytes);
-  explicit BytesMessage(const int8_t *bytes, size_t size);
+  BytesMessage(Poco::UUID uuid_, Message::Reliability reliability_ = Message::NOT_PERSISTENT);
+  explicit BytesMessage(Poco::UUID uuid_, BytesVector bytes_, Message::Reliability reliability_ = Message::NOT_PERSISTENT);
+  explicit BytesMessage(Poco::UUID uuid_, const int8_t *bytes_, size_t size_, Message::Reliability reliability_ = Message::NOT_PERSISTENT);
   ~BytesMessage() override = default;
+
+  BytesMessage(const BytesMessage &) = default;
+  BytesMessage(BytesMessage &&) = default;
+  BytesMessage &operator=(const BytesMessage &) = default;
+  BytesMessage &operator=(BytesMessage &&) = default;
+
   const BytesVector &bytes() const;
   void setBytes(const BytesVector &bytes);
   void setBytes(const int8_t *bytes, size_t size);
@@ -25,6 +34,10 @@ class BytesMessage : public Message {
   size_t dataSize() const;
   Poco::JSON::Object toJSON() const override;
   Message::Ptr copy() const override;
+  Message::Type type() const override;
+
+  BytesVector dataAsBytes() const override;
+  void setDataFromBytes(const BytesVector &bytes) override;
 };
 }  // namespace tiny_mq
 

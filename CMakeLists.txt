@@ -1,11 +1,16 @@
-cmake_minimum_required(VERSION 3.12...3.13)
+cmake_minimum_required(VERSION 3.13)
 
 project(tiny_mq
         VERSION 0.1
-        DESCRIPTION "C++ MQ-tiny_mq")
+        DESCRIPTION "C++ tiny message queue")
 
 
 option(ENABLE_TESTS "Enable tests" ON)
+# Force CMake to prefer CONFIG packages (vcpkg) over Find*.cmake
+
+set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)
+
+set(CMAKE_SUPPRESS_DEVELOPER_WARNINGS ON)
 
 if (POCO_ROOT_DIR)
   list(APPEND CMAKE_MODULE_PATH "${POCO_ROOT_DIR}/lib/cmake/Poco")
@@ -31,10 +36,10 @@ if (MSVC)
   endif ()
 endif ()
 if ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang" OR "${CMAKE_CXX_COMPILER_ID}" MATCHES "GNU")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wextra -Wshadow")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Werror -Wextra -Wshadow -Wno-deprecated-builtins")
 endif ()
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
@@ -63,6 +68,7 @@ set(EXTERNAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external")
 
 add_subdirectory(external)
 include_directories(external/concurrent_queue)
+include_directories(external/btree/include)
 add_executable(tiny_mq
                main.cpp
                Exchange.cpp
@@ -90,7 +96,26 @@ add_executable(tiny_mq
                MapMessage.cpp
                MapMessage.h
                StreamMessage.cpp
-               StreamMessage.h)
+               StreamMessage.h
+               ObjectMessage.cpp
+               ObjectMessage.h
+               Session.cpp
+               Session.h
+               Connection.cpp
+               Connection.h
+               ConnectionFactory.cpp
+               ConnectionFactory.h
+               HashHelper.h
+               LinearStorage.cpp
+               LinearStorage.h
+               ConcurrentLinearStorage.cpp
+               ConcurrentLinearStorage.h
+               TransactionBuffer.cpp
+               TransactionBuffer.h
+               Selector.cpp
+               Selector.h
+               )
+
 set(POCO_LIBS
     Poco::Foundation
     Poco::Util
@@ -103,6 +128,7 @@ if (ENABLE_TESTS)
   target_compile_definitions(tiny_mq PUBLIC ENABLE_TESTS)
   target_include_directories(tiny_mq PUBLIC tests ${CMAKE_CURRENT_LIST_DIR})
   target_sources(tiny_mq PUBLIC
+                 tests/TestHelper.h
                  tests/SimpleTest.cpp
                  tests/SimpleTest.h
                  tests/TextMessageTest.cpp
@@ -112,13 +138,39 @@ if (ENABLE_TESTS)
                  tests/MapMessageTest.cpp
                  tests/MapMessageTest.h
                  tests/StreamMessageTest.cpp
-                 tests/StreamMessageTest.h)
+                 tests/StreamMessageTest.h
+                 tests/TransactionTest.cpp
+                 tests/TransactionTest.h
+                 tests/LinearStorageTest.cpp
+                 tests/LinearStorageTest.h
+                 tests/PersistentTransactionTest.cpp
+                 tests/PersistentTransactionTest.h
+                 tests/TopicTest.cpp
+                 tests/TopicTest.h
+                 tests/ClientAckTest.cpp
+                 tests/ClientAckTest.h
+                 tests/BenchmarkTest.cpp
+                 tests/BenchmarkTest.h
+                 tests/SelectorTest.cpp
+                 tests/SelectorTest.h
+                 tests/DurableSubscriberTest.cpp
+                 tests/DurableSubscriberTest.h
+                 tests/MessageHeadersTest.cpp
+                 tests/MessageHeadersTest.h
+                 tests/ObjectMessageTest.cpp
+                 tests/ObjectMessageTest.h
+                 tests/DisableHeadersTest.cpp
+                 tests/DisableHeadersTest.h
+                 tests/DupsOkAckTest.cpp
+                 tests/DupsOkAckTest.h
+                 )
   set(TEST_LIBS
-      GTest::GTest
-      GTest::Main)
+      GTest::gtest
+      GTest::gtest_main
+      benchmark::benchmark)
 endif ()
 
-target_link_libraries(tiny_mq PRIVATE ${CMAKE_DL_LIBS} ${POCO_LIBS} ${TEST_LIBS} phmap nonstd::span-lite)
+target_link_libraries(tiny_mq PRIVATE ${CMAKE_DL_LIBS} ${POCO_LIBS} ${TEST_LIBS} phmap::phmap span::span)
 #[[upmq::protocol protobuf::libprotobuf]]
 if (NOT WIN32)
   target_link_libraries(tiny_mq PRIVATE Threads::Threads)

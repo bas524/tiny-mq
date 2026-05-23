@@ -1,4 +1,4 @@
-find_package(Protobuf 3.3.0 QUIET REQUIRED)
+find_package(Protobuf QUIET REQUIRED)
 
 if (Protobuf_FOUND)
   set_target_properties(protobuf::libprotobuf
