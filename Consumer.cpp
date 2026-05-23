@@ -3,35 +3,57 @@
 //
 
 #include "Consumer.h"
+#include "Producer.h"
 #include "Destination.h"
+#include "Session.h"
 #include <Poco/File.h>
 #include <Poco/FileStream.h>
 #include <Poco/Format.h>
 #include <Poco/UUIDGenerator.h>
+#include <Poco/StringTokenizer.h>
+#include <limits>
+#include <utility>
 #include "LogTracer.h"
+
 namespace tiny_mq {
-Consumer::Consumer(Destination& destination, std::shared_ptr<QueueT> queue, const Poco::UUID& uuid, Poco::Path path)
+Consumer::Consumer(Destination& destination, Session& session, std::shared_ptr<QueueT> queue, const Poco::UUID& uuid, Poco::Path path, std::shared_ptr<linear_storage::ConcurrentLinearStorage> storage, std::shared_ptr<TransactionBuffer> transactionBuffer, std::shared_ptr<Selector> selector)
     : _uuid(uuid),
       _path(std::move(path)),
       _destination(destination),
       _queue(std::move(queue)),
       _token(*_queue),
-      _logger(Poco::Logger::get(Poco::format("tiny_mq.consumer.%s", _uuid.toString()))) {
+      _logger(Poco::Logger::get(Poco::format("tiny_mq.consumer.%s", _uuid.toString()))),
+      _session(session),
+      _storage(std::move(storage)),
+      _transactionBuffer(transactionBuffer),
+      _selector(std::move(selector)) {
   TRACE(_logger);
   Poco::File dir(_path);
   dir.createDirectories();
-  _sent = _path;
-  _sent.append("sent").makeDirectory();
-  dir = _sent;
-  dir.createDirectories();
-  poco_information(_logger, Poco::format("create consumer[%s] for %s", _uuid.toString(), _destination.uri()));
+  {
+    Poco::FileOutputStream fo(_path.toString() + "/meta.info");
+    fo << "consumer: " << _uuid.toString() << '\n';
+    fo << "destination: " << _destination.get().name() << "[" << _destination.get().typeName() << "}" << '\n';
+    fo << "session: " << _session.get().id() << '\n';
+  }
+
+  if (_session.get().acknowledgeMode() == Session::AcknowledgeMode::SESSION_TRANSACTED) {
+    _transactQueue = std::make_shared<QueueT>();
+  }
+  poco_information(_logger.get(), Poco::format("create consumer[%s] for %s", _uuid.toString(), _destination.get().uri()));
 }
+
 Consumer::~Consumer() {
   TRACE(_logger);
-  _needToStop = true;
-  poco_information(_logger, Poco::format("destroy consumer[%s] for %s", _uuid.toString(), _destination.uri()));
-  _messages.clear();
+  flushPendingAcks();  // DUPS_OK: drain any batched acknowledgements before teardown
+  try {
+    rollback();
+  } catch (...) {
+    poco_error(_logger.get(), "rollback() threw in destructor — ignoring");
+  }
+  poco_information(_logger.get(), Poco::format("destroy consumer[%s] for %s", _uuid.toString(), _destination.get().uri()));
 }
+
 const Poco::UUID& Consumer::id() const {
   TRACE(_logger);
   return _uuid;
@@ -39,74 +61,203 @@ const Poco::UUID& Consumer::id() const {
 Message::Ptr Consumer::recv(int64_t usec_timeout) {
   TRACE(_logger);
   Message::Ptr message;
-  do {
-    message.reset();
-    if (_needToStop) {
-      break;
-    }
-  } while (!_queue->wait_dequeue_timed(_token, message, usec_timeout));
+  _queue->wait_dequeue_timed(_token, message, usec_timeout);
+
   if (message) {
     if (message->isPersistent()) {
-      Poco::File fmsg(message->persistentInfo.fileFromName);
-      fmsg.renameTo(message->persistentInfo.fileToName);
+      if (!message->_cachedStorageBytes.empty()) {
+        // Fast path: bytes were cached by preparePush — skip storage round-trips.
+        const auto& cached = message->_cachedStorageBytes;
+        BytesVector bytesData(cached.size() > 1 ? cached.begin() + 1 : cached.end(),
+                              cached.end());
+        message->fromBytes(bytesData);
+        message->_cachedStorageBytes.clear();
+      } else {
+        // Restart path: read from storage (no in-process cache available).
+        auto record = _storage->record(message->uuid);
+        if (record.tomId != std::numeric_limits<Poco::UInt32>::max()) {
+          auto data = _storage->data(record);
+          BytesVector bytesData(data.size() > 1 ? data.begin() + 1 : data.end(), data.end());
+          message->fromBytes(bytesData);
+        }
+      }
     }
-    poco_debug(
-        _logger,
-        Poco::format("recv message[%?d][%s] from %s://%s", message->_number, message->uuid.toString(), _destination.typeName(), _destination.name()));
+
+    // In SESSION_TRANSACTED mode, track each received message so rollback() can
+    // redeliver and commit() can acknowledge.  Share the pointer — no copy needed.
+    if (_session.get().acknowledgeMode() == Session::AcknowledgeMode::SESSION_TRANSACTED
+        && _transactQueue) {
+      _transactQueue->enqueue(message);
+    }
+
+    poco_debug(_logger.get(),
+               Poco::format("recv message[%?d][%s] from %s://%s",
+                            message->_number,
+                            message->uuid.toString(),
+                            _destination.get().typeName(),
+                            _destination.get().name()));
   }
   return message;
 }
-Message::Ptr Consumer::preparePush(int64_t number, const Message& message) {
+Message::Ptr Consumer::preparePush(int64_t number, const Producer& producer, const Message& message) {
   TRACE(_logger);
 
   Message::Ptr copyMessage = message.copy();
   if (copyMessage->uuid.isNull()) {
-    copyMessage->uuid = _uuidGenerator.createRandom();
+    copyMessage->uuid = _session.get().createRandomUUID();
   }
+
   copyMessage->_number = number;
+  
+  // Check if this is a transactional message
+  std::string transactionId = producer.transactionId();
+  bool isTransactional = !transactionId.empty();
+  
   if (copyMessage->isPersistent()) {
-    std::string uuid = copyMessage->uuid.toString();
-    copyMessage->persistentInfo.fileFromName = Poco::format("%s%?d.%s.message", _path.toString(), copyMessage->_number, uuid);
-    copyMessage->persistentInfo.fileToName = Poco::format("%s%?d.%s.message", _sent.toString(), copyMessage->_number, uuid);
-    Poco::FileOutputStream fmsg(copyMessage->persistentInfo.fileFromName);
-    const auto& data = Poco::RefAnyCast<std::string>(copyMessage->data);
-    fmsg.write(data.c_str(), data.size());
-    _messages.emplace(uuid, copyMessage->persistentInfo.fileFromName);
+    // Stored format: [1-byte type][toBytes() payload]
+    // The type byte lets replayStoredMessages() recreate the right shell on restart.
+    auto bytesData = copyMessage->toBytes();
+    std::vector<char> data;
+    data.reserve(1 + bytesData.size());
+    data.push_back(static_cast<char>(copyMessage->type()));
+    data.insert(data.end(), bytesData.begin(), bytesData.end());
+
+    // Cache the bytes so recv() can skip the storage read round-trips.
+    copyMessage->_cachedStorageBytes = data;
+
+    if (isTransactional && _transactionBuffer) {
+      _transactionBuffer->addMessage(transactionId, copyMessage->uuid, data);
+      poco_debug(_logger.get(),
+                Poco::format("Buffered message[%s] in transaction %s",
+                            copyMessage->uuid.toString(), transactionId));
+    } else {
+      auto rec = _storage->append(copyMessage->uuid, data);
+      // Cache the record location so acknowledgeOn() can skip the UUID lookup.
+      copyMessage->_storageTomId  = rec.tomId;
+      copyMessage->_storageOffset = rec.offset;
+    }
   }
+  
   return copyMessage;
 }
-void Consumer::push(int64_t number, const QueueT::producer_token_t& token, const Message& message) {
+void Consumer::push(int64_t number, const Producer& producer, const Message& message) {
   TRACE(_logger);
-  _queue->enqueue(token, preparePush(number, message));
-  poco_debug(_logger,
-             Poco::format("save message[%?d][%s] to %s://%s", number, message.uuid.toString(), _destination.typeName(), _destination.name()));
+  if (_selector && !_selector->matches(message)) return;
+  Message::Ptr msg = preparePush(number, producer, message);
+  if (producer.transactionId().empty()) {
+    // Producer token is only valid for queue-type destinations; use tokenless
+    // enqueue for topics where no token was created.
+    if (producer._token) {
+      _queue->enqueue(producer.token(), std::move(msg));
+    } else {
+      _queue->enqueue(std::move(msg));
+    }
+  } else {
+    producer.transactQueue().enqueue(std::move(msg));
+  }
+  poco_debug(
+      _logger.get(),
+      Poco::format("save message[%?d][%s] to %s://%s", number, message.uuid.toString(), _destination.get().typeName(), _destination.get().name()));
 }
-void Consumer::push(int64_t number, const Message& message) {
+
+void Consumer::commit() {
   TRACE(_logger);
-  _queue->enqueue(preparePush(number, message));
-  poco_debug(_logger,
-             Poco::format("save message[%?d][%s] to %s://%s", number, message.uuid.toString(), _destination.typeName(), _destination.name()));
+  if (!_transactQueue) return;  // not in SESSION_TRANSACTED mode
+  Message::Ptr msg;
+  while (_transactQueue->try_dequeue(msg)) {
+    if (msg && msg->isPersistent()) {
+      if (msg->_storageTomId != std::numeric_limits<Poco::UInt32>::max()) {
+        // Fast path: use cached record location, fire-and-forget.
+        linear_storage::Record rec;
+        rec.tomId  = msg->_storageTomId;
+        rec.offset = msg->_storageOffset;
+        msg->uuid.copyTo(rec.header.uuid.data());  // let remove() drop the index entry
+        _storage->removeAsync(rec);
+      } else {
+        // Restart / transacted path: lookup then remove asynchronously.
+        auto record = _storage->record(msg->uuid);
+        if (record.tomId != std::numeric_limits<Poco::UInt32>::max()) {
+          _storage->removeAsync(record);
+        }
+      }
+    }
+  }
+  // Queue is now empty; reuse the existing object instead of reallocating.
 }
+
+void Consumer::rollback() {
+  TRACE(_logger);
+  if (!_transactQueue) return;  // not in SESSION_TRANSACTED mode
+  Message::Ptr msg;
+  do {
+    msg.reset();
+    _transactQueue->wait_dequeue_timed(msg, 1000);
+    if (msg != nullptr) {
+      _queue->enqueue(msg);
+      poco_trace(_logger.get(),
+                 Poco::format("rollback message[%?d][%s] to %s://%s",
+                              msg->number(), msg->uuid.toString(),
+                              _destination.get().typeName(), _destination.get().name()));
+    }
+  } while (msg != nullptr);
+  // Queue drained in place; no reallocation needed.
+}
+
+
+void Consumer::flushPendingAcks() {
+  TRACE(_logger);
+  for (const auto& rec : _pendingAcks) {
+    _storage->removeAsync(rec);
+  }
+  _pendingAcks.clear();
+}
+
+QueueT& Consumer::transactQueue() const { return *_transactQueue; }
+
+Destination& Consumer::destination() const { return _destination.get(); }
+
 moodycamel::BlockingConcurrentQueue<Message::Ptr>::producer_token_t Consumer::getProducerToken() {
   TRACE(_logger);
   return QueueT::producer_token_t(*_queue);
 }
-void Consumer::stop() {
-  TRACE(_logger);
-  _needToStop = true;
-}
+const Session& Consumer::session() const { return _session; }
+
 void Consumer::acknowledgeOn(const Message& message) {
   TRACE(_logger);
-  std::string uuid = message.uuid.toString();
-  if (message.isPersistent()) {
-    _messages.erase(uuid);
-    std::string fname = message.persistentInfo.fileToName;
-    if (message.persistentInfo.fileToName.empty()) {
-      fname = Poco::format("%s%?d.%s.message", _sent.toString(), message._number, uuid);
+  const auto mode = _session.get().acknowledgeMode();
+  if (mode != Session::AcknowledgeMode::SESSION_TRANSACTED) {
+    if (message.isPersistent()) {
+      // Resolve the storage record (cached fast path, else UUID lookup).
+      linear_storage::Record rec;
+      if (message._storageTomId != std::numeric_limits<Poco::UInt32>::max()) {
+        rec.tomId  = message._storageTomId;
+        rec.offset = message._storageOffset;
+        // Carry the uuid so remove() can drop the index entry without an extra
+        // on-disk header read on this hot path.
+        message.uuid.copyTo(rec.header.uuid.data());
+      } else {
+        rec = _storage->record(message.uuid);
+      }
+      if (rec.tomId != std::numeric_limits<Poco::UInt32>::max()) {
+        if (mode == Session::AcknowledgeMode::DUPS_OK_ACKNOWLEDGE) {
+          // Lazy/batched: accumulate and flush at the batch threshold. On crash
+          // before flush, unremoved records replay as duplicates — the mode's contract.
+          constexpr size_t kDupsOkBatch = 100;
+          _pendingAcks.push_back(rec);
+          if (_pendingAcks.size() >= kDupsOkBatch) {
+            flushPendingAcks();
+          }
+        } else {
+          _storage->removeAsync(rec);
+        }
+      }
     }
-    Poco::File fmsg(fname);
-    fmsg.remove();
   }
-  poco_debug(_logger, Poco::format("ack on message[%?d][%s] to %s://%s", message._number, uuid, _destination.typeName(), _destination.name()));
+  // SESSION_TRANSACTED: recv() already tracks messages in _transactQueue;
+  // acknowledgement happens implicitly on session.commit().
+  poco_debug(_logger.get(),
+             Poco::format("ack on message[%?d][%s] to %s://%s",
+                          message._number, message.uuid.toString(),
+                          _destination.get().typeName(), _destination.get().name()));
 }
 }  // namespace tiny_mq

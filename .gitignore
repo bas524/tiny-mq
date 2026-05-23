@@ -1,7 +1,13 @@
 /cmake-build-debug/
 /cmake-build-relwithdebinfo/
+/cmake-build-vsc/
 /.idea/
 /external/parallel-hashmap/.github/
 /external/span-lite/.github/
 /.vscode/
 /build/
+/vcpkg/
+CMakeLists.txt.user
+# Runtime storage / benchmark data created by tests
+/tiny-mq/
+/bench-mq/

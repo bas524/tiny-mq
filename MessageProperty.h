@@ -8,7 +8,7 @@
 #include <Poco/Nullable.h>
 #include <Poco/Any.h>
 #include <type_traits>
-#include <map>
+#include <unordered_map>
 #include <Poco/JSON/Object.h>
 namespace tiny_mq {
 
@@ -132,10 +132,11 @@ ValueType getValueType(const T &) {
 }
 
 std::string getValueTypeName(ValueType type);
+ValueType getValueTypeFromString(const std::string &typeName);
 }  // namespace property
 
 class Properties {
-  using PropertyMap = std::map<std::string, Poco::Any>;
+  using PropertyMap = std::unordered_map<std::string, Poco::Any>;
   PropertyMap _properties;
 
  public:
@@ -143,9 +144,10 @@ class Properties {
   using TypeIsProperty = std::enable_if_t<property::IsValidProperty<T>, int>;
 
   template <typename T, TypeIsProperty<T> = 0>
-  void setProperty(const std::string &name, const T &value) {
-    _properties.template emplace(name, Poco::Any(value));
+  void setProperty(std::string name, T value) {
+    _properties.emplace(std::move(name), Poco::Any(std::move(value)));
   }
+
   template <typename T, TypeIsProperty<T> = 0>
   const T &property(const std::string &name) const {
     return Poco::RefAnyCast<T>(_properties.at(name));
@@ -155,6 +157,7 @@ class Properties {
   const PropertyMap &raw() const;
   void clear();
   Poco::JSON::Object toJSON() const;
+  void fromJSON(const Poco::JSON::Object &object);
 };
 
 class PropertiesStream {
@@ -182,6 +185,7 @@ class PropertiesStream {
   bool empty() const;
   void clear();
   Poco::JSON::Object toJSON() const;
+  void fromJSON(const Poco::JSON::Object &object);
 };
 }  // namespace tiny_mq
 #endif  // TINY_MQ__MESSAGEPROPERTY_H_

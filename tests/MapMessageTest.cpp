@@ -4,6 +4,8 @@
 
 #include "MapMessageTest.h"
 #include "MapMessage.h"
+#include "Session.h"
+#include "Connection.h"
 
 using tiny_mq::BytesVector;
 using tiny_mq::Consumer;
@@ -11,6 +13,8 @@ using tiny_mq::Destination;
 using tiny_mq::MapMessage;
 using tiny_mq::Message;
 using tiny_mq::Producer;
+using tiny_mq::Session;
+using tiny_mq::Connection;
 using tiny_mq::property::Bool;
 using tiny_mq::property::Byte;
 using tiny_mq::property::Bytes;
@@ -49,26 +53,61 @@ TEST_F(MapMessageTest, testToJson) {
   EXPECT_NO_THROW(msg.set("val-int", tiny_mq::property::Int(33)));
   EXPECT_NO_THROW(msg.set("val-null-bytes", tiny_mq::property::Bytes()));
 
-  Poco::JSON::Object object;
-  EXPECT_NO_THROW(object = msg.toJSON());
-  std::stringstream ss;
-  EXPECT_NO_THROW(object.stringify(ss, 1));
-  std::string json = ss.str();
-  EXPECT_EQ(json,
-            "{\n \"data\": {\n  \"val-int\": 33,\n  \"val-null-bytes\": null\n },\n \"number\": 0,\n \"persistentInfo\": {\n  \"fileFromName\": "
-            "\"\",\n  \"fileToName\": \"\"\n },\n \"properties\": {\n  \"prop-int\": 22,\n  \"prop-null-bytes\": null\n },\n \"reliability\": "
-            "\"NOT_PERSISTENT\",\n \"uuid\": 00000000-0000-0000-0000-000000000000\n}");
+  std::string json;
+  EXPECT_NO_THROW(json = tiny_mq::message::dump(msg));
+  const std::string s = R"({
+ "data": {
+  "val-int": {
+   "type": "INTEGER",
+   "value": 33
+  },
+  "val-null-bytes": {
+   "type": "BYTE_ARRAY",
+   "value": null
+  }
+ },
+ "number": 0,
+ "persistentInfo": {
+  "payload": {
+   "dataPath": "",
+   "propertiesPath": ""
+  },
+  "sent": {
+   "dataPath": "",
+   "propertiesPath": ""
+  },
+  "transaction": {
+   "dataPath": "",
+   "propertiesPath": ""
+  }
+ },
+ "properties": {
+  "prop-int": {
+   "type": "INTEGER",
+   "value": 22
+  },
+  "prop-null-bytes": {
+   "type": "BYTE_ARRAY",
+   "value": null
+  }
+ },
+ "reliability": "NOT_PERSISTENT",
+ "uuid": "00000000-0000-0000-0000-000000000000"
+})";
+  EXPECT_EQ(json, s);
 }
 TEST_F(MapMessageTest, testSendRecvCloneMapMessage) {
-  Destination::Ptr destination = _exchange->create(tiny_mq::destination::Queue, "testSendRecvCloneMapMessage");
+  Connection session_conn(*_exchange);
+  Session &session = session_conn.createSession();
+  Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, "testSendRecvCloneMapMessage");
   EXPECT_NE(destination, nullptr);
 
-  Consumer::Ptr consumer = destination->createConsumer();
+  Consumer::Ptr consumer = session.createConsumer(destination);
   EXPECT_NE(consumer, nullptr);
-  Producer::Ptr producer = destination->createProducer();
+  Producer::Ptr producer = session.createProducer(destination);
   EXPECT_NE(producer, nullptr);
 
-  MapMessage message;
+  MapMessage message = session.createMapMessage();
 
   EXPECT_TRUE(message.names().empty());
   EXPECT_FALSE(message.has("Something"));

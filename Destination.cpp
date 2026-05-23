@@ -3,10 +3,20 @@
 //
 
 #include "Destination.h"
+#include "Session.h"
 #include "LogTracer.h"
 #include <Poco/File.h>
+#include <Poco/FileStream.h>
+#include <Poco/Exception.h>
 #include "DestinationHash.h"
+#include "TextMessage.h"
+#include "BytesMessage.h"
+#include "MapMessage.h"
+#include "StreamMessage.h"
+#include "ObjectMessage.h"
+
 namespace tiny_mq {
+
 Destination::Destination(destination::Type type, std::string name, Poco::Path path)
     : _type(type),
       _name(std::move(name)),
@@ -15,93 +25,332 @@ Destination::Destination(destination::Type type, std::string name, Poco::Path pa
       _uri(Poco::format("%s://%s", destination::TypeName(_type), _name)),
       _hash(destination::hash(_type, _name)) {
   TRACE(_logger);
+  Poco::File f(_path);
+  f.createDirectories();
+  // Deterministic storage UUID so the index file survives Exchange restarts.
+  // Derived from the destination URI (type + name) so it's unique and stable.
+  static const Poco::UUID kStorageNs("a3b4c5d6-e7f8-4a5b-8c9d-0e1f2a3b4c5d");
+  Poco::UUID storageId = Poco::UUIDGenerator::defaultGenerator().createFromName(kStorageNs, _uri);
+  _storage = std::make_shared<linear_storage::ConcurrentLinearStorage>(storageId, _path);
+  _storage->start();
 
-  if (_type == destination::Queue || _type == destination::TemporaryQueue) {
-    _queue = std::make_shared<QueueT>();
-    _defaultConsumer = Consumer::Ptr(new Consumer(*this, _queue, _uuidGenerator.createRandom(), _path));
-    _consumers.emplace(_defaultConsumer->id().toString(), _defaultConsumer);
-  }
+  _transactionBuffer = std::make_shared<TransactionBuffer>(_path, _storage);
+  _transactionBuffer->recover();
+
+  Poco::FileOutputStream fo(_path.toString() + "/meta.info");
+  fo << "destination: " << _name << '\n';
+  fo << "type: " << destination::TypeName(_type) << '\n';
+  fo << "hash: " << _hash << '\n';
 }
+
+Consumer::Ptr Destination::createDefaultConsumer(Session& session) {
+  if ((_type == destination::Queue || _type == destination::TemporaryQueue)) {
+    if (_queue == nullptr) {
+      _queue = std::make_shared<QueueT>();
+    }
+    _defaultConsumer = Consumer::Ptr(new Consumer(*this, session, _queue, session.createRandomUUID(), _path, _storage, _transactionBuffer));
+    _consumers.emplace(_defaultConsumer->id(), _defaultConsumer);
+  }
+  return _defaultConsumer;
+}
+
 void Destination::save(const Producer& producer, const Message& message) {
   TRACE(_logger);
   int64_t number = _messageCounter++;
-
+  bool queueFamily = isQueueFamily();
   for (auto& item : _consumers) {
-    if (_type == destination::Queue || _type == destination::TemporaryQueue) {
-      item.second->push(number, producer.token(), message);
-      break;
-    } else {
-      item.second->push(number, message);
+    item.second->push(number, producer, message);
+    if (queueFamily) break;
+  }
+
+  // Buffer persistent messages for offline durable subscriptions (topic-family only).
+  // Transactional messages arrive here before commit, so we skip them — they will be
+  // handled in deliverCommitted() once the producer commits.
+  if (isTopicFamily() && message.isPersistent() && producer.transactionId().empty()) {
+    for (auto& [subName, sub] : _durableSubs) {
+      if (!sub.activeConsumerUuid.isNull()) continue;  // online — already handled above
+      if (sub.selector && !sub.selector->matches(message)) continue;
+      persistToOfflineSub(sub, message);
     }
   }
 }
-Consumer::Ptr Destination::createConsumer() {
+
+namespace {
+// Factory: create an empty shell message of the given type for replay
+tiny_mq::Message::Ptr makeMessageShell(tiny_mq::Message::Type type) {
+  switch (type) {
+    case tiny_mq::Message::TEXT_MESSAGE:   return std::make_shared<tiny_mq::TextMessage>();
+    case tiny_mq::Message::BYTES_MESSAGE:  return std::make_shared<tiny_mq::BytesMessage>();
+    case tiny_mq::Message::MAP_MESSAGE:    return std::make_shared<tiny_mq::MapMessage>();
+    case tiny_mq::Message::STREAM_MESSAGE: return std::make_shared<tiny_mq::StreamMessage>();
+    case tiny_mq::Message::OBJECT_MESSAGE: return std::make_shared<tiny_mq::ObjectMessage>();
+    default: return nullptr;
+  }
+}
+}  // anonymous namespace
+
+// Replay all non-deleted records from an arbitrary storage into a queue.
+// Sets the cached-bytes and record-location fields so recv() and acknowledgeOn()
+// can use the fast (no-lookup) path.
+/*static*/ void Destination::replayFromStorage(QueueT& queue, linear_storage::ConcurrentLinearStorage& storage) {
+  auto records = storage.scan();
+  for (auto& [record, data] : records) {
+    if (data.empty()) continue;
+    auto msgType = static_cast<Message::Type>(static_cast<uint8_t>(data[0]));
+    auto shell = makeMessageShell(msgType);
+    if (!shell) continue;
+    Poco::UUID uuid;
+    uuid.copyFrom(record.header.uuid.data());
+    shell->uuid = uuid;
+    shell->reliability = Message::PERSISTENT;
+    shell->_cachedStorageBytes = data;
+    shell->_storageTomId  = record.tomId;
+    shell->_storageOffset = record.offset;
+    queue.enqueue(std::move(shell));
+  }
+}
+
+void Destination::replayStoredMessages(QueueT& queue) const {
+  replayFromStorage(queue, *_storage);
+}
+
+/*static*/ void Destination::persistToOfflineSub(DurableSubState& sub, const Message& message) {
+  auto copy = message.copy();
+  if (copy->uuid.isNull()) {
+    copy->uuid = Poco::UUIDGenerator::defaultGenerator().createRandom();
+  }
+  auto bytesData = copy->toBytes();
+  std::vector<char> data;
+  data.reserve(1 + bytesData.size());
+  data.push_back(static_cast<char>(copy->type()));
+  data.insert(data.end(), bytesData.begin(), bytesData.end());
+  sub.storage->append(copy->uuid, data);
+}
+
+Consumer::Ptr Destination::createConsumer(Session& session, std::shared_ptr<Selector> selector) {
   TRACE(_logger);
-  auto id = _uuidGenerator.createRandom();
+  auto id = session.createRandomUUID();
   Consumer::Ptr consumer;
-  std::string sid = id.toString();
   switch (_type) {
     case destination::Queue:
     case destination::TemporaryQueue: {
       if (_defaultConsumer) {
-        return Consumer::Ptr(std::move(_defaultConsumer));
+        // Remove the default consumer from the map so save() routes through the
+        // real consumer (which may have a selector).  Both consumers share _queue,
+        // so any messages already enqueued by the default consumer are still visible.
+        _consumers.erase(_defaultConsumer->id());
+        _defaultConsumer.reset();
       }
-      consumer = Consumer::Ptr(new Consumer(*this, _queue, id, _path));
+      consumer = Consumer::Ptr(new Consumer(*this, session, _queue, id, _path, _storage, _transactionBuffer, selector));
+      // Replay any messages committed in a previous Exchange lifetime
+      if (_queue) replayStoredMessages(*_queue);
     } break;
     case destination::Topic:
     case destination::TemporaryTopic:
       Poco::Path path(_path);
-      path.append(sid).makeDirectory();
-      consumer = Consumer::Ptr(new Consumer(*this, std::make_shared<QueueT>(), id, path));
+      path.append(id.toString()).makeDirectory();
+      consumer = Consumer::Ptr(new Consumer(*this, session, std::make_shared<QueueT>(), id, path, _storage, _transactionBuffer, selector));
       break;
   }
-  auto it = _consumers.emplace(sid, std::move(consumer));
+  auto it = _consumers.emplace(id, std::move(consumer));
   if (it.second) {
     return it.first->second;
   }
   return nullptr;
 }
-Producer::Ptr Destination::createProducer() {
+
+Consumer::Ptr Destination::createDurableConsumer(Session& session, const std::string& subscriptionName,
+                                                  std::shared_ptr<Selector> selector) {
+  TRACE(_logger);
+  if (!isTopicFamily()) {
+    throw Poco::RuntimeException("Durable subscribers are only supported on topic destinations");
+  }
+
+  // Get or create the durable subscription state
+  auto subIt = _durableSubs.find(subscriptionName);
+  if (subIt == _durableSubs.end()) {
+    // New subscription — create dedicated storage under the topic path
+    Poco::Path subPath(_path);
+    subPath.append("durable-" + subscriptionName).makeDirectory();
+    Poco::File(subPath).createDirectories();
+
+    static const Poco::UUID kDurableNs("b5c6d7e8-f9a0-4b5c-9d0e-1f2a3b4c5d6e");
+    Poco::UUID storageId = Poco::UUIDGenerator::defaultGenerator().createFromName(
+        kDurableNs, _uri + "/" + subscriptionName);
+    auto storage = std::make_shared<linear_storage::ConcurrentLinearStorage>(storageId, subPath);
+    storage->start();
+
+    DurableSubState state;
+    state.name = subscriptionName;
+    state.path = subPath;
+    state.storage = std::move(storage);
+    state.selector = selector;
+
+    auto [it, _inserted] = _durableSubs.emplace(subscriptionName, std::move(state));
+    subIt = it;
+  } else if (!subIt->second.activeConsumerUuid.isNull()) {
+    throw Poco::RuntimeException(
+        "Durable subscription '" + subscriptionName + "' already has an active consumer");
+  }
+
+  DurableSubState& sub = subIt->second;
+
+  // Each reconnect may bring a new selector — update it
+  sub.selector = selector;
+
+  auto id = session.createRandomUUID();
+  auto queue = std::make_shared<QueueT>();
+
+  // Use the durable sub's own storage so persistent messages are tracked per-subscriber
+  auto consumer = Consumer::Ptr(new Consumer(*this, session, queue, id, sub.path,
+                                             sub.storage, _transactionBuffer, selector));
+
+  // Replay any messages buffered while the subscriber was offline
+  replayFromStorage(*queue, *sub.storage);
+
+  auto [consIt, ok] = _consumers.emplace(id, consumer);
+  if (!ok) return nullptr;
+
+  sub.activeConsumerUuid = id;
+  _consumerToSubName.emplace(id, subscriptionName);
+
+  poco_information(_logger.get(),
+                   Poco::format("durable consumer[%s] attached to subscription '%s' on %s",
+                                id.toString(), subscriptionName, _uri));
+  return consIt->second;
+}
+
+void Destination::deleteSubscription(const std::string& subscriptionName) {
+  TRACE(_logger);
+  auto subIt = _durableSubs.find(subscriptionName);
+  if (subIt == _durableSubs.end()) return;
+
+  // Disconnect active consumer if present
+  if (!subIt->second.activeConsumerUuid.isNull()) {
+    deleteConsumer(subIt->second.activeConsumerUuid);
+  }
+
+  // Stop the dedicated storage worker, then wipe the directory so a future
+  // re-subscription with the same name starts completely fresh.
+  if (subIt->second.storage) {
+    subIt->second.storage->stop();
+  }
+  try {
+    Poco::File dir(subIt->second.path);
+    if (dir.exists()) dir.remove(/*recursive=*/true);
+  } catch (...) {}
+
+  _durableSubs.erase(subIt);
+  poco_information(_logger.get(),
+                   Poco::format("unsubscribed durable subscription '%s' from %s",
+                                subscriptionName, _uri));
+}
+
+void Destination::deleteConsumer(const Poco::UUID& id) {
+  TRACE(_logger);
+  auto it = _consumers.find(id);
+  if (it != _consumers.end()) {
+    _consumers.erase(it);
+  }
+  // If this is a durable consumer, mark its subscription as offline so future
+  // messages are buffered in the subscription's persistent storage.
+  auto subNameIt = _consumerToSubName.find(id);
+  if (subNameIt != _consumerToSubName.end()) {
+    auto subIt = _durableSubs.find(subNameIt->second);
+    if (subIt != _durableSubs.end()) {
+      subIt->second.activeConsumerUuid = Poco::UUID();  // reset to null = offline
+    }
+    _consumerToSubName.erase(subNameIt);
+  }
+}
+
+Producer::Ptr Destination::createProducer(Session& session) {
   TRACE(_logger);
   using TokenType = moodycamel::BlockingConcurrentQueue<Message::Ptr>::producer_token_t;
   std::unique_ptr<TokenType> token;
-  if (_type == destination::Queue || _type == destination::TemporaryQueue) {
+  if (isQueueFamily()) {
     token = std::make_unique<TokenType>(_consumers.begin()->second->getProducerToken());
   }
-  auto id = _uuidGenerator.createRandom();
-  auto producer = Producer::Ptr(new Producer(*this, id, std::move(token)));
+  auto id = session.createRandomUUID();
+  auto producer = Producer::Ptr(new Producer(*this, session, id, std::move(token)));
 
-  auto it = _producers.emplace(id.toString(), std::move(producer));
+  auto it = _producers.emplace(id, std::move(producer));
   if (it.second) {
     return it.first->second;
   }
   return nullptr;
 }
-size_t Destination::consumersCount() const {
+
+void Destination::deleteProducer(const Poco::UUID& id) {
   TRACE(_logger);
-  return _consumers.size();
+  auto it = _producers.find(id);
+  if (it != _producers.end()) {
+    _producers.erase(it);
+  }
 }
-destination::Type Destination::type() const {
-  TRACE(_logger);
-  return _type;
+
+destination::Type Destination::type() const { return _type; }
+
+bool Destination::isQueueFamily() const {
+  return (_type == destination::Queue) || (_type == destination::TemporaryQueue);
 }
-const std::string& Destination::name() const {
-  TRACE(_logger);
-  return _name;
+
+bool Destination::isTopicFamily() const {
+  return (_type == destination::Topic) || (_type == destination::TemporaryTopic);
 }
-std::string Destination::typeName() const {
-  TRACE(_logger);
-  return destination::TypeName(_type);
-}
-size_t Destination::producersCount() const {
-  TRACE(_logger);
-  return _producers.size();
-}
+
+const std::string& Destination::name() const { return _name; }
+
+std::string Destination::typeName() const { return destination::TypeName(_type); }
+
 const std::string& Destination::uri() const { return _uri; }
+
 Destination::~Destination() {
   TRACE(_logger);
   _consumers.clear();
   _producers.clear();
 }
+
 size_t Destination::hash() const { return _hash; }
+
+TransactionBuffer::Ptr Destination::getTransactionBuffer() const {
+  return _transactionBuffer;
+}
+
+void Destination::commitTransaction(const std::string& transactionId) {
+  TRACE(_logger);
+  if (!transactionId.empty() && _transactionBuffer) {
+    _transactionBuffer->commitTransaction(transactionId);
+  }
+}
+
+void Destination::rollbackTransaction(const std::string& transactionId) {
+  TRACE(_logger);
+  if (!transactionId.empty() && _transactionBuffer) {
+    _transactionBuffer->rollbackTransaction(transactionId);
+  }
+}
+
+void Destination::deliverCommitted(Message::Ptr message) {
+  TRACE(_logger);
+  bool queueFamily = isQueueFamily();
+  for (auto& item : _consumers) {
+    if (queueFamily) {
+      item.second->_queue->enqueue(std::move(message));
+      return;
+    }
+    item.second->_queue->enqueue(message->copy());
+  }
+
+  // After delivering to online consumers, buffer committed persistent messages
+  // for any offline durable subscriptions on this topic.
+  if (isTopicFamily() && message && message->isPersistent()) {
+    for (auto& [subName, sub] : _durableSubs) {
+      if (!sub.activeConsumerUuid.isNull()) continue;  // online — already received above
+      if (sub.selector && !sub.selector->matches(*message)) continue;
+      persistToOfflineSub(sub, *message);
+    }
+  }
+}
+
 }  // namespace tiny_mq
