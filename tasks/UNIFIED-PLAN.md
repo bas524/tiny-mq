@@ -46,7 +46,7 @@
 | 14 Disable MessageID/Timestamp | A | M0 | ✅ done |
 | 22 DUPS_OK_ACKNOWLEDGE (5-й режим) | B | M0 | ✅ done (батч-флаш по порогу/teardown) |
 | 03 ClientID/lifecycle/ExceptionListener | D | M0 | ✅ done (ConnectionMetaData + идемпотентный close/IllegalStateException + durable-ключ (clientID,name)) |
-| 12 Per-send DeliveryMode/Priority/TTL | A | M1 | ⬜ planned |
+| 12 Per-send DeliveryMode/Priority/TTL | A | M1 | ✅ done (SendOptions: send(msg,opts)/setDefault; priority/expiration/deliveryTime ingress) |
 | 44 Expiration sweep | A | M1 | ⬜ planned |
 | 45 Priority ordering | A | M1 | ⬜ planned |
 | 13 Delivery delay | A | M1 | ⬜ planned |
@@ -94,7 +94,11 @@
 ### M1 — Семантика доставки (in-process)
 Спеки: 12, 44, 45, 13, 23, 24, 25, 28, 30.
 «Потребители» заголовков из M0.
-- 12: per-send DeliveryMode/Priority/TTL (`SendOptions`).
+- ✅ 12: per-send DeliveryMode/Priority/TTL (`SendOptions`): `Producer::send(msg, opts)`
+  + `setDefault(opts)` (хранится в `std::optional`, plain send без дефолта сохраняет
+  reliability/priority сообщения). Заполняет `priority`/`expiration`(=now+ttl)/
+  `deliveryTime`(=now+delay). Заголовки уже round-trip'ятся через storage 0x02.
+  `SendOptionsTest`. Перф send-пути в норме. **Потребители метаданных — 44/45/13.**
 - 44: expiration sweep (на recv-пути + фоновый sweeper в хранилище).
 - 45: priority ordering (10 бэндов, polling 9→0; **бенчмаркать uniform-кейс**).
 - 13: delivery delay (min-heap по deliveryTime; таймер commit-time для транзакций).

@@ -8,6 +8,7 @@
 #include "LogTracer.h"
 #include <Poco/File.h>
 #include <Poco/Timestamp.h>
+#include <stdexcept>
 
 namespace tiny_mq {
 Producer::Producer(Destination &destination,
@@ -39,8 +40,50 @@ bool Producer::isDisableMessageID() const { return _disableMessageID; }
 void Producer::setDisableMessageTimestamp(bool value) { _disableMessageTimestamp = value; }
 bool Producer::isDisableMessageTimestamp() const { return _disableMessageTimestamp; }
 
+/*static*/ void Producer::applyOptions(Message &message, const SendOptions &opts) {
+  // opts override values set on the message; applied before persistence/enqueue.
+  message.reliability = opts.deliveryMode;
+  message.jmsHeaders.priority = opts.priority;
+  const int64_t nowMs = Poco::Timestamp().epochMicroseconds() / 1000;
+  // timeToLive == 0 means no expiration; else absolute expiry timestamp.
+  message.jmsHeaders.expiration = opts.timeToLive > 0 ? nowMs + opts.timeToLive : 0;
+  // deliveryDelay is consumed by spec 13; record the absolute delivery time now.
+  message.jmsHeaders.deliveryTime = opts.deliveryDelay > 0 ? nowMs + opts.deliveryDelay : 0;
+}
+
+void Producer::setDefault(const SendOptions &opts) {
+  if (opts.priority < 0 || opts.priority > 9) {
+    throw std::invalid_argument("priority must be in range 0..9");
+  }
+  if (opts.timeToLive < 0 || opts.deliveryDelay < 0) {
+    throw std::invalid_argument("timeToLive and deliveryDelay must be non-negative");
+  }
+  _default = opts;
+}
+
 void Producer::send(const Message &message) {
   TRACE(_logger);
+  // With explicit producer defaults, plain send applies them; otherwise the
+  // message keeps its create-time reliability/priority (backward compatible).
+  if (_default) {
+    applyOptions(const_cast<Message &>(message), *_default);
+  }
+  dispatch(message);
+}
+
+void Producer::send(const Message &message, const SendOptions &opts) {
+  TRACE(_logger);
+  if (opts.priority < 0 || opts.priority > 9) {
+    throw std::invalid_argument("priority must be in range 0..9");
+  }
+  if (opts.timeToLive < 0 || opts.deliveryDelay < 0) {
+    throw std::invalid_argument("timeToLive and deliveryDelay must be non-negative");
+  }
+  applyOptions(const_cast<Message &>(message), opts);
+  dispatch(message);
+}
+
+void Producer::dispatch(const Message &message) {
   // JMS providers assign MessageID and Timestamp at send time unless disabled.
   // Message is const at the API boundary but its headers are mutable metadata
   // populated by the provider — match the JMS contract by filling them here.

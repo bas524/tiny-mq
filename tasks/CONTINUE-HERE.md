@@ -75,13 +75,20 @@ Baseline перфа (items/sec, для сравнения после измен�
 Тесты: **95/95 зелёные.** Перф без регрессии (AutoAck_Persistent ≈60.7k,
 Topic_AutoAck_NonPersistent ≈669.6k).
 
-## Следующий шаг — M1: семантика доставки
+## M1 в работе — семантика доставки
 
-Спеки M1 (см. UNIFIED-PLAN, по зависимостям): 12 (per-send DeliveryMode/Priority/
-TTL) → 44 (expiration sweep) → 45 (priority ordering) → 13 (delivery delay) →
-23 (Session.recover) → 24 (redelivery+DLQ) → 25 (noLocal) → 28 (receiveNoWait) →
-30 (аудит грамматики Selector). Естественная отправная точка — **12** (вводит
-`SendOptions`, на который опираются 44/45/13).
+Прогресс M1 (см. UNIFIED-PLAN, по зависимостям):
+- ✅ 12 per-send DeliveryMode/Priority/TTL — `SendOptions`, `Producer::send(msg,opts)`
+  + `setDefault`. Ingress готов: заполняет `priority`/`expiration`/`deliveryTime`.
+  `SendOptionsTest`. (ветка `spec-12-send-options`, коммит 9f85b47).
+- ⬜ 44 expiration sweep → 45 priority ordering → 13 delivery delay →
+  23 Session.recover → 24 redelivery+DLQ → 25 noLocal → 28 receiveNoWait →
+  30 аудит грамматики Selector.
+
+**Следующий шаг — 44 (expiration sweep):** на recv-пути отбрасывать сообщения с
+`jmsHeaders.expiration != 0 && now >= expiration` + фоновый sweeper в хранилище.
+Метаданные expiration уже проставляются спекой 12 (TTL) — 44 их потребитель.
+Тесты по `docs/jms-spec/44-*.md`.
 
 ## Известные проблемы / долги
 

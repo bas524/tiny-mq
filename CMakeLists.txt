@@ -165,6 +165,8 @@ if (ENABLE_TESTS)
                  tests/DupsOkAckTest.h
                  tests/ConnectionLifecycleTest.cpp
                  tests/ConnectionLifecycleTest.h
+                 tests/SendOptionsTest.cpp
+                 tests/SendOptionsTest.h
                  )
   set(TEST_LIBS
       GTest::gtest
