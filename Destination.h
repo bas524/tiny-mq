@@ -66,14 +66,21 @@ class Destination {
   Consumer::Ptr createDefaultConsumer(Session &session);
 
   // Create or resume a named durable subscription (topic-family only).
+  // A durable subscription is identified by (clientID, subscriptionName) per
+  // JMS 2.0 § 6.3, so the same name under different clientIDs is independent.
   // Throws Poco::RuntimeException if called on a queue, or if the subscription
   // already has an active consumer attached.
-  Consumer::Ptr createDurableConsumer(Session &session, const std::string &subscriptionName,
+  Consumer::Ptr createDurableConsumer(Session &session, const std::string &clientID,
+                                      const std::string &subscriptionName,
                                       std::shared_ptr<Selector> selector = nullptr);
 
   // Permanently remove a named durable subscription.  The active consumer (if
   // any) is disconnected first and all buffered messages are discarded.
-  void deleteSubscription(const std::string &subscriptionName);
+  void deleteSubscription(const std::string &clientID, const std::string &subscriptionName);
+
+  // Composite registry key for a durable subscription. Empty clientID keeps the
+  // legacy (name-only) key/layout so pre-clientID subscriptions stay addressable.
+  static std::string durableKey(const std::string &clientID, const std::string &subscriptionName);
 
   void save(const Producer &producer, const Message &message);
 

@@ -6,6 +6,7 @@
 #ifndef TINY_MQ__CONNECTION_H_
 #define TINY_MQ__CONNECTION_H_
 
+#include "ConnectionMetaData.h"
 #include "Session.h"
 #include <Poco/Logger.h>
 #include <Poco/Mutex.h>
@@ -45,15 +46,27 @@ class Connection {
   void setExceptionListener(ExceptionListener listener);
   void onException(const std::exception &ex);
 
+  // Provider/JMS description (JMS 2.0 § 6.5). Allowed at any time, including
+  // after close() — it is purely informational.
+  ConnectionMetaData metadata() const;
+
+  // Idempotent: a second call is a no-op. After close(), any operation that
+  // would mutate the connection throws IllegalStateException.
   void close();
+  bool isClosed() const;
 
   Exchange &exchange();
 
  private:
+  // Throws IllegalStateException if the connection is closed. Callers must hold
+  // _mutex (it reads _closed without locking).
+  void ensureOpen() const;
+
   std::reference_wrapper<Exchange> _exchange;
   std::reference_wrapper<Poco::Logger> _logger;
   std::string _clientID;
   bool _started{false};
+  bool _closed{false};
   ExceptionListener _exceptionListener;
   std::vector<std::unique_ptr<Session>> _sessions;
   mutable Poco::FastMutex _mutex;
