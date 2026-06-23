@@ -159,24 +159,35 @@ Consumer::Ptr Destination::createConsumer(Session& session, std::shared_ptr<Sele
   return nullptr;
 }
 
-Consumer::Ptr Destination::createDurableConsumer(Session& session, const std::string& subscriptionName,
+Consumer::Ptr Destination::createDurableConsumer(Session& session, const std::string& clientID,
+                                                  const std::string& subscriptionName,
                                                   std::shared_ptr<Selector> selector) {
   TRACE(_logger);
   if (!isTopicFamily()) {
     throw Poco::RuntimeException("Durable subscribers are only supported on topic destinations");
   }
 
-  // Get or create the durable subscription state
-  auto subIt = _durableSubs.find(subscriptionName);
+  const std::string key = durableKey(clientID, subscriptionName);
+
+  // Get or create the durable subscription state, keyed by (clientID, name).
+  auto subIt = _durableSubs.find(key);
   if (subIt == _durableSubs.end()) {
-    // New subscription — create dedicated storage under the topic path
+    // New subscription — create dedicated storage under the topic path. The
+    // directory and storage namespace are scoped by clientID so the same name
+    // under different clients never collides on disk.
+    const std::string dirName =
+        clientID.empty() ? ("durable-" + subscriptionName)
+                         : ("durable-" + clientID + "-" + subscriptionName);
     Poco::Path subPath(_path);
-    subPath.append("durable-" + subscriptionName).makeDirectory();
+    subPath.append(dirName).makeDirectory();
     Poco::File(subPath).createDirectories();
 
     static const Poco::UUID kDurableNs("b5c6d7e8-f9a0-4b5c-9d0e-1f2a3b4c5d6e");
-    Poco::UUID storageId = Poco::UUIDGenerator::defaultGenerator().createFromName(
-        kDurableNs, _uri + "/" + subscriptionName);
+    const std::string storageName =
+        clientID.empty() ? (_uri + "/" + subscriptionName)
+                         : (_uri + "/" + clientID + "/" + subscriptionName);
+    Poco::UUID storageId =
+        Poco::UUIDGenerator::defaultGenerator().createFromName(kDurableNs, storageName);
     auto storage = std::make_shared<linear_storage::ConcurrentLinearStorage>(storageId, subPath);
     storage->start();
 
@@ -186,7 +197,7 @@ Consumer::Ptr Destination::createDurableConsumer(Session& session, const std::st
     state.storage = std::move(storage);
     state.selector = selector;
 
-    auto [it, _inserted] = _durableSubs.emplace(subscriptionName, std::move(state));
+    auto [it, _inserted] = _durableSubs.emplace(key, std::move(state));
     subIt = it;
   } else if (!subIt->second.activeConsumerUuid.isNull()) {
     throw Poco::RuntimeException(
@@ -212,7 +223,7 @@ Consumer::Ptr Destination::createDurableConsumer(Session& session, const std::st
   if (!ok) return nullptr;
 
   sub.activeConsumerUuid = id;
-  _consumerToSubName.emplace(id, subscriptionName);
+  _consumerToSubName.emplace(id, key);  // composite (clientID,name) key for deleteConsumer lookup
 
   poco_information(_logger.get(),
                    Poco::format("durable consumer[%s] attached to subscription '%s' on %s",
@@ -220,9 +231,18 @@ Consumer::Ptr Destination::createDurableConsumer(Session& session, const std::st
   return consIt->second;
 }
 
-void Destination::deleteSubscription(const std::string& subscriptionName) {
+/*static*/ std::string Destination::durableKey(const std::string& clientID,
+                                               const std::string& subscriptionName) {
+  // Empty clientID -> legacy name-only key (keeps pre-clientID layout addressable).
+  // \x1f (unit separator) cannot appear in JMS identifiers, so it cleanly
+  // delimits the two parts of the composite key.
+  if (clientID.empty()) return subscriptionName;
+  return clientID + '\x1f' + subscriptionName;
+}
+
+void Destination::deleteSubscription(const std::string& clientID, const std::string& subscriptionName) {
   TRACE(_logger);
-  auto subIt = _durableSubs.find(subscriptionName);
+  auto subIt = _durableSubs.find(durableKey(clientID, subscriptionName));
   if (subIt == _durableSubs.end()) return;
 
   // Disconnect active consumer if present

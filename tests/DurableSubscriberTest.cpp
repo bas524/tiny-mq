@@ -221,6 +221,67 @@ TEST_F(DurableSubscriberTest, testMultipleDurableSubscribers) {
     }
 }
 
+// A durable subscription is identified by (clientID, name): the same name on the
+// same topic under two different clientIDs yields two independent subscriptions,
+// each with its own offline buffer (JMS 2.0 § 6.3 / spec 03).
+TEST_F(DurableSubscriberTest, testClientIdScopesDurableSubscription) {
+    const std::string subName = "shared-name";
+
+    // Two clients register the same subscription name on the same topic, then
+    // both go offline.
+    {
+        Connection connA(*_exchange);
+        connA.setClientID("client-A");
+        Session &sA = connA.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
+        Destination::Ptr topic = sA.createDestination(tiny_mq::destination::Topic, CurrentTestName);
+        ASSERT_NE(sA.createDurableConsumer(topic, subName), nullptr);
+
+        Connection connB(*_exchange);
+        connB.setClientID("client-B");
+        Session &sB = connB.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
+        Destination::Ptr topicB = sB.createDestination(tiny_mq::destination::Topic, CurrentTestName);
+        // Same name under a different clientID must NOT collide with client-A's.
+        ASSERT_NE(sB.createDurableConsumer(topicB, subName), nullptr);
+    }
+
+    // Publish one persistent message while both subscriptions are offline.
+    {
+        Connection pub(*_exchange);
+        Session &s = pub.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
+        Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
+        Producer::Ptr producer = s.createProducer(topic);
+        producer->send(s.createTextMessage("scoped-msg", Message::PERSISTENT));
+    }
+
+    // Each client independently buffered the message and receives its own copy.
+    {
+        Connection connA(*_exchange);
+        connA.setClientID("client-A");
+        Session &sA = connA.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
+        Destination::Ptr topic = sA.createDestination(tiny_mq::destination::Topic, CurrentTestName);
+        Consumer::Ptr consA = sA.createDurableConsumer(topic, subName);
+        auto rA = tryRecv(*consA, 500000);
+        ASSERT_NE(rA, nullptr) << "client-A's subscription must keep its own buffered copy";
+        EXPECT_EQ("scoped-msg", rA->text());
+
+        Connection connB(*_exchange);
+        connB.setClientID("client-B");
+        Session &sB = connB.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
+        Destination::Ptr topicB = sB.createDestination(tiny_mq::destination::Topic, CurrentTestName);
+        Consumer::Ptr consB = sB.createDurableConsumer(topicB, subName);
+        auto rB = tryRecv(*consB, 500000);
+        ASSERT_NE(rB, nullptr) << "client-B's subscription is independent and keeps its own copy";
+        EXPECT_EQ("scoped-msg", rB->text());
+
+        // Unsubscribing client-A's subscription must not disturb client-B's.
+        sA.unsubscribe(topic, subName);
+        auto stillThere = tryRecv(*consB);
+        EXPECT_EQ(nullptr, stillThere) << "client-B already drained its own copy; A's unsubscribe is unrelated";
+
+        sB.unsubscribe(topicB, subName);
+    }
+}
+
 // Attempting to create a durable consumer on a Queue must throw.
 TEST_F(DurableSubscriberTest, testDurableConsumerOnQueueThrows) {
     Connection session_conn(*_exchange);

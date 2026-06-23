@@ -109,7 +109,7 @@ Consumer::Ptr Session::createDurableConsumer(const Destination::Ptr &destination
 
 Consumer::Ptr Session::createDurableConsumer(Destination &destination, const std::string &subscriptionName) {
   TRACE(_logger);
-  auto consumer = destination.createDurableConsumer(*this, subscriptionName);
+  auto consumer = destination.createDurableConsumer(*this, connection().clientID(), subscriptionName);
   if (consumer) {
     _consumers.emplace(consumer->id(), consumer);
     poco_debug(_logger.get(),
@@ -123,7 +123,7 @@ Consumer::Ptr Session::createDurableConsumer(Destination &destination, const std
                                               const std::string &selectorExpr) {
   TRACE(_logger);
   auto selector = Selector::parse(selectorExpr);
-  auto consumer = destination.createDurableConsumer(*this, subscriptionName, std::move(selector));
+  auto consumer = destination.createDurableConsumer(*this, connection().clientID(), subscriptionName, std::move(selector));
   if (consumer) {
     _consumers.emplace(consumer->id(), consumer);
     poco_debug(_logger.get(),
@@ -136,7 +136,7 @@ Consumer::Ptr Session::createDurableConsumer(Destination &destination, const std
 
 void Session::unsubscribe(Destination &destination, const std::string &subscriptionName) {
   TRACE(_logger);
-  destination.deleteSubscription(subscriptionName);
+  destination.deleteSubscription(connection().clientID(), subscriptionName);
   poco_debug(_logger.get(),
              Poco::format("unsubscribed '%s' from %s://%s in session[%s]",
                           subscriptionName, destination.typeName(), destination.name(), _suffix));

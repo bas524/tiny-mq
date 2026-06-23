@@ -56,25 +56,32 @@ Baseline перфа (items/sec, для сравнения после измен�
 
 Деструкторы `Consumer`/`Session`: `rollback()` обёрнут в try-catch (сделано ранее).
 
-## Следующий шаг — доделать M0: спека 03
+## M0 закрыт ✅ — спека 03 сделана
 
-Файл спеки: `docs/jms-spec/03-client-id-and-lifecycle.md` (+ `01`).
-Уже есть в `Connection`: `clientID`, `start/stop`, `setExceptionListener`, `close`.
-**Осталось:**
-1. `ConnectionMetaData` — provider name/version, JMS major/minor, supported features;
-   метод `Connection::metadata()`. (Лёгкое.)
-2. Идемпотентный `close()` + бросать `IllegalStateException` на операции после close.
-   (Сейчас `close()` просто чистит сессии; повторные вызовы безопасны, но
-   операции после close не запрещены — нужно ввести флаг `_closed` и проверки.)
-3. **Главное и инвазивное:** ключ durable-подписки → **(clientID, subscriptionName)**
-   вместо только `subscriptionName`. Трогает `Destination` (`_durableSubs`,
-   `createDurableConsumer`, `deleteSubscription`/`unsubscribe`) и `Session`
-   durable-методы — им нужен доступ к `clientID` через `Session::connection().clientID()`.
-   Делать аккуратно: прогнать `DurableSubscriberTest` (7 тестов) — они сейчас не
-   задают clientID, поэтому понадобится дефолтный clientID или обновление тестов.
+Спека 03 (`docs/jms-spec/03-client-id-and-lifecycle.md`) завершена:
+1. ✅ `ConnectionMetaData` (`ConnectionMetaData.h`) + `Connection::metadata()`
+   (доступен даже после close).
+2. ✅ Идемпотентный `close()` (флаг `_closed`) + `tiny_mq::IllegalStateException`
+   (`Exceptions.h`) на мутирующих операциях после close; `setClientID` теперь тоже
+   бросает `IllegalStateException`. Тесты `LifecycleTest`/`ExceptionListenerTest`.
+3. ✅ Ключ durable-подписки → **(clientID, subscriptionName)** через
+   `Destination::durableKey()` (пустой clientID = legacy name-only ключ/layout,
+   поэтому 7 старых `DurableSubscriberTest` прошли без изменений). Директория
+   `durable-<clientID>-<name>` + clientID-scoped storage namespace. `Session`
+   пробрасывает `connection().clientID()`. Новый тест
+   `DurableSubscriberTest.testClientIdScopesDurableSubscription`.
    Спека 26 (shared durable) позже опирается на этот же ключ.
 
-После 03 → M0 закрыт, переходить к M1 (см. UNIFIED-PLAN): 12/44/45/13/23/24/25/28/30.
+Тесты: **95/95 зелёные.** Перф без регрессии (AutoAck_Persistent ≈60.7k,
+Topic_AutoAck_NonPersistent ≈669.6k).
+
+## Следующий шаг — M1: семантика доставки
+
+Спеки M1 (см. UNIFIED-PLAN, по зависимостям): 12 (per-send DeliveryMode/Priority/
+TTL) → 44 (expiration sweep) → 45 (priority ordering) → 13 (delivery delay) →
+23 (Session.recover) → 24 (redelivery+DLQ) → 25 (noLocal) → 28 (receiveNoWait) →
+30 (аудит грамматики Selector). Естественная отправная точка — **12** (вводит
+`SendOptions`, на который опираются 44/45/13).
 
 ## Известные проблемы / долги
 

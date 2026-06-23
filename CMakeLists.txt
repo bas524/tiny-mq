@@ -163,6 +163,8 @@ if (ENABLE_TESTS)
                  tests/DisableHeadersTest.h
                  tests/DupsOkAckTest.cpp
                  tests/DupsOkAckTest.h
+                 tests/ConnectionLifecycleTest.cpp
+                 tests/ConnectionLifecycleTest.h
                  )
   set(TEST_LIBS
       GTest::gtest

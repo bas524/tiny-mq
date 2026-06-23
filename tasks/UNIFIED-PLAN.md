@@ -45,7 +45,7 @@
 | 11 ObjectMessage | A | M0 | ✅ done |
 | 14 Disable MessageID/Timestamp | A | M0 | ✅ done |
 | 22 DUPS_OK_ACKNOWLEDGE (5-й режим) | B | M0 | ✅ done (батч-флаш по порогу/teardown) |
-| 03 ClientID/lifecycle/ExceptionListener | D | M0 | 🟡 partial (clientID/start/stop/exc-listener есть; нужен ConnectionMetaData, close-idempotency, durable-ключ (clientID,name)) |
+| 03 ClientID/lifecycle/ExceptionListener | D | M0 | ✅ done (ConnectionMetaData + идемпотентный close/IllegalStateException + durable-ключ (clientID,name)) |
 | 12 Per-send DeliveryMode/Priority/TTL | A | M1 | ⬜ planned |
 | 44 Expiration sweep | A | M1 | ⬜ planned |
 | 45 Priority ordering | A | M1 | ⬜ planned |
@@ -75,8 +75,8 @@
 Критический путь к «работающему сетевому JMS-брокеру с клиентами» =
 **M0 → M1 → M2 → M3 → M4 → M5**. v2-протокол (M6) — оптимизация после.
 
-### M0 — Объектная модель и фундамент сообщений (in-process)
-Спеки: 01 ✅, 33 ✅, 10 ✅, 11 ✅, 14 ✅, 22 ✅, 03 🟡.
+### M0 — Объектная модель и фундамент сообщений (in-process) — ✅ ЗАКРЫТ
+Спеки: 01 ✅, 33 ✅, 10 ✅, 11 ✅, 14 ✅, 22 ✅, 03 ✅.
 Закрывает фундамент, на который опираются все остальные фазы.
 - ✅ 10: модель `Message::Headers`, заполнение messageId/timestamp на send-пути
   (`Producer::send`), формат хранения v0x02 с версионированием.
@@ -85,11 +85,11 @@
 - ✅ 14: `setDisableMessageID/Timestamp` на Producer.
 - ✅ 22: `DUPS_OK_ACKNOWLEDGE` (enum=4) + батч-флаш storage-удалений по порогу
   (100) и на teardown консьюмера.
-- 🟡 03 (осталось): `ConnectionMetaData`, идемпотентный `close()` +
-  `IllegalStateException` после close, **ключ durable-подписки →
-  (clientID, subscriptionName)** (сейчас только name). clientID/start/stop/
-  ExceptionListener уже есть из M0-1. Это самый инвазивный пункт (трогает
-  `Destination::_durableSubs`) — делать аккуратно с тестами durable.
+- ✅ 03: `ConnectionMetaData` (`Connection::metadata()`), идемпотентный `close()`
+  + `IllegalStateException` (`Exceptions.h`) на операциях после close, **ключ
+  durable-подписки → (clientID, subscriptionName)** через `Destination::durableKey`
+  (пустой clientID = legacy name-only ключ/layout). Тесты: `LifecycleTest`,
+  `ExceptionListenerTest`, `DurableSubscriberTest.testClientIdScopesDurableSubscription`.
 
 ### M1 — Семантика доставки (in-process)
 Спеки: 12, 44, 45, 13, 23, 24, 25, 28, 30.
