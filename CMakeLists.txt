@@ -167,6 +167,8 @@ if (ENABLE_TESTS)
                  tests/ConnectionLifecycleTest.h
                  tests/SendOptionsTest.cpp
                  tests/SendOptionsTest.h
+                 tests/ExpirationTest.cpp
+                 tests/ExpirationTest.h
                  )
   set(TEST_LIBS
       GTest::gtest

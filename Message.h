@@ -87,6 +87,8 @@ class Message {
 
   PersistentInfo persistentInfo;
   bool isPersistent() const;
+  // JMSExpiration (spec 44): true when a non-zero expiration lies at or behind nowMs.
+  bool isExpired(int64_t nowMs) const;
 
   int64_t number() const;
 

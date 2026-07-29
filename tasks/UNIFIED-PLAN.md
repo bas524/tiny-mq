@@ -47,7 +47,7 @@
 | 22 DUPS_OK_ACKNOWLEDGE (5-й режим) | B | M0 | ✅ done (батч-флаш по порогу/teardown) |
 | 03 ClientID/lifecycle/ExceptionListener | D | M0 | ✅ done (ConnectionMetaData + идемпотентный close/IllegalStateException + durable-ключ (clientID,name)) |
 | 12 Per-send DeliveryMode/Priority/TTL | A | M1 | ✅ done (SendOptions: send(msg,opts)/setDefault; priority/expiration/deliveryTime ingress) |
-| 44 Expiration sweep | A | M1 | ⬜ planned |
+| 44 Expiration sweep | A | M1 | ✅ done (recv-drop + deadline-cadence sweeper via scanPrefix; ExpirationTest ×4; cross-model review approved) |
 | 45 Priority ordering | A | M1 | ⬜ planned |
 | 13 Delivery delay | A | M1 | ⬜ planned |
 | 23 Session.recover() | B | M1 | ⬜ planned |
@@ -99,7 +99,13 @@
   reliability/priority сообщения). Заполняет `priority`/`expiration`(=now+ttl)/
   `deliveryTime`(=now+delay). Заголовки уже round-trip'ятся через storage 0x02.
   `SendOptionsTest`. Перф send-пути в норме. **Потребители метаданных — 44/45/13.**
-- 44: expiration sweep (на recv-пути + фоновый sweeper в хранилище).
+- ✅ 44: expiration sweep — drop протухших на recv-пути (`Consumer::recv`, clock-free
+  hot path) + фоновый sweeper по дедлайну в `ConcurrentLinearStorage` через
+  `Storage::scanPrefix` (43-байт префикс, чанк 4096/тик, резюмируемый курсор).
+  Тесты `ExpirationTest` (drop / sweep / persistent-drop / under-load). Кросс-модельное
+  ревью: `docs/reviews/44-message-expiration-sweep.review.md` (approved, раунд 2).
+  Follow-up (не блокируют): m5 (гард 0x02), n1 (`dataPrefix` clear() на ошибке),
+  n3 (уточнить формулировку спеки: eventually-consistent реклейм).
 - 45: priority ordering (10 бэндов, polling 9→0; **бенчмаркать uniform-кейс**).
 - 13: delivery delay (min-heap по deliveryTime; таймер commit-time для транзакций).
 - 23: `Session.recover()` (per-consumer in-flight set).

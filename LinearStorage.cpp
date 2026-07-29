@@ -5,6 +5,7 @@
 #include "LinearStorage.h"
 #include <Poco/File.h>
 #include <Poco/Format.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
@@ -106,8 +107,22 @@ std::vector<char> Tom::data(const Record &record) const {
   if (!_tomF->good()) {
     throw Poco::RuntimeException("Failed to read record data from file");
   }
-  
+
   return data;
+}
+
+std::vector<char> Tom::dataPrefix(const Record &record, size_t len) const {
+  const size_t n = std::min<size_t>(len, static_cast<size_t>(record.header.dataSize));
+  if (n == 0) {
+    return {};
+  }
+  std::vector<char> out(n);
+  _tomF->seekg(record.offset + sizeof(record.header), std::ios::beg);
+  _tomF->read(out.data(), static_cast<std::streamsize>(n));
+  if (!_tomF->good()) {
+    return {};
+  }
+  return out;
 }
 
 bool Tom::remove(Record &record) {
@@ -286,6 +301,45 @@ std::vector<std::pair<Record, std::vector<char>>> Storage::scan() const {
       offset += sizeof(Header) + rec.header.dataSize;
     }
   }
+  return result;
+}
+
+std::vector<std::pair<Record, std::vector<char>>>
+Storage::scanPrefix(size_t prefixLen, size_t maxRecords, SweepCursor &cursor) const {
+  std::vector<std::pair<Record, std::vector<char>>> result;
+
+  // Stable order over toms so the cursor is meaningful between calls.
+  std::vector<Poco::UInt32> ids;
+  ids.reserve(_tom.size());
+  for (const auto &kv : _tom) ids.push_back(kv.first);
+  std::sort(ids.begin(), ids.end());
+
+  size_t scanned = 0;
+  bool resuming = true;  // still skipping past toms that precede the cursor
+  for (Poco::UInt32 id : ids) {
+    if (resuming && id < cursor.tomId) continue;
+    const Tom &t = tom(id);
+    Poco::UInt64 offset = (resuming && id == cursor.tomId) ? cursor.offset : 0;
+    resuming = false;
+    while (true) {
+      if (scanned >= maxRecords) {
+        cursor = SweepCursor{id, offset};
+        return result;
+      }
+      Record rec = t.record(offset);
+      if (rec.tomId == std::numeric_limits<Poco::UInt32>::max()) break;
+      if (rec.header.dataSize == 0) break;
+      const Poco::UInt64 next = offset + sizeof(Header) + rec.header.dataSize;
+      if (!rec.header.deleted) {
+        auto prefix = t.dataPrefix(rec, prefixLen);
+        if (!prefix.empty()) result.emplace_back(rec, std::move(prefix));
+      }
+      ++scanned;
+      offset = next;
+    }
+  }
+  // Reached the end of the store: reset for the next full pass.
+  cursor = SweepCursor{};
   return result;
 }
 

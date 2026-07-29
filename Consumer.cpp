@@ -11,7 +11,9 @@
 #include <Poco/Format.h>
 #include <Poco/UUIDGenerator.h>
 #include <Poco/StringTokenizer.h>
+#include <Poco/Timestamp.h>
 #include <limits>
+#include <optional>
 #include <utility>
 #include "LogTracer.h"
 
@@ -61,9 +63,18 @@ const Poco::UUID& Consumer::id() const {
 Message::Ptr Consumer::recv(int64_t usec_timeout) {
   TRACE(_logger);
   Message::Ptr message;
-  _queue->wait_dequeue_timed(_token, message, usec_timeout);
+  // Budget clock is started lazily on the first expired-message drop, so the
+  // common path (return the first live message) never reads the clock. A negative
+  // usec_timeout means "wait indefinitely" (moodycamel semantics) — pass it through
+  // unchanged rather than clamping to a non-blocking poll.
+  std::optional<Poco::Timestamp> started;
+  int64_t remaining = usec_timeout;
 
-  if (message) {
+  while (true) {
+    message.reset();
+    _queue->wait_dequeue_timed(_token, message, remaining);
+    if (!message) return message;  // timed out with nothing left to deliver
+
     if (message->isPersistent()) {
       if (!message->_cachedStorageBytes.empty()) {
         // Fast path: bytes were cached by preparePush — skip storage round-trips.
@@ -83,6 +94,39 @@ Message::Ptr Consumer::recv(int64_t usec_timeout) {
       }
     }
 
+    // JMSExpiration (spec 44): an expired message is never delivered. Drop it —
+    // removing any persistent copy so it cannot replay on restart — and keep
+    // pulling within the caller's remaining timeout. Expiration is 0 (never) for
+    // the vast majority of messages, so only read the clock when it is set —
+    // this keeps the hot recv path clock-free.
+    if (message->jmsHeaders.expiration != 0
+        && message->isExpired(Poco::Timestamp().epochMicroseconds() / 1000)) {
+      if (message->isPersistent()) {
+        linear_storage::Record rec;
+        if (message->_storageTomId != std::numeric_limits<Poco::UInt32>::max()) {
+          rec.tomId  = message->_storageTomId;
+          rec.offset = message->_storageOffset;
+          message->uuid.copyTo(rec.header.uuid.data());  // let remove() drop the index entry
+        } else {
+          rec = _storage->record(message->uuid);
+        }
+        if (rec.tomId != std::numeric_limits<Poco::UInt32>::max()) {
+          _storage->removeAsync(rec);
+        }
+      }
+      poco_debug(_logger.get(),
+                 Poco::format("drop expired message[%s] from %s://%s",
+                              message->uuid.toString(),
+                              _destination.get().typeName(),
+                              _destination.get().name()));
+      if (usec_timeout >= 0) {
+        if (!started) started.emplace();  // first drop: start the remaining-timeout budget
+        remaining = usec_timeout - static_cast<int64_t>(started->elapsed());
+        if (remaining <= 0) return Message::Ptr{};
+      }
+      continue;
+    }
+
     // In SESSION_TRANSACTED mode, track each received message so rollback() can
     // redeliver and commit() can acknowledge.  Share the pointer — no copy needed.
     if (_session.get().acknowledgeMode() == Session::AcknowledgeMode::SESSION_TRANSACTED
@@ -96,8 +140,8 @@ Message::Ptr Consumer::recv(int64_t usec_timeout) {
                             message->uuid.toString(),
                             _destination.get().typeName(),
                             _destination.get().name()));
+    return message;
   }
-  return message;
 }
 Message::Ptr Consumer::preparePush(int64_t number, const Producer& producer, const Message& message) {
   TRACE(_logger);

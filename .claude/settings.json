@@ -1,0 +1,25 @@
+{
+  "env": {
+    "CHAIN_EXEC": "0",
+    "CHAIN_MAX_ITER": "2",
+    "CHAIN_MAX_DISPATCH": "12"
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/.claude/chain/route.sh\"" }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "\"$CLAUDE_PROJECT_DIR/.claude/chain/route.sh\"" }
+        ]
+      }
+    ]
+  }
+}

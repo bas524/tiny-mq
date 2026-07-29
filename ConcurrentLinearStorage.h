@@ -46,6 +46,9 @@ class ConcurrentLinearStorage: Poco::Runnable {
   mutable moodycamel::BlockingConcurrentQueue<Operation*> _operations;
   Poco::Thread _thread;
   std::atomic<bool> _isRunning;
+  std::atomic<int64_t> _sweepIntervalUs{1'000'000};  // JMSExpiration sweep cadence (spec 44), default 1 s
+  int64_t _lastSweepUs{0};                           // worker-only: deadline for the next sweep (B1)
+  linear_storage::SweepCursor _sweepCursor{};        // worker-only: resume point for chunked sweeps (B2)
   std::reference_wrapper<Poco::Logger> _logger;
 
 public:
@@ -67,6 +70,12 @@ public:
   void run() override;
   void stop();
   bool isRunning();
+  // JMSExpiration sweep cadence (spec 44); ignored if not > 0. Default 1 s.
+  void setSweepIntervalMicros(int64_t us);
+
+ private:
+  // Runs on the worker thread during idle ticks: removes expired persistent records.
+  void sweepExpired();
 };
 
 }

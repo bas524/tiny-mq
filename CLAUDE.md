@@ -2,6 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> **Новая сессия — начни с [START-HERE.md](START-HERE.md).** Там: текущее состояние,
+> следующий шаг (спека 45), AEF-harness (`.claude/agents`, `.claude/skills`, событийная
+> цепочка) и **актуальные команды сборки через CMake-пресеты**. Раздел «Build & test»
+> ниже описывает старый `ninja`-путь — verified команды этой сессии в START-HERE.md.
+
 ## Project
 
 tiny-mq is a C++20 message broker. This project is an attempt to rethink the project https://github.com/ivk-jsc/broker from the perspective of simplifying message storage and processing. Dependencies are managed through vcpkg (Poco, GTest, benchmark, parallel-hashmap, span).
