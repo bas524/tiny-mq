@@ -13,6 +13,11 @@ namespace tiny_mq {
 
 bool Message::isPersistent() const { return reliability == PERSISTENT; }
 
+bool Message::isExpired(int64_t nowMs) const {
+  // JMSExpiration == 0 means "never expires" (JMS 2.0 § 3.4.9).
+  return jmsHeaders.expiration != 0 && nowMs >= jmsHeaders.expiration;
+}
+
 int64_t Message::number() const { return _number; }
 bool Message::hasProperty(const std::string& name) const { return _properties.hasProperty(name); }
 property::ValueType Message::propertyValueType(const std::string& name) const { return _properties.propertyValueType(name); }

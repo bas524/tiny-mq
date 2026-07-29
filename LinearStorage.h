@@ -41,6 +41,13 @@ struct Record {
   }
 };
 
+// Resume point for a chunked prefix scan (see Storage::scanPrefix): a full pass
+// is split across calls so no single call walks the whole store at once.
+struct SweepCursor {
+  Poco::UInt32 tomId{0};
+  Poco::UInt64 offset{0};
+};
+
 class Tom {
   Poco::UInt32 _id{0};
   Poco::Path _basePath;
@@ -58,6 +65,9 @@ class Tom {
   Record append(const Poco::UUID &uuid, const std::vector<char> &data);
   [[nodiscard]] Record record(Poco::UInt64 offset) const;
   [[nodiscard]] std::vector<char> data(const Record &record) const;
+  // Read only the first `len` bytes of a record's data (clamped to dataSize).
+  // Lets callers inspect a fixed header prefix without materialising the payload.
+  [[nodiscard]] std::vector<char> dataPrefix(const Record &record, size_t len) const;
   bool remove(Record &record);
 
   static Tom create(Poco::UInt32 id, Poco::Path basePath);
@@ -83,6 +93,13 @@ class Storage {
   [[nodiscard]] std::vector<char> data(const Record &record) const;
   bool remove(Record &record);
   [[nodiscard]] std::vector<std::pair<Record, std::vector<char>>> scan() const;
+  // Like scan(), but reads only the first `prefixLen` bytes of each live record
+  // and processes at most `maxRecords` per call, resuming from `cursor`. Reads
+  // headers + a small prefix instead of whole payloads, so a sweep never
+  // materialises the entire store in RAM. When a full pass completes the cursor
+  // is reset to the beginning.
+  [[nodiscard]] std::vector<std::pair<Record, std::vector<char>>>
+  scanPrefix(size_t prefixLen, size_t maxRecords, SweepCursor &cursor) const;
 };
 
 }  // namespace linear_storage

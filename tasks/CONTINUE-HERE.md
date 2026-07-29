@@ -1,7 +1,7 @@
 # CONTINUE HERE — точка возобновления работы
 
 > Снимок состояния для продолжения после перезапуска Claude / новой сессии.
-> Обновлено: 2026-05-23.
+> Обновлено: 2026-07-28.
 
 ## Как читать проект (порядок)
 
@@ -81,14 +81,15 @@ Topic_AutoAck_NonPersistent ≈669.6k).
 - ✅ 12 per-send DeliveryMode/Priority/TTL — `SendOptions`, `Producer::send(msg,opts)`
   + `setDefault`. Ingress готов: заполняет `priority`/`expiration`/`deliveryTime`.
   `SendOptionsTest`. (ветка `spec-12-send-options`, коммит 9f85b47).
-- ⬜ 44 expiration sweep → 45 priority ordering → 13 delivery delay →
-  23 Session.recover → 24 redelivery+DLQ → 25 noLocal → 28 receiveNoWait →
-  30 аудит грамматики Selector.
+- ✅ 44 expiration sweep — drop протухших на recv-пути + фоновый sweeper по дедлайну
+  через `Storage::scanPrefix` (43-байт префикс, чанк 4096/тик, курсор). `ExpirationTest`
+  (4 теста). Кросс-модельное ревью approved (`docs/reviews/44-message-expiration-sweep.review.md`,
+  раунд 2). Follow-up: m5/n1–n5.
+- ⬜ 45 priority ordering → 13 delivery delay → 23 Session.recover → 24 redelivery+DLQ
+  → 25 noLocal → 28 receiveNoWait → 30 аудит грамматики Selector.
 
-**Следующий шаг — 44 (expiration sweep):** на recv-пути отбрасывать сообщения с
-`jmsHeaders.expiration != 0 && now >= expiration` + фоновый sweeper в хранилище.
-Метаданные expiration уже проставляются спекой 12 (TTL) — 44 их потребитель.
-Тесты по `docs/jms-spec/44-*.md`.
+**Следующий шаг — 45 (priority ordering):** 10 бэндов приоритета, polling 9→0;
+бенчмаркать uniform-кейс (см. UNIFIED-PLAN, M1). Тесты по `docs/jms-spec/45-*.md`.
 
 ## Известные проблемы / долги
 
