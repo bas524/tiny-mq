@@ -3,16 +3,17 @@
   "version-string": "0.0.1",
   "license": "Apache-2.0",
   "dependencies": [
-    {
-      "name": "poco",
-      "features": ["util", "xml", "json", "net", "data", "sqlite"]
-    },
     "icu",
     "gtest",
     "protobuf",
     "parallel-hashmap",
     "span-lite",
     "benchmark",
-    "expat"
+    "expat",
+    "zlib",
+    {
+      "name": "poco",
+      "features": ["util", "xml", "json", "net", "data", "sqlite"]
+    }
   ]
 }
