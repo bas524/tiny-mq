@@ -70,7 +70,11 @@ case "$status" in
     fi
     ;;
   approved)
-    echo "[chain] APPROVED -> human/orchestrator gate (R1): milestone-status + commit. Not auto-run (Standard 19)." >&2
+    dispatch "claude-glm-5-2" "DocWriter" \
+"Ты doc-writer (AEF Standard 5/6, роль Knowledge). Ревью пройдено (approved): $pkg. По спеке $sdd и принятой реализации напиши/обнови документацию функциональности в docs/features/$spec-*.md (что делает · семантика · как пользоваться · ограничения · проверяемость по Test plan). Следуй .claude/skills/doc-write. Запиши $outdir/docwriter.json со status=documented, iteration=$iter, ядром artifact/evidence/provenance."
+    ;;
+  documented)
+    echo "[chain] DOCUMENTED -> human/orchestrator gate (R1): milestone-status + commit. Not auto-run (Standard 19)." >&2
     mark_routed
     ;;
   escalated)

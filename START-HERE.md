@@ -41,12 +41,14 @@ cmake --preset user-release && cmake --build --preset release --parallel
 | perf-specialist / security-specialist | Specialist | claude-deepseek-reasoner |
 | conformance-specialist | Specialist | claude-glm-5-2 |
 | platform-agent | Platform | claude-qwen3-coder-plus |
+| doc-writer | Knowledge (docs фич, S5/6) | claude-glm-5-2 |
 | knowledge-gardener | Knowledge | claude-claude-opus-4-8 |
 
 **Скиллы** (`.claude/skills/`): `jms-spec-implement`, `cpp-verify`, `perf-check`,
-`cross-model-review`, `security-review`, `adr-write`, `milestone-status`.
+`cross-model-review`, `security-review`, `doc-write`, `adr-write`, `milestone-status`.
 
-**Протокол:** Producer → Reviewer (на другой модели!) → Specialist gate → Orchestrator.
+**Протокол:** Producer → Reviewer (на другой модели!) → Specialist gate → Orchestrator;
+после `approved` — Doc-writer (`docs/features/<NN>-*.md`) → рубеж человека (milestone + commit).
 Handoff-контракт и разрешение конфликтов — `.claude/chain/HANDOFF.md` (default-deny, N=2 → человек).
 **Автономия:** R2 по умолчанию; R1 (подтверждение) на `git` / `CMakeLists` / vcpkg;
 блокирующий gate — только на необратимом рубеже (коммит в master).

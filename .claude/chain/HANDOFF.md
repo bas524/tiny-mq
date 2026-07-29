@@ -11,7 +11,7 @@
 handoffs/<spec>/<stage>.json     напр. handoffs/44/producer.json
 ```
 
-`<stage>` ∈ `producer` · `reviewer` · `perf` · `conformance` · `security` · `orchestrator`.
+`<stage>` ∈ `producer` · `reviewer` · `perf` · `conformance` · `security` · `doc-writer` · `orchestrator`.
 
 ## Формат пакета (ядро обязательно — §5.2)
 
@@ -38,7 +38,8 @@ Standard 4).
 |---|---|
 | `produced` | запускает **Reviewer** (`MiniMax-M3`) по скиллу `cross-model-review` |
 | `rejected` | если `iteration < CHAIN_MAX_ITER` (=2) → возвращает **Producer** на правку (iteration+1); иначе **эскалация человеку** |
-| `approved` | **STOP**: рубеж человека/оркестратора (R1) — `milestone-status` + коммит. Не автозапускается (Standard 19) |
+| `approved` | запускает **Doc-writer** (`glm-5.2`, скилл `doc-write`) — R2, пишет `docs/features/<spec>-*.md` |
+| `documented` | **STOP**: рубеж человека/оркестратора (R1) — `milestone-status` + коммит. Не автозапускается (Standard 19) |
 | `escalated` | **STOP**: human decision point (§5.3) |
 | прочее | **default-deny**: STOP |
 
@@ -49,7 +50,7 @@ Standard 4).
 
 1. Оркестратор/человек один раз запускает Producer на спеке → тот пишет `producer.json`.
 2. Хук ловит завершение → `route.sh` → Reviewer (MiniMax-M3) → пишет `reviewer.json`.
-3. `approved` → STOP на рубеже R1 (человек закрывает спеку); `rejected` → назад к Producer (≤2 раунда).
+3. `approved` → Doc-writer (glm-5.2) пишет `docs/features/<spec>-*.md` → `documented` → STOP на рубеже R1 (человек закрывает спеку); `rejected` → назад к Producer (≤2 раунда).
 
 **Диспатч по умолчанию — dry-run** (роутер печатает команду). Включить реальный запуск:
 `CHAIN_EXEC=1` (в `.claude/settings.json` → `env`). Предохранители: маркеры `*.routed`
