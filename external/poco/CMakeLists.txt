@@ -2,6 +2,13 @@ set(Poco_VERSION_MAJOR 0)
 set(Poco_VERSION_MINOR 0)
 set(Poco_VERSION_PATCH 0)
 
+# Poco::Foundation's link interface references ZLIB::ZLIB. Under
+# CMAKE_FIND_PACKAGE_PREFER_CONFIG the vcpkg ZLIB *config* package only defines
+# ZLIB::ZLIBSTATIC (it sets ZLIB_FOUND but no ZLIB::ZLIB), so Poco's internal
+# find_dependency(ZLIB) leaves the target undefined. Force MODULE mode here so
+# the vcpkg-wrapped FindZLIB creates ZLIB::ZLIB before Poco's config runs.
+find_package(ZLIB MODULE REQUIRED)
+
 find_package(Poco QUIET REQUIRED
              Foundation
              Util
