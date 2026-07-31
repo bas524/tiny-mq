@@ -16,6 +16,11 @@
 #include <map>
 #include <limits>
 #include <vector>
+#include <array>
+#include <algorithm>
+#include <atomic>
+#include <bit>
+#include <cstdint>
 #include "ConcurrentQueueHeader.h"
 #include "MessageProperty.h"
 
@@ -134,6 +139,121 @@ std::string dump(const Message &msg);
 BytesVector dataFromMessagePath(const Poco::Path &path);
 BytesVector propertiesFromMessagePath(const Poco::Path &path);
 }  // namespace tiny_mq
-using QueueT = moodycamel::BlockingConcurrentQueue<tiny_mq::Message::Ptr>;
+
+// ---------------------------------------------------------------------------
+// PriorityQueueT — 10-band JMSPriority-aware queue (spec 45).
+//
+// Partitions messages into 10 priority bands (0..9).  A consumer polls bands
+// 9→0, taking the first non-empty band, and drains FIFO within each band.
+// For uniform priority (default p=4) the ordering is identical to FIFO; the
+// extra overhead is a bounded scan of at most 5 empty bands (9 down to 5).
+//
+// API surface matches the subset of moodycamel::BlockingConcurrentQueue used
+// by Consumer and Producer; consumer/producer tokens are kept as lightweight
+// no-ops so call sites need no changes.
+// ---------------------------------------------------------------------------
+class PriorityQueueT {
+ public:
+  static constexpr int32_t kBands = 10;
+
+  // Lightweight no-op token types — preserved for API compatibility.
+  struct producer_token_t {
+    explicit producer_token_t(PriorityQueueT&) noexcept {}
+    producer_token_t(const producer_token_t&) = default;
+    producer_token_t& operator=(const producer_token_t&) = default;
+  };
+  struct consumer_token_t {
+    explicit consumer_token_t(PriorityQueueT&) noexcept {}
+    consumer_token_t(const consumer_token_t&) = default;
+    consumer_token_t& operator=(const consumer_token_t&) = default;
+  };
+
+  PriorityQueueT() = default;
+  PriorityQueueT(const PriorityQueueT&) = delete;
+  PriorityQueueT& operator=(const PriorityQueueT&) = delete;
+
+  // Enqueue: routes to the priority band matching message->jmsHeaders.priority.
+  void enqueue(tiny_mq::Message::Ptr msg) {
+    int32_t prio = msg ? std::clamp(msg->jmsHeaders.priority, int32_t{0}, int32_t{9}) : int32_t{4};
+    _bands[static_cast<size_t>(prio)].enqueue(std::move(msg));
+    // Bit is set, and the semaphore signaled, only after the band enqueue is
+    // visible, so neither the mask nor a woken waiter can observe "empty" when
+    // a message is actually present (see dequeueFromBands).
+    _nonEmpty.fetch_or(static_cast<uint16_t>(1u << prio), std::memory_order_release);
+    _sema.signal();  // counting semaphore: wakes a blocked consumer, one token per message
+  }
+
+  // Tokened enqueue — token is a no-op; priority is taken from the message.
+  void enqueue(producer_token_t const& /*tok*/, tiny_mq::Message::Ptr msg) {
+    enqueue(std::move(msg));
+  }
+
+  // Blocking dequeue with microsecond timeout (consumer-token overload).
+  // Waits on the semaphore (one token per enqueued message), then takes the
+  // highest-priority non-empty band.
+  bool wait_dequeue_timed(consumer_token_t& /*tok*/, tiny_mq::Message::Ptr& msg, int64_t usec_timeout) {
+    if (!_sema.wait(usec_timeout)) return false;
+    return dequeueFromBandsOrReturnToken(msg);
+  }
+
+  // Tokenless blocking dequeue — used by Consumer::rollback via _transactQueue.
+  bool wait_dequeue_timed(tiny_mq::Message::Ptr& msg, int64_t usec_timeout) {
+    if (!_sema.wait(usec_timeout)) return false;
+    return dequeueFromBandsOrReturnToken(msg);
+  }
+
+  // Non-blocking dequeue.
+  bool try_dequeue(tiny_mq::Message::Ptr& msg) {
+    if (!_sema.tryWait()) return false;
+    return dequeueFromBandsOrReturnToken(msg);
+  }
+
+ private:
+  // Takes the message from the highest-priority non-empty band, using the
+  // _nonEmpty bitmask to skip empty bands (spec 45 fast path). The mask may
+  // lag towards "band looks non-empty but is actually drained" (benign race
+  // with a concurrent dequeuer) — that's handled by clearing the bit and
+  // continuing the walk. It must never lag the other way (mask says empty
+  // while a message is present): a bit is only set in enqueue() after the
+  // band's enqueue has already happened, so any thread observing the signal
+  // for that message is guaranteed (by the queue's own synchronization) to
+  // also observe the bit. If the mask-guided walk still comes up empty despite
+  // a signal having fired, a full 9->0 scan runs as a safety net.
+  bool dequeueFromBands(tiny_mq::Message::Ptr& msg) {
+    uint16_t mask = _nonEmpty.load(std::memory_order_acquire);
+    while (mask != 0) {
+      auto band = static_cast<int32_t>((sizeof(uint16_t) * 8 - 1) - std::countl_zero(mask));
+      if (_bands[static_cast<size_t>(band)].try_dequeue(msg)) return true;
+      _nonEmpty.fetch_and(static_cast<uint16_t>(~(1u << band)), std::memory_order_relaxed);
+      mask = _nonEmpty.load(std::memory_order_acquire);
+    }
+    for (int32_t band = kBands - 1; band >= 0; --band) {
+      if (_bands[static_cast<size_t>(band)].try_dequeue(msg)) return true;
+    }
+    return false;
+  }
+
+  // Called after a successful semaphore acquire. Because every enqueue signals
+  // exactly once and every message is consumed by exactly one successful
+  // dequeueFromBands(), the token this call holds is guaranteed to correspond
+  // to *some* present message — but with several concurrent consumers it may
+  // not be the specific one this thread expects (e.g. another consumer's
+  // dequeueFromBands() already grabbed it via the mask/full-scan walk before
+  // this thread ran). If our own scan still finds nothing, the token is
+  // spurious for us: hand it back with signal() so whichever consumer holds
+  // the real message's token eventually wakes, rather than silently dropping
+  // a wakeup for a message that is genuinely enqueued.
+  bool dequeueFromBandsOrReturnToken(tiny_mq::Message::Ptr& msg) {
+    if (dequeueFromBands(msg)) return true;
+    _sema.signal();
+    return false;
+  }
+
+  std::array<moodycamel::ConcurrentQueue<tiny_mq::Message::Ptr>, kBands> _bands;
+  moodycamel::LightweightSemaphore _sema{0};
+  std::atomic<uint16_t> _nonEmpty{0};
+};
+
+using QueueT = PriorityQueueT;
 
 #endif  // TINY_MQ__MESSAGE_H_

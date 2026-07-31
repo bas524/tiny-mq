@@ -14,3 +14,9 @@ CMakeUserPresets.json
 # Runtime storage / benchmark data created by tests
 /tiny-mq/
 /bench-mq/
+# Рабочие пакеты событийной цепочки (.claude/chain): промпты стадий, логи
+# headless-процессов, handoff-JSON. Эфемерны и привязаны к конкретному прогону —
+# долговременный эвиденс живёт в docs/reviews/ и docs/features/.
+/handoffs/
+# Кеш neocmakelsp и прочих LSP — машинно-локальный артефакт
+/.cache/

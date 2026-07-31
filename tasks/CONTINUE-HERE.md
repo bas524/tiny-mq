@@ -18,12 +18,22 @@ STOMP 1.2 (v1) → свой protobuf (v2, вместо AMQP); admin — gRPC/HTT
 ## Команды
 
 ```
-cd cmake-build-debug && ninja                       # сборка (-Werror)
-./cmake-build-debug/tiny_mq --gtest                 # все тесты
-./cmake-build-debug/tiny_mq --gbench --benchmark_min_time=1.0s   # бенчмарки
+cmake --preset user-debug                                   # конфигурирование
+cmake --build --preset debug --parallel                     # сборка (-Werror)
+./cmake-build-debug/tiny_mq --gtest_filter='PriorityOrderingTest.*'   # набор тестов
+./cmake-build-debug/tiny_mq --gtest_filter='-*Bench*'                 # весь сьют
+
+cmake --preset user-release && cmake --build --preset release --parallel
+./cmake-build-releasewithdebuginfo/tiny_mq --gbench --benchmark_min_time=1.2s
 ```
-Примечание: `--gtest_filter=` этим бинарём НЕ обрабатывается корректно — гонять
-весь сьют и грепать вывод. Перф мерить с `min_time=1.0s` (короткие прогоны шумят).
+Примечания:
+- `--gtest_filter=` **поддерживается** (прежнее утверждение в этом файле было неверным).
+- ⚠ Бинарь **без аргументов падает в SIGSEGV** (`main.cpp:207` разыменовывает `argv[1]`
+  при `argc==1`) — всегда передавай `--gtest_filter=` или `--gbench`.
+- Перф мерить только на release, интерливированными прогонами master-vs-ветка (master —
+  в отдельном `git worktree`), `--benchmark_repetitions=7..9`, сравнение по `cpu_mean_ns`.
+  Сравнивать два бенча внутри одной ветки бессмысленно — так стоимость фичи не измеряется.
+  Эталон — `benchmarks/baseline.md`.
 
 ## Состояние (что уже сделано)
 
@@ -85,11 +95,22 @@ Topic_AutoAck_NonPersistent ≈669.6k).
   через `Storage::scanPrefix` (43-байт префикс, чанк 4096/тик, курсор). `ExpirationTest`
   (4 теста). Кросс-модельное ревью approved (`docs/reviews/44-message-expiration-sweep.review.md`,
   раунд 2). Follow-up: m5/n1–n5.
-- ⬜ 45 priority ordering → 13 delivery delay → 23 Session.recover → 24 redelivery+DLQ
-  → 25 noLocal → 28 receiveNoWait → 30 аудит грамматики Selector.
+- ✅ 45 priority ordering — `PriorityQueueT`: 10 бэндов, маска непустых бэндов,
+  `LightweightSemaphore` вместо отдельной сигнальной очереди. `PriorityOrderingTest` ×5.
+  Ревью (MiniMax-M3) + перф-гейт (deepseek-reasoner) approved, коммит `a26b5c5`.
+  Перф к master: −2.2% / +2.5%. Отчёты — `docs/reviews/45-priority-ordering.{review,perf}.md`,
+  документация — `docs/features/45-priority-ordering.md`.
+- ⬜ 13 delivery delay → 23 Session.recover → 24 redelivery+DLQ → 25 noLocal
+  → 28 receiveNoWait → 30 аудит грамматики Selector.
 
-**Следующий шаг — 45 (priority ordering):** 10 бэндов приоритета, polling 9→0;
-бенчмаркать uniform-кейс (см. UNIFIED-PLAN, M1). Тесты по `docs/jms-spec/45-*.md`.
+**Следующий шаг — 13 (delivery delay):** min-heap по `deliveryTime`, таймер commit-time
+для транзакций. `deliveryTime` уже заполняется ingress-путём спеки 12 и round-trip'ится
+через формат хранения `0x02`. Тесты по `docs/jms-spec/13-delivery-delay.md`.
+
+**Урок спеки 45, применимый к 13:** это снова горячий путь delivery. Мерить перф только
+на release и только master-vs-ветка (см. раздел «Команды»); проверять обе ветки доставки
+(`save` и `deliverCommitted`). Дизайн из спеки может не проходить перф-требование —
+у 45 прямолинейная реализация стоила −13%.
 
 ## Известные проблемы / долги
 

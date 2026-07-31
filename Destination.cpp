@@ -8,6 +8,8 @@
 #include <Poco/File.h>
 #include <Poco/FileStream.h>
 #include <Poco/Exception.h>
+#include <algorithm>
+#include <cstring>
 #include "DestinationHash.h"
 #include "TextMessage.h"
 #include "BytesMessage.h"
@@ -76,6 +78,36 @@ void Destination::save(const Producer& producer, const Message& message) {
 }
 
 namespace {
+// Extract JMSPriority from storage-format bytes for correct band placement on replay.
+//
+// Storage layout: [1 type-byte][toBytes() output]
+// toBytes() 0x02 header offsets (relative to start of _cachedStorageBytes):
+//   [0]  type byte (prefix, NOT part of toBytes)
+//   [1]  magic (0x02)
+//   [2..9]  int64_t number
+//   [10..25] UUID (16 bytes)
+//   [26] reliability
+//   [27..34] timestamp (8 bytes)
+//   [35..42] expiration (8 bytes)
+//   [43..50] deliveryTime (8 bytes)
+//   [51..54] priority (int32_t)  ← extracted here
+int32_t priorityFromStorageBytes(const std::vector<char>& data) noexcept {
+  constexpr size_t kOffset = 1   // type byte
+                           + 1   // magic
+                           + 8   // number
+                           + 16  // uuid
+                           + 1   // reliability
+                           + 8   // timestamp
+                           + 8   // expiration
+                           + 8;  // deliveryTime  (total = 51)
+  constexpr int32_t kDefault = 4;
+  if (data.size() < kOffset + sizeof(int32_t)) return kDefault;
+  if (static_cast<uint8_t>(data[1]) != 0x02) return kDefault;  // pre-header format: use default
+  int32_t prio = kDefault;
+  std::memcpy(&prio, data.data() + kOffset, sizeof(prio));
+  return std::clamp(prio, int32_t{0}, int32_t{9});
+}
+
 // Factory: create an empty shell message of the given type for replay
 tiny_mq::Message::Ptr makeMessageShell(tiny_mq::Message::Type type) {
   switch (type) {
@@ -104,6 +136,10 @@ tiny_mq::Message::Ptr makeMessageShell(tiny_mq::Message::Type type) {
     shell->uuid = uuid;
     shell->reliability = Message::PERSISTENT;
     shell->_cachedStorageBytes = data;
+    // Restore the original JMSPriority so the message lands in the correct band.
+    // Priority is embedded in the 0x02 wire payload; extract it here so the
+    // PriorityQueueT::enqueue() call below routes to the right band.
+    shell->jmsHeaders.priority = priorityFromStorageBytes(data);
     shell->_storageTomId  = record.tomId;
     shell->_storageOffset = record.offset;
     queue.enqueue(std::move(shell));
@@ -286,7 +322,7 @@ void Destination::deleteConsumer(const Poco::UUID& id) {
 
 Producer::Ptr Destination::createProducer(Session& session) {
   TRACE(_logger);
-  using TokenType = moodycamel::BlockingConcurrentQueue<Message::Ptr>::producer_token_t;
+  using TokenType = QueueT::producer_token_t;
   std::unique_ptr<TokenType> token;
   if (isQueueFamily()) {
     token = std::make_unique<TokenType>(_consumers.begin()->second->getProducerToken());
