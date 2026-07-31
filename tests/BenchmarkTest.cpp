@@ -264,3 +264,55 @@ BENCHMARK_F(BenchmarkFixture, Topic_AutoAck_NonPersistent_RoundTrip)(benchmark::
     }
     state.SetItemsProcessed(state.iterations());
 }
+
+// ---------------------------------------------------------------------------
+// 9. Priority ordering — uniform priority (spec 45 open question).
+//    All messages sent at default p=4.  This benchmark answers the open
+//    question: does multi-band polling add unacceptable latency to the common
+//    uniform-priority case?  A regression >~5% vs the baseline for
+//    AutoAck_NonPersistent_RoundTrip is a blocker.
+// ---------------------------------------------------------------------------
+BENCHMARK_F(BenchmarkFixture, Priority_Uniform_NonPersistent_RoundTrip)(benchmark::State& state) {
+    using namespace tiny_mq;
+    Connection session_conn(*exchange);
+    Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
+    auto dest = session.createDestination(destination::Queue, "bm_prio_uniform_np");
+    auto producer = session.createProducer(dest);
+    auto consumer = session.createConsumer(dest);
+    TextMessage msg = session.createTextMessage(kPayload, Message::NOT_PERSISTENT);
+    // Default priority = 4 (uniform workload).
+    producer->send(msg, SendOptions{Message::NOT_PERSISTENT, 4, 0, 0});
+    auto dummy = consumer->recv();  // drain the one pre-sent message
+    benchmark::DoNotOptimize(dummy);
+
+    for (auto _ : state) {
+        producer->send(msg, SendOptions{Message::NOT_PERSISTENT, 4, 0, 0});
+        auto received = consumer->recv();
+        benchmark::DoNotOptimize(received);
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+
+// ---------------------------------------------------------------------------
+// 10. Priority ordering — mixed priorities (p=0 and p=9, interleaved sends).
+//     Measures throughput when the priority path is exercised.
+// ---------------------------------------------------------------------------
+BENCHMARK_F(BenchmarkFixture, Priority_Mixed_NonPersistent_RoundTrip)(benchmark::State& state) {
+    using namespace tiny_mq;
+    Connection session_conn(*exchange);
+    Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
+    auto dest = session.createDestination(destination::Queue, "bm_prio_mixed_np");
+    auto producer = session.createProducer(dest);
+    auto consumer = session.createConsumer(dest);
+    TextMessage msg = session.createTextMessage(kPayload, Message::NOT_PERSISTENT);
+
+    bool highPrio = true;
+    for (auto _ : state) {
+        int32_t prio = highPrio ? 9 : 0;
+        highPrio = !highPrio;
+        producer->send(msg, SendOptions{Message::NOT_PERSISTENT, prio, 0, 0});
+        auto received = consumer->recv();
+        benchmark::DoNotOptimize(received);
+    }
+    state.SetItemsProcessed(state.iterations());
+}

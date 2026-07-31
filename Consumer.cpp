@@ -260,7 +260,7 @@ QueueT& Consumer::transactQueue() const { return *_transactQueue; }
 
 Destination& Consumer::destination() const { return _destination.get(); }
 
-moodycamel::BlockingConcurrentQueue<Message::Ptr>::producer_token_t Consumer::getProducerToken() {
+QueueT::producer_token_t Consumer::getProducerToken() {
   TRACE(_logger);
   return QueueT::producer_token_t(*_queue);
 }

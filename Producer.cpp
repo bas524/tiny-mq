@@ -14,7 +14,7 @@ namespace tiny_mq {
 Producer::Producer(Destination &destination,
                    Session &session,
                    const Poco::UUID &uuid,
-                   std::unique_ptr<moodycamel::BlockingConcurrentQueue<Message::Ptr>::producer_token_t> token)
+                   std::unique_ptr<QueueT::producer_token_t> token)
     : _uuid(uuid),
       _destination(destination),
       _token(std::move(token)),
@@ -103,7 +103,7 @@ void Producer::dispatch(const Message &message) {
                    Poco::format("producer[%s] send message[%s] to %s", _uuid.toString(), message.uuid.toString(), _destination.get().uri()));
 }
 const std::string &Producer::transactionId() const { return _session.get().transactionId(); }
-const moodycamel::BlockingConcurrentQueue<Message::Ptr>::producer_token_t &Producer::token() const {
+const QueueT::producer_token_t &Producer::token() const {
   return *_token;
 }
 

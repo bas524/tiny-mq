@@ -28,7 +28,7 @@ struct SendOptions {
 class Producer {
   Poco::UUID _uuid;
   std::reference_wrapper<Destination> _destination;
-  std::unique_ptr<moodycamel::BlockingConcurrentQueue<Message::Ptr>::producer_token_t> _token;
+  std::unique_ptr<QueueT::producer_token_t> _token;
   std::reference_wrapper<Poco::Logger> _logger;
   std::reference_wrapper<Session> _session;
   std::shared_ptr<QueueT> _transactQueue;
@@ -61,8 +61,8 @@ class Producer {
   explicit Producer(Destination &destination,
                     Session &session,
                     const Poco::UUID &uuid,
-                    std::unique_ptr<moodycamel::BlockingConcurrentQueue<Message::Ptr>::producer_token_t> token);
-  const moodycamel::BlockingConcurrentQueue<Message::Ptr>::producer_token_t &token() const;
+                    std::unique_ptr<QueueT::producer_token_t> token);
+  const QueueT::producer_token_t &token() const;
   // Apply per-send options to the message (deliveryMode/priority/expiration/deliveryTime).
   static void applyOptions(Message &message, const SendOptions &opts);
   // Fill provider headers (messageId/timestamp) and hand off to the destination.

@@ -36,7 +36,7 @@ class Consumer {
   using Ptr = std::shared_ptr<Consumer>;
   const Poco::UUID &id() const;
   Message::Ptr recv(int64_t usec_timeout = 10000000);
-  moodycamel::BlockingConcurrentQueue<Message::Ptr>::producer_token_t getProducerToken();
+  QueueT::producer_token_t getProducerToken();
   void acknowledgeOn(const Message &message);
   const Session &session() const;
   virtual ~Consumer();

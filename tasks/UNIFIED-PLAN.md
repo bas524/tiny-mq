@@ -48,7 +48,7 @@
 | 03 ClientID/lifecycle/ExceptionListener | D | M0 | ✅ done (ConnectionMetaData + идемпотентный close/IllegalStateException + durable-ключ (clientID,name)) |
 | 12 Per-send DeliveryMode/Priority/TTL | A | M1 | ✅ done (SendOptions: send(msg,opts)/setDefault; priority/expiration/deliveryTime ingress) |
 | 44 Expiration sweep | A | M1 | ✅ done (recv-drop + deadline-cadence sweeper via scanPrefix; ExpirationTest ×4; cross-model review approved) |
-| 45 Priority ordering | A | M1 | ⬜ planned |
+| 45 Priority ordering | A | M1 | ✅ done (PriorityQueueT: 10 бэндов + маска непустых + LightweightSemaphore вместо сигнальной очереди; PriorityOrderingTest ×5; ревью MiniMax-M3 + перф-гейт approved; корректность опирается на инвариант ADR-0005 «один consumer на очередь» — спека 26 обязана перепроверить) |
 | 13 Delivery delay | A | M1 | ⬜ planned |
 | 23 Session.recover() | B | M1 | ⬜ planned |
 | 24 Redelivery counter + DLQ | B | M1 | ⬜ planned |
@@ -106,7 +106,24 @@
   ревью: `docs/reviews/44-message-expiration-sweep.review.md` (approved, раунд 2).
   Follow-up (не блокируют): m5 (гард 0x02), n1 (`dataPrefix` clear() на ошибке),
   n3 (уточнить формулировку спеки: eventually-consistent реклейм).
-- 45: priority ordering (10 бэндов, polling 9→0; **бенчмаркать uniform-кейс**).
+- ✅ 45: priority ordering — `PriorityQueueT` (`Message.h`): 10 бэндов 0..9, приём от
+  старшего непустого к младшему, строгий FIFO внутри бэнда, публичный API не меняется.
+  Replay после рестарта раскладывает по тем же бэндам (priority из формата 0x02);
+  оба пути доставки (`save` / `deliverCommitted`). Тесты `PriorityOrderingTest` ×5.
+  **Дизайн разошёлся со спекой по перф-причинам:** прямолинейные «бэнды + отдельная
+  сигнальная `BlockingConcurrentQueue`» дали −13% на `AutoAck_NonPersistent` (две
+  операции с очередями на сообщение вместо одной), битовая маска непустых бэндов
+  причину не сняла (−19…−23%); итог — маска + `moodycamel::LightweightSemaphore`
+  вместо сигнальной очереди. Перф к master: −2.2% / +2.5% (в пределах шума, 5
+  интерливированных пар, парный t-критерий). Open question спеки закрыт: поллинг
+  стоит ≈6 нс/сообщение (~4%) в uniform-кейсе. Ревью MiniMax-M3 approved
+  (`docs/reviews/45-priority-ordering.review.md`), перф-гейт approved
+  (`.perf.md`), документация `docs/features/45-priority-ordering.md`,
+  baseline `benchmarks/baseline.md`.
+  **⚠ Условие для 26:** корректность (отсутствие живой блокировки при возврате жетона
+  семафора) доказана через инвариант ADR-0005 «на одной `PriorityQueueT` ровно один
+  consumer». Спека 26 (shared consumers) его нарушает и обязана повторить разбор §R2 ревью.
+  Follow-up (не блокируют): F3 (durable-реплей приоритета без отдельного теста).
 - 13: delivery delay (min-heap по deliveryTime; таймер commit-time для транзакций).
 - 23: `Session.recover()` (per-consumer in-flight set).
 - 24: redelivery counter + DLQ (RedeliveryPolicy, backoff через 13).
@@ -121,6 +138,12 @@
 - 21: `CompletionListener` (async send; запрет под TRANSACTED).
 - 02: `JMSContext` (фасад над Connection+Session+Producer/Consumer).
 - 26: shared (durable) consumers (`DurableSubState` → набор UUID).
+  **⚠ Обязательное предусловие от 45:** несколько консьюмеров на одной `PriorityQueueT`
+  нарушают инвариант ADR-0005, на котором стоит доказательство корректности семафорного
+  протокола (возврат жетона в `dequeueFromBandsOrReturnToken` не даёт живой блокировки
+  ровно потому, что consumer один). Перед реализацией — перечитать §R2
+  `docs/reviews/45-priority-ordering.review.md` и перепроверить: lost wakeup, живая
+  блокировка «два консьюмера гоняют один жетон», двойной учёт.
 - 27: `QueueBrowser` (snapshot-итератор, queue-only).
 - 31: request/reply + `Requestor` (temp-destinations, привязанные к Connection).
 
