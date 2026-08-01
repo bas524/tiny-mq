@@ -10,7 +10,7 @@ macOS в том же прогоне.
 | Задача | Статус | Суть |
 |---|---|---|
 | [LP-01](01-anyvisitor-dangling-capture.md) | ✅ done | `AnyVisitor::insertVisitor` захватывает висячую ссылку — UB, объясняет все 20 падений |
-| [LP-02](02-triage-after-fix.md) | ⬜ open (ждёт зелёного Linux) | Разбор остаточных падений после LP-01 |
+| [LP-02](02-triage-after-fix.md) | ✅ done | Остаточных падений нет; обе платформы зелёные в прогоне 30708398363 |
 | [LP-03](03-storage-worker-uncaught-exception.md) | ✅ done | `~ConcurrentLinearStorage` выпускал исключение из noexcept-деструктора -> `std::terminate` |
 | [LP-04](04-test-storage-isolation.md) | ⬜ open | Тесты не изолированы по хранилищу: детерминированное падение со 2-й итерации `--gtest_repeat` |
 
