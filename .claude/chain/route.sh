@@ -92,7 +92,7 @@ case "$status" in
     p="$(write_prompt reviewer <<EOF
 Ты jms-reviewer (AEF Standard 12, независимое кросс-модельное ревью). Роль — .claude/agents/jms-reviewer.md.
 Прочитай handoff-пакет $pkg и спеку $sdd (раздел «Test plan» = критерии приёмки).
-Выполни процедуру .claude/skills/cross-model-review против текущего git-диффа относительно master.
+Выполни процедуру .claude/skills/cross-model-review против текущего git-диффа относительно main.
 Producer работал на другой модели — рассуждай самостоятельно и перепроверяй его утверждения фактически (собери и прогони тесты сам), а не на слово.
 Вердикт по правилу default-deny. Код не правь — его правит Producer.
 Запиши развёрнутое ревью в docs/reviews/ и handoff в $outdir/reviewer.json с полями:
@@ -129,7 +129,7 @@ EOF
 Определи, тронут ли горячий путь (routing, delivery, (de)serialization, storage, ack/transaction, сетевой кодек). Если нет — верни status=approved с пометкой N/A.
 Если тронут:
 - мерь на release/relwithdebinfo (cmake --preset user-release), НЕ на debug;
-- сравнивай master vs эту ветку через git stash + checkout, а НЕ два бенча внутри одной ветки: после изменения оба уже идут по новому коду, и такое сравнение стоимость фичи не измеряет;
+- сравнивай main vs эту ветку через git stash + checkout, а НЕ два бенча внутри одной ветки: после изменения оба уже идут по новому коду, и такое сравнение стоимость фичи не измеряет;
 - несколько повторов (--benchmark_repetitions=5 --benchmark_report_aggregates_only=true), следи за CV; числу с CV > ~5% не верь;
 - верни рабочее дерево в исходное состояние перед выходом (та же ветка, стеш применён).
 Регрессия горячего пути > ~5% без обоснования = status=rejected с конкретикой.

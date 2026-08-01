@@ -1,0 +1,213 @@
+name: CI
+
+# Сборка, тесты и упаковка дистрибутивов.
+#
+# Зависимости ставит vcpkg по манифесту vcpkg.json. Сам vcpkg в репозиторий не
+# входит (в .gitignore), поэтому выкачивается по пину версии и кэшируется вместе
+# с бинарным кэшем пакетов — без кэша каждый запуск пересобирал бы icu, poco и
+# protobuf из исходников (десятки минут).
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # Совпадает с версией, на которой проект собирается локально, — чтобы CI и
+  # рабочая машина расходились как можно меньше.
+  VCPKG_TAG: '2026.06.24'
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-binary-cache
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Сборка и тесты (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Системные зависимости
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends \
+              build-essential cmake ninja-build pkg-config \
+              curl zip unzip tar git python3 autoconf automake libtool
+          else
+            brew install ninja || true
+          fi
+          cmake --version && ninja --version
+
+      - name: Выкачать vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ env.VCPKG_TAG }}
+          path: vcpkg
+          fetch-depth: 1
+
+      # Кэшируется бинарный кэш пакетов, а не каталог vcpkg: так ключ зависит от
+      # манифеста и версии vcpkg, и обновление одной зависимости не обесценивает
+      # весь кэш целиком.
+      - name: Кэш собранных пакетов vcpkg
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_TAG }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_TAG }}-
+
+      - name: Подготовить vcpkg
+        run: |
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Конфигурирование и сборка (Debug)
+        env:
+          # Пресеты debug/release из CMakePresets.json берут toolchain отсюда,
+          # поэтому машинный CMakeUserPresets.json в CI не нужен.
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+        run: |
+          cmake --preset debug
+          cmake --build --preset debug --parallel
+
+      - name: Тесты
+        run: |
+          # Каталоги tiny-mq/ и bench-mq/ — рабочее хранилище тестов. Их надо
+          # чистить перед прогоном: часть тестов не изолирована по стораджу и
+          # падает на остатках предыдущего запуска (долги F6/F7, START-HERE.md).
+          rm -rf tiny-mq bench-mq
+          # Бинарь без аргументов падает в SIGSEGV (main.cpp:207 разыменовывает
+          # argv[1] при argc==1) — фильтр обязателен, пустой запуск недопустим.
+          ./cmake-build-debug/tiny_mq \
+            --gtest_filter='-*Bench*' \
+            --gtest_output=xml:junit-${{ matrix.os }}.xml
+
+      - name: Выгрузить отчёт о тестах
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-${{ matrix.os }}
+          path: junit-${{ matrix.os }}.xml
+          retention-days: 14
+
+  package:
+    name: Дистрибутив (${{ matrix.os }})
+    needs: build-test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: linux-x86_64
+          - os: macos-latest
+            asset: macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Системные зависимости
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends \
+              build-essential cmake ninja-build pkg-config \
+              curl zip unzip tar git python3 autoconf automake libtool
+          else
+            brew install ninja || true
+          fi
+
+      - name: Выкачать vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ env.VCPKG_TAG }}
+          path: vcpkg
+          fetch-depth: 1
+
+      - name: Кэш собранных пакетов vcpkg
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_TAG }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ env.VCPKG_TAG }}-
+
+      - name: Подготовить vcpkg
+        run: |
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Сборка релиза без тестового кода
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+        run: |
+          # ENABLE_TESTS=OFF убирает из дистрибутива GTest/benchmark и их
+          # зависимости: бинарь ~1.8 МБ вместо ~13 МБ.
+          cmake --preset release -DENABLE_TESTS=OFF
+          cmake --build --preset release --parallel
+
+      - name: Собрать пакет
+        id: pack
+        run: |
+          VERSION=$(sed -n 's/.*VERSION[[:space:]]\+\([0-9][0-9.]*\).*/\1/p' CMakeLists.txt | head -1)
+          PKG="tiny-mq-${VERSION}-${{ matrix.asset }}"
+          mkdir -p "dist/${PKG}/bin" "dist/${PKG}/etc" "dist/${PKG}/share"
+          install -m 0755 cmake-build-releasewithdebuginfo/tiny_mq "dist/${PKG}/bin/tiny_mq"
+          install -m 0644 configurations/tiny_mq.properties "dist/${PKG}/etc/tiny_mq.properties"
+          install -m 0644 README.md LICENSE "dist/${PKG}/share/"
+          # Документация функциональности по закрытым спекам.
+          cp -r docs/features "dist/${PKG}/share/docs" 2>/dev/null || true
+          {
+            echo "version=${VERSION}"
+            echo "commit=${GITHUB_SHA}"
+            echo "run=${GITHUB_RUN_ID}"
+            echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "dist/${PKG}/share/build-info.txt"
+          tar -czf "${PKG}.tar.gz" -C dist "${PKG}"
+          shasum -a 256 "${PKG}.tar.gz" > "${PKG}.tar.gz.sha256"
+          ls -lh "${PKG}.tar.gz"
+          echo "pkg=${PKG}" >> "$GITHUB_OUTPUT"
+
+      - name: Выгрузить дистрибутив
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.pkg }}
+          path: |
+            ${{ steps.pack.outputs.pkg }}.tar.gz
+            ${{ steps.pack.outputs.pkg }}.tar.gz.sha256
+          retention-days: 30
+
+  release:
+    name: Релиз
+    # Только для тегов вида v* — обычные пуши в master релиз не создают.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Опубликовать релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -lR artifacts
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            artifacts/*.tar.gz artifacts/*.tar.gz.sha256

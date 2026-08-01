@@ -124,9 +124,14 @@ set(POCO_LIBS
     Poco::JSON
     )
 
+# Корень проекта нужен в include-пути всегда: заголовки подключают
+# <external/concurrent_queue/...> угловыми скобками. Раньше эта строка целиком
+# лежала внутри if (ENABLE_TESTS), из-за чего сборка с ENABLE_TESTS=OFF падала.
+target_include_directories(tiny_mq PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+
 if (ENABLE_TESTS)
   target_compile_definitions(tiny_mq PUBLIC ENABLE_TESTS)
-  target_include_directories(tiny_mq PUBLIC tests ${CMAKE_CURRENT_LIST_DIR})
+  target_include_directories(tiny_mq PUBLIC tests)
   target_sources(tiny_mq PUBLIC
                  tests/TestHelper.h
                  tests/SimpleTest.cpp
