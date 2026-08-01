@@ -35,7 +35,7 @@ Consumer::Consumer(Destination& destination, Session& session, std::shared_ptr<Q
   {
     Poco::FileOutputStream fo(_path.toString() + "/meta.info");
     fo << "consumer: " << _uuid.toString() << '\n';
-    fo << "destination: " << _destination.get().name() << "[" << _destination.get().typeName() << "}" << '\n';
+    fo << "destination: " << _destination.get().name() << "[" << _destination.get().typeName() << "]" << '\n';
     fo << "session: " << _session.get().id() << '\n';
   }
 
