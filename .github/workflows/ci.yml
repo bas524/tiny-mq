@@ -41,7 +41,8 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y -qq --no-install-recommends \
               build-essential cmake ninja-build pkg-config \
-              curl zip unzip tar git python3 autoconf automake libtool
+              curl zip unzip tar git python3 autoconf automake libtool \
+              uuid-dev
           else
             brew install ninja || true
           fi
@@ -121,7 +122,8 @@ jobs:
             sudo apt-get update -qq
             sudo apt-get install -y -qq --no-install-recommends \
               build-essential cmake ninja-build pkg-config \
-              curl zip unzip tar git python3 autoconf automake libtool
+              curl zip unzip tar git python3 autoconf automake libtool \
+              uuid-dev
           else
             brew install ninja || true
           fi
