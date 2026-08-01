@@ -178,6 +178,7 @@ if (ENABLE_TESTS)
                  tests/PriorityOrderingTest.h
                  tests/AnyVisitorTest.cpp
                  tests/AnyVisitorTest.h
+                 tests/StorageWorkerResilienceTest.cpp
                  )
   set(TEST_LIBS
       GTest::gtest

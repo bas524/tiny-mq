@@ -46,6 +46,8 @@ class ConcurrentLinearStorage: Poco::Runnable {
   mutable moodycamel::BlockingConcurrentQueue<Operation*> _operations;
   Poco::Thread _thread;
   std::atomic<bool> _isRunning;
+  std::atomic<bool> _started{false};        // start() was actually called — join() is only valid then
+  std::atomic<bool> _stopRequested{false};  // guards stop() against concurrent/repeat calls
   std::atomic<int64_t> _sweepIntervalUs{1'000'000};  // JMSExpiration sweep cadence (spec 44), default 1 s
   int64_t _lastSweepUs{0};                           // worker-only: deadline for the next sweep (B1)
   linear_storage::SweepCursor _sweepCursor{};        // worker-only: resume point for chunked sweeps (B2)

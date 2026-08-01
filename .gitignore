@@ -18,3 +18,6 @@ CMakeUserPresets.json
 /handoffs/
 # Кеш neocmakelsp и прочих LSP — машинно-локальный артефакт
 /.cache/
+
+# Рабочие worktree агентов (создаются harness на время задачи)
+/.claude/worktrees/
