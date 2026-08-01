@@ -176,6 +176,8 @@ if (ENABLE_TESTS)
                  tests/ExpirationTest.h
                  tests/PriorityOrderingTest.cpp
                  tests/PriorityOrderingTest.h
+                 tests/AnyVisitorTest.cpp
+                 tests/AnyVisitorTest.h
                  )
   set(TEST_LIBS
       GTest::gtest

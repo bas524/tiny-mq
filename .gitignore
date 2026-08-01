@@ -1,7 +1,5 @@
-/cmake-build-debug/
-/cmake-build-relwithdebinfo/
-/cmake-build-releasewithdebuginfo/
-/cmake-build-vsc/
+# Любые каталоги сборки CMake, включая разовые (asan, ubsan, tsan и т.п.)
+/cmake-build-*/
 /.idea/
 /external/parallel-hashmap/.github/
 /external/span-lite/.github/
