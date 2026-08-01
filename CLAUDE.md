@@ -65,6 +65,8 @@ Acknowledge modes mirror JMS: `AUTO_ACKNOWLEDGE`, `CLIENT_ACKNOWLEDGE`, `INDIVID
 
 Persistence is driven by the `Message::PERSISTENT` flag. Non-persistent messages never touch storage.
 
+**Destructors must not throw ([ADR-0006](arch/0006-destructors-must-not-throw.md)).** Destructors here routinely do real work — stopping the storage worker, rolling back a transaction — and a destructor is implicitly `noexcept`, so an escaping exception is an immediate `std::terminate`, not a catchable error. Wrap anything that can throw in try-catch and log it. This defect has recurred three times; treat it as an invariant, not a style preference.
+
 ### Durable subscribers (topics only)
 
 `Session::createDurableConsumer(topic, name)` allocates a dedicated `ConcurrentLinearStorage` at `topic-path/durable-<name>/`. Offline persistent messages accumulate there and replay on reconnect. `Session::unsubscribe(topic, name)` deletes that directory.
