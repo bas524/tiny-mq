@@ -17,8 +17,14 @@ using tiny_mq::ObjectMessage;
 using tiny_mq::Producer;
 using tiny_mq::Session;
 
-void ObjectMessageTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void ObjectMessageTest::TearDown() { _exchange.reset(); }
+void ObjectMessageTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void ObjectMessageTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 static tiny_mq::BytesVector bv(std::initializer_list<int8_t> b) { return tiny_mq::BytesVector(b); }
 

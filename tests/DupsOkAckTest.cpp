@@ -21,8 +21,14 @@ using tiny_mq::Producer;
 using tiny_mq::Session;
 using tiny_mq::TextMessage;
 
-void DupsOkAckTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void DupsOkAckTest::TearDown() { _exchange.reset(); }
+void DupsOkAckTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void DupsOkAckTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 // The mode name is exposed correctly.
 TEST_F(DupsOkAckTest, testModeName) {

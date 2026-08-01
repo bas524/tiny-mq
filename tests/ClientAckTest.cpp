@@ -17,8 +17,14 @@ using tiny_mq::Session;
 using tiny_mq::Connection;
 using tiny_mq::TextMessage;
 
-void ClientAckTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void ClientAckTest::TearDown() { _exchange.reset(); }
+void ClientAckTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void ClientAckTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 // AUTO_ACKNOWLEDGE: message is removed from storage automatically on recv (no ack call needed).
 TEST_F(ClientAckTest, testAutoAcknowledge) {

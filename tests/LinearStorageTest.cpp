@@ -4,6 +4,7 @@
 
 #include "LinearStorageTest.h"
 #include "ConcurrentLinearStorage.h"
+#include "TestHelper.h"
 #include <Poco/File.h>
 #include <Poco/Thread.h>
 #include <Poco/UUIDGenerator.h>
@@ -34,7 +35,13 @@ class StorageWriter : public Poco::Runnable {
   [[nodiscard]] const std::vector<char> &data() const { return _data; }
 };
 
-void LinearStorageTest::SetUp() { _basePath = ("./tiny-mq/storage-test"); }
+void LinearStorageTest::SetUp() {
+  _basePath = Poco::Path(CurrentTestSuiteStorageDir());
+  Poco::File f(_basePath);
+  if (f.exists()) {
+    f.remove(true);
+  }
+}
 void LinearStorageTest::TearDown() {
   Poco::File f(_basePath);
   if (f.exists()) {

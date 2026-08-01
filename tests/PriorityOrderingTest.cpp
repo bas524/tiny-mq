@@ -28,12 +28,14 @@ using tiny_mq::SendOptions;
 using tiny_mq::Session;
 using tiny_mq::TextMessage;
 
-static constexpr const char* kBaseDir = "./tiny-mq";
-
 void PriorityOrderingTest::SetUp() {
-  _exchange = std::make_unique<tiny_mq::Exchange>(kBaseDir);
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
 }
-void PriorityOrderingTest::TearDown() { _exchange.reset(); }
+void PriorityOrderingTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 // ─── (a) Interleaved priority ──────────────────────────────────────────────
 //
@@ -167,13 +169,7 @@ TEST_F(PriorityOrderingTest, testAdjacentPriorityInterleavePreservesBandFIFO) {
 // create a consumer, and verify that all p=9 messages arrive before p=0.
 TEST_F(PriorityOrderingTest, testRestartPreservesBanding) {
   const std::string destName = std::string(CurrentTestName) + "_queue";
-  const std::string dir = std::string(kBaseDir) + "/restart-priority-test";
-
-  // Wipe the directory so we start from a clean slate each run.
-  {
-    Poco::File dirFile(dir);
-    if (dirFile.exists()) dirFile.remove(/*recursive=*/true);
-  }
+  const std::string dir = CurrentTestSuiteStorageDir() + "/restart-priority-test";
 
   constexpr int kLow  = 5;
   constexpr int kHigh = 5;

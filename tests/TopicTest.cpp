@@ -16,8 +16,14 @@ using tiny_mq::Session;
 using tiny_mq::Connection;
 using tiny_mq::TextMessage;
 
-void TopicTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void TopicTest::TearDown() { _exchange.reset(); }
+void TopicTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void TopicTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 // Each subscriber on a topic receives its own copy of every published message.
 TEST_F(TopicTest, testPublishToMultipleSubscribers) {

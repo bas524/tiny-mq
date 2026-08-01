@@ -15,9 +15,13 @@ using tiny_mq::Connection;
 using tiny_mq::TextMessage;
 
 void DurableSubscriberTest::SetUp() {
-    _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq");
+    RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+    _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
 }
-void DurableSubscriberTest::TearDown() { _exchange.reset(); }
+void DurableSubscriberTest::TearDown() {
+    _exchange.reset();
+    RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 

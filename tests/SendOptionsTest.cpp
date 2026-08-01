@@ -20,8 +20,14 @@ using tiny_mq::SendOptions;
 using tiny_mq::Session;
 using tiny_mq::TextMessage;
 
-void SendOptionsTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void SendOptionsTest::TearDown() { _exchange.reset(); }
+void SendOptionsTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void SendOptionsTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 static int64_t nowMs() { return Poco::Timestamp().epochMicroseconds() / 1000; }
 
