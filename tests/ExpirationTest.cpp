@@ -26,8 +26,14 @@ using tiny_mq::SendOptions;
 using tiny_mq::Session;
 using tiny_mq::TextMessage;
 
-void ExpirationTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void ExpirationTest::TearDown() { _exchange.reset(); }
+void ExpirationTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void ExpirationTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 static int64_t nowMs() { return Poco::Timestamp().epochMicroseconds() / 1000; }
 
@@ -60,7 +66,7 @@ TEST_F(ExpirationTest, testExpiredMessageDroppedOnRecv) {
 // Test plan #2: expired persistent records are removed from ConcurrentLinearStorage
 // by the background sweeper within one sweep interval; live records are kept.
 TEST_F(ExpirationTest, testExpiredMessageSweptFromStorage) {
-  const std::string basePath = "./tiny-mq/expiration-sweep";
+  const std::string basePath = "./tiny-mq-test-storage/ExpirationTest-sweep";
   {
     auto storageId = Poco::UUIDGenerator::defaultGenerator().createRandom();
     linear_storage::ConcurrentLinearStorage storage(storageId, basePath);
@@ -125,7 +131,7 @@ TEST_F(ExpirationTest, testExpiredPersistentMessageDroppedOnRecv) {
 // worker queue goes fully idle. With the idle-only cadence this record was never
 // reclaimed; with the deadline-based cadence it is.
 TEST_F(ExpirationTest, testSweepFiresUnderContinuousLoad) {
-  const std::string basePath = "./tiny-mq/expiration-load";
+  const std::string basePath = "./tiny-mq-test-storage/ExpirationTest-load";
   {
     auto storageId = Poco::UUIDGenerator::defaultGenerator().createRandom();
     linear_storage::ConcurrentLinearStorage storage(storageId, basePath);

@@ -16,8 +16,14 @@ using tiny_mq::Session;
 using tiny_mq::Connection;
 using tiny_mq::TextMessage;
 
-void TransactionTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void TransactionTest::TearDown() { _exchange.reset(); }
+void TransactionTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void TransactionTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 TEST_F(TransactionTest, testSendReceiveTransactedBatches) {
   // Create CMS Object for Comms

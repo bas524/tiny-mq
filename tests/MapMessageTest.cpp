@@ -6,6 +6,7 @@
 #include "MapMessage.h"
 #include "Session.h"
 #include "Connection.h"
+#include "TestHelper.h"
 
 using tiny_mq::BytesVector;
 using tiny_mq::Consumer;
@@ -26,8 +27,14 @@ using tiny_mq::property::Long;
 using tiny_mq::property::Short;
 using tiny_mq::property::String;
 
-void MapMessageTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void MapMessageTest::TearDown() { _exchange.reset(); }
+void MapMessageTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void MapMessageTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 TEST_F(MapMessageTest, testClearBody) {
   String testText = std::string("This is some test Text");

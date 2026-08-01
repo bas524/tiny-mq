@@ -18,8 +18,14 @@ using tiny_mq::Session;
 using tiny_mq::Connection;
 using tiny_mq::TextMessage;
 
-void SimpleTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void SimpleTest::TearDown() { _exchange.reset(); }
+void SimpleTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void SimpleTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 TEST_F(SimpleTest, testSendRecv) {

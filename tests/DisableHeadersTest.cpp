@@ -16,8 +16,14 @@ using tiny_mq::Producer;
 using tiny_mq::Session;
 using tiny_mq::TextMessage;
 
-void DisableHeadersTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void DisableHeadersTest::TearDown() { _exchange.reset(); }
+void DisableHeadersTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void DisableHeadersTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 // By default the provider assigns a "ID:" messageId and a non-zero timestamp.
 TEST_F(DisableHeadersTest, testEnabledByDefault) {

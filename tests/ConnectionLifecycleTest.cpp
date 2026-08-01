@@ -15,11 +15,23 @@ using tiny_mq::Connection;
 using tiny_mq::IllegalStateException;
 using tiny_mq::Session;
 
-void LifecycleTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void LifecycleTest::TearDown() { _exchange.reset(); }
+void LifecycleTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void LifecycleTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
-void ExceptionListenerTest::SetUp() { _exchange = std::make_unique<tiny_mq::Exchange>("./tiny-mq"); }
-void ExceptionListenerTest::TearDown() { _exchange.reset(); }
+void ExceptionListenerTest::SetUp() {
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+  _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
+}
+void ExceptionListenerTest::TearDown() {
+  _exchange.reset();
+  RemoveTestStorageDir(CurrentTestSuiteStorageDir());
+}
 
 // clientID may be set exactly once; a second call throws IllegalStateException.
 TEST_F(LifecycleTest, testDoubleSetClientIDThrows) {
