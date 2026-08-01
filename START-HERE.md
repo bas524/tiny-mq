@@ -117,10 +117,14 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
   разбор — `docs/reviews/45-priority-ordering.review.md` §R2.
 - Спека 45: **F3** — durable-реплей приоритета без отдельного теста (покрыт транзитивно
   общим кодом извлечения приоритета).
-- **Изоляция тестов по стораджу (F6/F7).** `ClientAckTest.testMixedPersistenceOrdering` и
+- **Изоляция тестов по стораджу — [LP-04](tasks/linux-port/04-test-storage-isolation.md).**
+  `ClientAckTest.testMixedPersistenceOrdering` и
   `ExpirationTest.testExpiredPersistentMessageDroppedOnRecv` падают на повторном прогоне
   без `rm -rf tiny-mq/` — оставляют записи в сторадже и спотыкаются о них при реплее.
-  Воспроизведено на master. Каждый агент в цепочке спотыкался об это заново.
+  ⚠️ Прежняя формулировка «преэкзистентные плавающие падения» (долги F6/F7) **неверна**:
+  поведение детерминированное — 0 PASS / 5 FAIL при `--gtest_repeat=5`. Из-за этого
+  `--gtest_repeat` нельзя использовать как инструмент поиска гонок, а зелёный CI держится
+  на внешней чистке каталогов в workflow, а не на самих тестах.
 - `benchmarks/baseline.md` снят на нагруженной машине (L.A. 3–55) — перепроверить на
   спокойной, прежде чем считать эталоном проекта.
 - Спека 44: **n1** — `Tom::dataPrefix` глотает ошибку чтения без `clear()` → свип по тому

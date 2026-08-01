@@ -28,6 +28,7 @@ Java Message Service (JMS 2.0), плюс нативную C++ клиентску
 | [0003](0003-connection-object-model.md) | Введение Connection / ConnectionFactory в объектную модель | accepted |
 | [0004](0004-build-targets-layout.md) | Разделение на CMake-таргеты: core / protocol / server / client | accepted |
 | [0005](0005-session-threading-model.md) | Потоковая модель сессии (thread-affinity по JMS) | accepted |
+| [0006](0006-destructors-must-not-throw.md) | Деструкторы не выпускают исключений | accepted |
 
 ## Шаблон нового ADR
 

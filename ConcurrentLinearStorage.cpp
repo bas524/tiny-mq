@@ -27,7 +27,22 @@ ConcurrentLinearStorage::ConcurrentLinearStorage(const Poco::UUID& id, Poco::Pat
     : _linearStorage(id, std::move(basePath)), _logger(Poco::Logger::get(Poco::format("tiny_mq.cuncurrent_storge.%s", id))) {
   TRACE(_logger);
 }
-ConcurrentLinearStorage::~ConcurrentLinearStorage() { stop(); }
+ConcurrentLinearStorage::~ConcurrentLinearStorage() {
+  // stop() is implicitly noexcept here (destructor default): Poco::Thread::join()
+  // can throw Poco::SystemException (pthread_join failure), which would otherwise
+  // reach std::terminate with no diagnostics — this is the root cause of the
+  // observed "libc++abi: terminating due to uncaught exception of type
+  // Poco::SystemException" + Abort trap crash. Log and swallow instead.
+  try {
+    stop();
+  } catch (const Poco::Exception& e) {
+    poco_error(_logger.get(), Poco::format("stop() threw in destructor: %s — ignoring", e.displayText()));
+  } catch (const std::exception& e) {
+    poco_error(_logger.get(), Poco::format("stop() threw in destructor: %s — ignoring", std::string(e.what())));
+  } catch (...) {
+    poco_error(_logger.get(), "stop() threw in destructor: unknown exception — ignoring");
+  }
+}
 Record ConcurrentLinearStorage::append(const Poco::UUID& uuid, const std::vector<char>& data) {
   TRACE(_logger);
   Operation operation;
@@ -105,6 +120,7 @@ void ConcurrentLinearStorage::start() {
   TRACE(_logger);
   if (_isRunning == false) {
     _thread.start(*this);
+    _started = true;
   }
 }
 void ConcurrentLinearStorage::run() {
@@ -118,33 +134,55 @@ void ConcurrentLinearStorage::run() {
     _operations.wait_dequeue_timed(operation, _sweepIntervalUs.load());
 
     if (operation != nullptr) {
-      switch (operation->id) {
-        case OperationId::GET_RECORD_BY_TOM_OFFSET:
-          operation->record = _linearStorage.record(operation->tomId, operation->offset);
-          break;
-        case OperationId::GET_RECORD_BY_UUID:
-          operation->record = _linearStorage.record(operation->uuid);
-          break;
-        case OperationId::GET_DATA_BY_RECORD:
-          operation->data = _linearStorage.data(operation->record);
-          break;
-        case OperationId::APPEND:
-          operation->record = _linearStorage.append(operation->uuid, operation->data);
-          break;
-        case OperationId::REMOVE:
-          _linearStorage.remove(operation->record);
-          break;
-        case OperationId::APPEND_BATCH:
-          for (auto& [uuid, data] : operation->batchItems) {
-            _linearStorage.append(uuid, data);
-          }
-          break;
-        case OperationId::SCAN:
-          operation->scanResult = _linearStorage.scan();
-          break;
-        case OperationId::STOP:
-          _isRunning = false;
-          break;
+      if (operation->id == OperationId::STOP) {
+        // Stop is observed here, before any further filesystem access this
+        // iteration — the caller's stop() is about to return, so nothing below
+        // (including the sweep deadline check) may touch storage after this.
+        _isRunning = false;
+        operation->event.set();
+        break;
+      }
+
+      try {
+        switch (operation->id) {
+          case OperationId::GET_RECORD_BY_TOM_OFFSET:
+            operation->record = _linearStorage.record(operation->tomId, operation->offset);
+            break;
+          case OperationId::GET_RECORD_BY_UUID:
+            operation->record = _linearStorage.record(operation->uuid);
+            break;
+          case OperationId::GET_DATA_BY_RECORD:
+            operation->data = _linearStorage.data(operation->record);
+            break;
+          case OperationId::APPEND:
+            operation->record = _linearStorage.append(operation->uuid, operation->data);
+            break;
+          case OperationId::REMOVE:
+            _linearStorage.remove(operation->record);
+            break;
+          case OperationId::APPEND_BATCH:
+            for (auto& [uuid, data] : operation->batchItems) {
+              _linearStorage.append(uuid, data);
+            }
+            break;
+          case OperationId::SCAN:
+            operation->scanResult = _linearStorage.scan();
+            break;
+          case OperationId::STOP:
+            break;  // handled above
+        }
+      } catch (const Poco::Exception& e) {
+        poco_error(_logger.get(),
+                   Poco::format("storage operation %s failed: %s",
+                                OperationIdToString(operation->id), e.displayText()));
+      } catch (const std::exception& e) {
+        poco_error(_logger.get(),
+                   Poco::format("storage operation %s failed: %s",
+                                OperationIdToString(operation->id), std::string(e.what())));
+      } catch (...) {
+        poco_error(_logger.get(),
+                   Poco::format("storage operation %s failed: unknown exception",
+                                OperationIdToString(operation->id)));
       }
 
       // Async operations are heap-allocated; delete instead of signalling.
@@ -160,20 +198,33 @@ void ConcurrentLinearStorage::run() {
     // bounded even under a continuous operation stream.
     const int64_t nowUs = Poco::Timestamp().epochMicroseconds();
     if (nowUs - _lastSweepUs >= _sweepIntervalUs.load()) {
-      sweepExpired();
+      try {
+        sweepExpired();
+      } catch (const Poco::Exception& e) {
+        poco_error(_logger.get(), Poco::format("sweepExpired failed: %s", e.displayText()));
+      } catch (const std::exception& e) {
+        poco_error(_logger.get(), Poco::format("sweepExpired failed: %s", std::string(e.what())));
+      } catch (...) {
+        poco_error(_logger.get(), "sweepExpired failed: unknown exception");
+      }
       _lastSweepUs = nowUs;
     }
   }
 }
 void ConcurrentLinearStorage::stop() {
   TRACE(_logger);
+  // Guard against repeat/concurrent stop() calls (explicit unsubscribe followed
+  // by the destructor, or vice versa): only the first caller enqueues STOP and
+  // joins the thread, subsequent callers are no-ops.
+  if (_stopRequested.exchange(true)) return;
+  if (!_started) return;  // start() was never called — nothing to stop/join
   if (_isRunning) {
     Operation operation;
     operation.id = OperationId::STOP;
     _operations.enqueue(&operation);
     operation.event.wait();
-    _thread.join();
   }
+  _thread.join();
 }
 bool ConcurrentLinearStorage::isRunning() { return _isRunning; }
 

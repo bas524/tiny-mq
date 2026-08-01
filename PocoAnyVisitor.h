@@ -27,7 +27,12 @@ struct AnyVisitor {
 
   template <typename T>
   void insertVisitor(std::function<void(const T&)> f) {
-    fs.insert(std::make_pair(std::ref(typeid(T)), Function([&f](const Poco::Any& x) { f(Poco::RefAnyCast<T>(x)); })));
+    // `f` is captured by value: the lambda stored in `fs` outlives this call, so it must
+    // own its own copy of the visitor function rather than reference a parameter that is
+    // destroyed on return. Capturing `[&f]` here left the stored lambda holding a dangling
+    // reference — UB that happened to "work" under libc++ but not libstdc++ (see
+    // tasks/linux-port/01-anyvisitor-dangling-capture.md).
+    fs.insert(std::make_pair(std::ref(typeid(T)), Function([f = std::move(f)](const Poco::Any& x) { f(Poco::RefAnyCast<T>(x)); })));
   }
 
   bool operator()(const Poco::Any& x) {
