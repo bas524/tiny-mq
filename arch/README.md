@@ -29,6 +29,7 @@ Java Message Service (JMS 2.0), плюс нативную C++ клиентску
 | [0004](0004-build-targets-layout.md) | Разделение на CMake-таргеты: core / protocol / server / client | accepted |
 | [0005](0005-session-threading-model.md) | Потоковая модель сессии (thread-affinity по JMS) | accepted |
 | [0006](0006-destructors-must-not-throw.md) | Деструкторы не выпускают исключений | accepted |
+| [0007](0007-delivery-scheduler-per-destination-lazy-thread.md) | Delivery delay — таймер на Destination, ленивый старт потока | accepted |
 
 ## Шаблон нового ADR
 

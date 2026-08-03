@@ -29,6 +29,12 @@ public:
     // Transaction lifecycle
     void addMessage(const std::string& transactionId, const Poco::UUID& messageId,
                    const std::vector<char>& data);
+    // Patch the 8-byte deliveryTime field (offset 43, 0x02 wire format) in an
+    // already-buffered-but-not-yet-committed record. Used by Producer::commit()
+    // to resolve a transactional send's delay clock, which starts at commit —
+    // not send — per JMS 2.0 §7.8 (spec 13). No-op if messageId has no buffered
+    // data (e.g. not persistent) or the record predates the 0x02 format.
+    void patchDeliveryTime(const Poco::UUID& messageId, int64_t deliveryTime);
     void commitTransaction(const std::string& transactionId);
     void rollbackTransaction(const std::string& transactionId);
     // Recovery

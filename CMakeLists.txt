@@ -112,6 +112,8 @@ add_executable(tiny_mq
                ConcurrentLinearStorage.h
                TransactionBuffer.cpp
                TransactionBuffer.h
+               DeliveryScheduler.cpp
+               DeliveryScheduler.h
                Selector.cpp
                Selector.h
                )
@@ -176,6 +178,8 @@ if (ENABLE_TESTS)
                  tests/ExpirationTest.h
                  tests/PriorityOrderingTest.cpp
                  tests/PriorityOrderingTest.h
+                 tests/DeliveryDelayTest.cpp
+                 tests/DeliveryDelayTest.h
                  tests/AnyVisitorTest.cpp
                  tests/AnyVisitorTest.h
                  tests/StorageWorkerResilienceTest.cpp

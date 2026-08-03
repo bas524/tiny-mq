@@ -64,7 +64,10 @@ class Producer {
                     std::unique_ptr<QueueT::producer_token_t> token);
   const QueueT::producer_token_t &token() const;
   // Apply per-send options to the message (deliveryMode/priority/expiration/deliveryTime).
-  static void applyOptions(Message &message, const SendOptions &opts);
+  // For a transactional send, the delay clock starts at commit, not send (JMS 2.0 §7.8,
+  // spec 13): deliveryTime is left 0 and the requested delay is stashed on the message
+  // for Producer::commit to resolve.
+  static void applyOptions(Message &message, const SendOptions &opts, bool transactional);
   // Fill provider headers (messageId/timestamp) and hand off to the destination.
   void dispatch(const Message &message);
   void commit(const std::string& transactionId);

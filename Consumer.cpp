@@ -189,9 +189,15 @@ void Consumer::push(int64_t number, const Producer& producer, const Message& mes
   if (_selector && !_selector->matches(message)) return;
   Message::Ptr msg = preparePush(number, producer, message);
   if (producer.transactionId().empty()) {
-    // Producer token is only valid for queue-type destinations; use tokenless
-    // enqueue for topics where no token was created.
-    if (producer._token) {
+    if (msg->jmsHeaders.deliveryTime != 0) {
+      // JMS 2.0 § 7.8 (spec 13): a delayed message is invisible to consumers
+      // until due — route through the destination's scheduler instead of the
+      // queue directly. Rare path; deliveryTime is 0 for the vast majority of
+      // messages, so this check is the only cost on the hot (non-delayed) path.
+      _destination.get().enqueueOrSchedule(_queue, std::move(msg));
+    } else if (producer._token) {
+      // Producer token is only valid for queue-type destinations; use tokenless
+      // enqueue for topics where no token was created.
       _queue->enqueue(producer.token(), std::move(msg));
     } else {
       _queue->enqueue(std::move(msg));

@@ -12,6 +12,7 @@
 #include "ConcurrentQueueHeader.h"
 #include "ConcurrentLinearStorage.h"
 #include "TransactionBuffer.h"
+#include "DeliveryScheduler.h"
 
 namespace tiny_mq {
 class Session;
@@ -39,6 +40,10 @@ class Destination {
   size_t _hash;
   std::shared_ptr<linear_storage::ConcurrentLinearStorage> _storage;
   std::shared_ptr<TransactionBuffer> _transactionBuffer;
+  // JMS 2.0 § 7.8 delivery delay (spec 13): one scheduler per destination — see
+  // DeliveryScheduler for the isolation rationale. Lazily starts its worker
+  // thread only once a delayed message is actually scheduled.
+  std::unique_ptr<DeliveryScheduler> _scheduler;
 
   // Durable subscription registry (topic-family only)
   phmap::parallel_node_hash_map<std::string, DurableSubState> _durableSubs;
@@ -86,14 +91,27 @@ class Destination {
 
   // Deliver already-committed messages directly to consumer queues (no re-persistence).
   // Takes ownership of the message ptr — moves it into the queue for queue-family
-  // destinations, copies for topic-family (one copy per subscriber).
+  // destinations, copies for topic-family (one copy per subscriber). Routes through
+  // the delivery-delay scheduler when the message's deliveryTime is still pending.
   void deliverCommitted(Message::Ptr message);
 
-  // Replay non-deleted records from a storage instance into a queue.
-  static void replayFromStorage(QueueT &queue, linear_storage::ConcurrentLinearStorage &storage);
+  // Enqueue msg onto *queue now if its deliveryTime has elapsed (or is unset —
+  // the common case), otherwise arm the per-destination DeliveryScheduler so it
+  // becomes visible exactly when due (JMS 2.0 § 7.8, spec 13).
+  void enqueueOrSchedule(std::shared_ptr<QueueT> queue, Message::Ptr msg);
+
+  // Patch the persisted deliveryTime for a buffered-but-not-yet-committed
+  // transactional message — the delay clock starts at commit, not send.
+  void patchPendingDeliveryTime(const Poco::UUID &messageId, int64_t deliveryTime);
+
+  // Replay non-deleted records from a storage instance into a queue, arming the
+  // delivery scheduler for any record whose delay has not yet elapsed.
+  static void replayFromStorage(std::shared_ptr<QueueT> queue,
+                                linear_storage::ConcurrentLinearStorage &storage,
+                                DeliveryScheduler &scheduler);
 
   // Replay non-deleted messages from the destination's own storage (restart path).
-  void replayStoredMessages(QueueT &queue) const;
+  void replayStoredMessages(std::shared_ptr<QueueT> queue) const;
 
   // Serialise message to [type-byte][toBytes()] and append to an offline durable
   // sub's storage.  Selector matching must be performed by the caller.
