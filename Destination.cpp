@@ -8,6 +8,8 @@
 #include <Poco/File.h>
 #include <Poco/FileStream.h>
 #include <Poco/Exception.h>
+#include <Poco/Format.h>
+#include <Poco/Timestamp.h>
 #include <algorithm>
 #include <cstring>
 #include "DestinationHash.h"
@@ -38,6 +40,8 @@ Destination::Destination(destination::Type type, std::string name, Poco::Path pa
 
   _transactionBuffer = std::make_shared<TransactionBuffer>(_path, _storage);
   _transactionBuffer->recover();
+
+  _scheduler = std::make_unique<DeliveryScheduler>();
 
   Poco::FileOutputStream fo(_path.toString() + "/meta.info");
   fo << "destination: " << _name << '\n';
@@ -108,6 +112,34 @@ int32_t priorityFromStorageBytes(const std::vector<char>& data) noexcept {
   return std::clamp(prio, int32_t{0}, int32_t{9});
 }
 
+// Extract JMSDeliveryTime (spec 13) from storage-format bytes so replay can decide
+// whether a record is still pending — see the offset table above; deliveryTime is
+// the 8 bytes immediately before priority, i.e. at offset 43.
+int64_t deliveryTimeFromStorageBytes(const std::vector<char>& data) noexcept {
+  constexpr size_t kOffset = 1 + 1 + 8 + 16 + 1 + 8 + 8;  // = 43
+  constexpr size_t kSize = 8;
+  if (data.size() < kOffset + kSize) return 0;
+  if (static_cast<uint8_t>(data[1]) != 0x02) return 0;  // pre-header format: never delayed
+  int64_t deliveryTime = 0;
+  std::memcpy(&deliveryTime, data.data() + kOffset, kSize);
+  // Defense-in-depth (spec 13 review round 2, B4): a raw 8-byte field read
+  // straight out of a storage record is untrusted the moment it's out of
+  // range of anything a legitimate send could ever have produced — file
+  // corruption, an old/foreign record, or a future writer with a bug.
+  // Treat it as garbage rather than let it reach the scheduler unchecked:
+  // clamp to 0 (immediate delivery, matching "deliveryTime unset") and log,
+  // so "message arrived immediately instead of on schedule" is diagnosable
+  // instead of silently indistinguishable from a normal replay.
+  if (deliveryTime < 0 || deliveryTime > Poco::Timestamp().epochMicroseconds() / 1000 + kMaxFutureHeaderMs) {
+    poco_warning(Poco::Logger::get("tiny_mq.destination"),
+                 Poco::format("deliveryTimeFromStorageBytes: out-of-range deliveryTime=%?d in "
+                              "storage record — delivering immediately instead of scheduling",
+                              deliveryTime));
+    return 0;
+  }
+  return deliveryTime;
+}
+
 // Factory: create an empty shell message of the given type for replay
 tiny_mq::Message::Ptr makeMessageShell(tiny_mq::Message::Type type) {
   switch (type) {
@@ -123,8 +155,13 @@ tiny_mq::Message::Ptr makeMessageShell(tiny_mq::Message::Type type) {
 
 // Replay all non-deleted records from an arbitrary storage into a queue.
 // Sets the cached-bytes and record-location fields so recv() and acknowledgeOn()
-// can use the fast (no-lookup) path.
-/*static*/ void Destination::replayFromStorage(QueueT& queue, linear_storage::ConcurrentLinearStorage& storage) {
+// can use the fast (no-lookup) path. A record whose deliveryTime has not yet
+// elapsed is armed on the scheduler instead of being made immediately visible
+// (JMS 2.0 § 7.8, spec 13) — a still-pending delay must survive both destination
+// restart and durable-subscriber reconnect.
+/*static*/ void Destination::replayFromStorage(std::shared_ptr<QueueT> queue,
+                                               linear_storage::ConcurrentLinearStorage& storage,
+                                               DeliveryScheduler& scheduler) {
   auto records = storage.scan();
   for (auto& [record, data] : records) {
     if (data.empty()) continue;
@@ -140,14 +177,22 @@ tiny_mq::Message::Ptr makeMessageShell(tiny_mq::Message::Type type) {
     // Priority is embedded in the 0x02 wire payload; extract it here so the
     // PriorityQueueT::enqueue() call below routes to the right band.
     shell->jmsHeaders.priority = priorityFromStorageBytes(data);
+    shell->jmsHeaders.deliveryTime = deliveryTimeFromStorageBytes(data);
+    // deliveryTimeFromStorageBytes clamps an out-of-range raw value to 0, but
+    // _cachedStorageBytes above still holds the untouched raw record: a later
+    // Consumer::recv() rehydrates jmsHeaders from that cache via fromBytes and
+    // would silently revert this clamp (same defect class as spec 13 review
+    // round 2's B2 / round 3's N15 — header and cached-bytes drifting apart).
+    // Keep them in sync unconditionally; a no-op when nothing was clamped.
+    shell->patchCachedDeliveryTime(shell->jmsHeaders.deliveryTime);
     shell->_storageTomId  = record.tomId;
     shell->_storageOffset = record.offset;
-    queue.enqueue(std::move(shell));
+    scheduler.enqueueOrSchedule(queue, std::move(shell));
   }
 }
 
-void Destination::replayStoredMessages(QueueT& queue) const {
-  replayFromStorage(queue, *_storage);
+void Destination::replayStoredMessages(std::shared_ptr<QueueT> queue) const {
+  replayFromStorage(std::move(queue), *_storage, *_scheduler);
 }
 
 /*static*/ void Destination::persistToOfflineSub(DurableSubState& sub, const Message& message) {
@@ -179,7 +224,7 @@ Consumer::Ptr Destination::createConsumer(Session& session, std::shared_ptr<Sele
       }
       consumer = Consumer::Ptr(new Consumer(*this, session, _queue, id, _path, _storage, _transactionBuffer, selector));
       // Replay any messages committed in a previous Exchange lifetime
-      if (_queue) replayStoredMessages(*_queue);
+      if (_queue) replayStoredMessages(_queue);
     } break;
     case destination::Topic:
     case destination::TemporaryTopic:
@@ -253,7 +298,7 @@ Consumer::Ptr Destination::createDurableConsumer(Session& session, const std::st
                                              sub.storage, _transactionBuffer, selector));
 
   // Replay any messages buffered while the subscriber was offline
-  replayFromStorage(*queue, *sub.storage);
+  replayFromStorage(queue, *sub.storage, *_scheduler);
 
   auto [consIt, ok] = _consumers.emplace(id, consumer);
   if (!ok) return nullptr;
@@ -365,6 +410,15 @@ Destination::~Destination() {
   TRACE(_logger);
   _consumers.clear();
   _producers.clear();
+  if (_scheduler) {
+    try {
+      _scheduler->stop();
+    } catch (const std::exception& e) {
+      poco_error(_logger.get(), Poco::format("DeliveryScheduler::stop() threw — ignoring: %s", std::string(e.what())));
+    } catch (...) {
+      poco_error(_logger.get(), "DeliveryScheduler::stop() threw a non-std exception — ignoring");
+    }
+  }
 }
 
 size_t Destination::hash() const { return _hash; }
@@ -387,15 +441,27 @@ void Destination::rollbackTransaction(const std::string& transactionId) {
   }
 }
 
+void Destination::enqueueOrSchedule(std::shared_ptr<QueueT> queue, Message::Ptr msg) {
+  TRACE(_logger);
+  _scheduler->enqueueOrSchedule(std::move(queue), std::move(msg));
+}
+
+void Destination::patchPendingDeliveryTime(const Poco::UUID& messageId, int64_t deliveryTime) {
+  TRACE(_logger);
+  if (_transactionBuffer) {
+    _transactionBuffer->patchDeliveryTime(messageId, deliveryTime);
+  }
+}
+
 void Destination::deliverCommitted(Message::Ptr message) {
   TRACE(_logger);
   bool queueFamily = isQueueFamily();
   for (auto& item : _consumers) {
     if (queueFamily) {
-      item.second->_queue->enqueue(std::move(message));
+      enqueueOrSchedule(item.second->_queue, std::move(message));
       return;
     }
-    item.second->_queue->enqueue(message->copy());
+    enqueueOrSchedule(item.second->_queue, message->copy());
   }
 
   // After delivering to online consumers, buffer committed persistent messages

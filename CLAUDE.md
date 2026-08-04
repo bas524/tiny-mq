@@ -67,6 +67,8 @@ Persistence is driven by the `Message::PERSISTENT` flag. Non-persistent messages
 
 **Destructors must not throw ([ADR-0006](arch/0006-destructors-must-not-throw.md)).** Destructors here routinely do real work — stopping the storage worker, rolling back a transaction — and a destructor is implicitly `noexcept`, so an escaping exception is an immediate `std::terminate`, not a catchable error. Wrap anything that can throw in try-catch and log it. This defect has recurred three times; treat it as an invariant, not a style preference.
 
+**Message headers and `_cachedStorageBytes` change together ([ADR-0008](arch/0008-header-and-cached-bytes-invariant.md)).** A persistent message carries its headers twice: as parsed `jmsHeaders` fields and as the serialized `0x02` record cached by `Consumer::preparePush`. On delivery the cache wins — `Consumer::recv`'s fast path calls `fromBytes` on it and overwrites the fields. So editing a header after serialization is silently lost unless you also patch the cache (`Message::patchCachedDeliveryTime` and friends). This bug occurred three times in three different places during spec 13; test the **persistent** case, because a non-persistent message never exposes it.
+
 ### Durable subscribers (topics only)
 
 `Session::createDurableConsumer(topic, name)` allocates a dedicated `ConcurrentLinearStorage` at `topic-path/durable-<name>/`. Offline persistent messages accumulate there and replay on reconnect. `Session::unsubscribe(topic, name)` deletes that directory.

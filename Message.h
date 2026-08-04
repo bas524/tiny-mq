@@ -25,6 +25,20 @@
 #include "MessageProperty.h"
 
 namespace tiny_mq {
+
+// Shared upper bound for "how far in the future" a JMS header may point:
+// SendOptions::deliveryDelay / timeToLive (validated in Producer's
+// validateSendOptions, the ingress) and jmsHeaders.deliveryTime (re-checked at
+// every point it can enter the system besides that ingress — see spec 13
+// review round 2, B4). One constant, not two, on purpose: both quantities are
+// "ms from now" bounds guarding the exact same arithmetic hazard —
+// now + delay overflowing int64_t, and the ms -> native-duration conversion
+// inside DeliveryScheduler's wait_until overflowing for deliveryTime — so a
+// single shared ceiling is the honest description of the invariant, not a
+// coincidence to be split apart. 10 years in ms; far beyond any legitimate
+// delay/TTL, comfortably below where the conversions overflow.
+constexpr int64_t kMaxFutureHeaderMs = 315360000000LL;  // 10 years
+
 class Message {
  private:
   int64_t _number{0};
@@ -36,8 +50,14 @@ class Message {
   // Set to max when the record location is unknown (e.g. restart path or not-yet-committed).
   Poco::UInt32 _storageTomId{std::numeric_limits<Poco::UInt32>::max()};
   Poco::UInt64 _storageOffset{0};
+  // Transient (never serialized): for a transactional send, the delay in ms
+  // requested via SendOptions::deliveryDelay. Resolved to an absolute
+  // jmsHeaders.deliveryTime at commit time (spec 13 — the clock starts at
+  // commit, not send), by Producer::commit.
+  int64_t _pendingDeliveryDelay{0};
   friend class Consumer;
   friend class Destination;
+  friend class Producer;
 
  protected:
   Poco::JSON::Object propertiesToJSON() const;
@@ -96,6 +116,18 @@ class Message {
   bool isExpired(int64_t nowMs) const;
 
   int64_t number() const;
+
+  // Patch the deliveryTime field of an already-serialized _cachedStorageBytes
+  // cache in place (no re-serialization). Used by Producer::commit to resolve
+  // a transactional send's delay clock (JMS 2.0 §7.8, spec 13): the clock
+  // starts at commit, not send, but Consumer::preparePush already cached the
+  // pre-commit bytes (with deliveryTime == 0) at send time. Without this, the
+  // fast recv() path (Consumer::recv, which reads the cache instead of
+  // storage) would hand the application a message whose JMSDeliveryTime is 0
+  // even though it really was delayed and delivered on schedule. No-op if
+  // there is no cache, or the cache predates the 0x02 wire format (see
+  // toBytes()/fromBytes() for the offset table this mirrors).
+  void patchCachedDeliveryTime(int64_t deliveryTime);
 
   template <typename MessageType>
   static typename MessageType::Ptr As(const Message::Ptr &pmessage) {

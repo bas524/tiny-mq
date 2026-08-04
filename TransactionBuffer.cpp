@@ -7,10 +7,31 @@
 #include <Poco/FileStream.h>
 #include <Poco/StringTokenizer.h>
 #include <Poco/DateTimeFormatter.h>
+#include <cstdint>
+#include <cstring>
 #include <sstream>
 #include <fstream>
 
 namespace tiny_mq {
+
+namespace {
+// Offset of deliveryTime within a stored record ([1-byte type][toBytes() 0x02
+// payload]) — mirrors Destination.cpp's priorityFromStorageBytes documentation.
+constexpr size_t kDeliveryTimeOffset = 1   // type byte
+                                     + 1   // magic
+                                     + 8   // number
+                                     + 16  // uuid
+                                     + 1   // reliability
+                                     + 8   // timestamp
+                                     + 8;  // expiration (total = 43)
+constexpr size_t kDeliveryTimeSize = 8;
+
+void patchDeliveryTimeInBytes(std::vector<char>& data, int64_t deliveryTime) {
+    if (data.size() < kDeliveryTimeOffset + kDeliveryTimeSize) return;
+    if (static_cast<uint8_t>(data[1]) != 0x02) return;  // pre-header format: nothing to patch
+    std::memcpy(data.data() + kDeliveryTimeOffset, &deliveryTime, kDeliveryTimeSize);
+}
+}  // namespace
 
 TransactionBuffer::TransactionBuffer(const Poco::Path& basePath,
                                    std::shared_ptr<linear_storage::ConcurrentLinearStorage> storage)
@@ -80,6 +101,14 @@ void TransactionBuffer::addMessage(const std::string& transactionId,
                                           messageId.toString(), transactionId));
 }
 
+
+void TransactionBuffer::patchDeliveryTime(const Poco::UUID& messageId, int64_t deliveryTime) {
+    TRACE(_logger);
+    Poco::ScopedLock<Poco::FastMutex> lock(_mutex);
+    auto it = _bufferedData.find(messageId);
+    if (it == _bufferedData.end()) return;  // not persistent, or already flushed
+    patchDeliveryTimeInBytes(it->second, deliveryTime);
+}
 
 void TransactionBuffer::commitTransaction(const std::string& transactionId) {
     TRACE(_logger);

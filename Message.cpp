@@ -8,6 +8,8 @@
 #include <Poco/FileStream.h>
 #include <sstream>
 #include <limits>
+#include <cstring>
+#include <cstdint>
 
 namespace tiny_mq {
 
@@ -16,6 +18,24 @@ bool Message::isPersistent() const { return reliability == PERSISTENT; }
 bool Message::isExpired(int64_t nowMs) const {
   // JMSExpiration == 0 means "never expires" (JMS 2.0 § 3.4.9).
   return jmsHeaders.expiration != 0 && nowMs >= jmsHeaders.expiration;
+}
+
+void Message::patchCachedDeliveryTime(int64_t deliveryTime) {
+  // Offset within _cachedStorageBytes (= [1-byte type prefix][toBytes() 0x02
+  // payload]): 1 type + 1 magic + 8 number + 16 uuid + 1 reliability +
+  // 8 timestamp + 8 expiration = 43 — matches the deliveryTime slot written by
+  // toBytes()/read by fromBytes() above.
+  constexpr size_t kOffset = 1                    // type byte
+                            + 1                    // magic
+                            + sizeof(int64_t)       // number
+                            + 16                    // uuid
+                            + 1                     // reliability
+                            + sizeof(int64_t)       // timestamp
+                            + sizeof(int64_t);      // expiration  (total = 43)
+  constexpr size_t kSize = sizeof(int64_t);
+  if (_cachedStorageBytes.size() < kOffset + kSize) return;
+  if (static_cast<uint8_t>(_cachedStorageBytes[1]) != 0x02) return;  // pre-header format: nothing to patch
+  std::memcpy(_cachedStorageBytes.data() + kOffset, &deliveryTime, kSize);
 }
 
 int64_t Message::number() const { return _number; }
