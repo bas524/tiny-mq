@@ -100,12 +100,27 @@ Topic_AutoAck_NonPersistent ≈669.6k).
   Ревью (MiniMax-M3) + перф-гейт (deepseek-reasoner) approved, коммит `a26b5c5`.
   Перф к master: −2.2% / +2.5%. Отчёты — `docs/reviews/45-priority-ordering.{review,perf}.md`,
   документация — `docs/features/45-priority-ordering.md`.
-- ⬜ 13 delivery delay → 23 Session.recover → 24 redelivery+DLQ → 25 noLocal
-  → 28 receiveNoWait → 30 аудит грамматики Selector.
+- ✅ 13 delivery delay — `DeliveryScheduler` с ленивым worker'ом; отсчёт для транзакций
+  с момента commit; кламп абсурдного `deliveryTime` + ограничение одного сна.
+  `DeliveryDelayTest` ×9. ADR-0007 (потоковая модель), ADR-0008 (заголовки и
+  `_cachedStorageBytes` синхронны). Ревью 3 раунда approved, коммит `872480b`.
+- ✅ 23 Session.recover — per-consumer in-flight на интрузивном списке, ASan-гейт в CI.
+  `RecoverTest` ×11, сьют 135/135, под ASan чисто. Ревью 4 раунда, approved.
+- ⬜ 24 redelivery+DLQ → 25 noLocal → 28 receiveNoWait → 30 аудит грамматики Selector.
 
-**Следующий шаг — 13 (delivery delay):** min-heap по `deliveryTime`, таймер commit-time
-для транзакций. `deliveryTime` уже заполняется ingress-путём спеки 12 и round-trip'ится
-через формат хранения `0x02`. Тесты по `docs/jms-spec/13-delivery-delay.md`.
+**Следующий шаг — 24 (redelivery counter + DLQ):** `RedeliveryPolicy`, backoff через
+механизм задержки спеки 13. Тесты по `docs/jms-spec/24-redelivery-and-dlq.md`.
+Опирается на `deliveryCount`/`redelivered` из спеки 23 — учти, что они **не переживают
+рестарт** (замерено ревью: сумма 0 после реплея).
+
+**Что учесть по опыту спек 45 и 13:**
+- Перф мерить только на release и только main-vs-ветка (main в отдельном `git worktree`),
+  сравнение по медиане `cpu_time`. Дизайн из спеки может не проходить перф-требование.
+- Проверять **обе** ветки доставки (`save` и `deliverCommitted`).
+- ADR-0006: деструкторы не выпускают исключений. ADR-0008: правка `jmsHeaders` после
+  сериализации теряется, если не поправить `_cachedStorageBytes`; тест обязан покрывать
+  **персистентный** случай.
+- `--gtest_repeat` снова работает как инструмент (LP-04) — пользоваться для поиска гонок.
 
 **Урок спеки 45, применимый к 13:** это снова горячий путь delivery. Мерить перф только
 на release и только main-vs-ветка (см. раздел «Команды»); проверять обе ветки доставки

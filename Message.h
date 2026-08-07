@@ -25,6 +25,7 @@
 #include "MessageProperty.h"
 
 namespace tiny_mq {
+class Consumer;  // for Message::InFlightLink::owner (spec 23 round 3, B2 fix)
 
 // Shared upper bound for "how far in the future" a JMS header may point:
 // SendOptions::deliveryDelay / timeToLive (validated in Producer's
@@ -55,6 +56,76 @@ class Message {
   // jmsHeaders.deliveryTime at commit time (spec 13 — the clock starts at
   // commit, not send), by Producer::commit.
   int64_t _pendingDeliveryDelay{0};
+  // Spec 23 round 2 (perf fix): intrusive doubly-linked list node backing
+  // Consumer::_inFlight (the per-consumer received-not-yet-acked set behind
+  // Session.recover()). Two prior designs were measured and rejected:
+  //  - std::vector<Message::Ptr> + linear find_if + erase: O(1) insert but
+  //    O(n) removal, so acknowledging a batch of n messages (the ordinary
+  //    CLIENT_ACKNOWLEDGE usage pattern) cost O(n^2) — the regression this
+  //    field exists to fix (round-1 perf-check missed it; caught in round-2
+  //    review, +133.7% cpu_time at n=1000).
+  //  - std::list<Message::Ptr> + a cached iterator (either on the message or
+  //    in a side hash map): O(1) insert and removal complexity-wise, but
+  //    each std::list node is a separate heap allocation/free on every
+  //    recv()/acknowledgeOn() — measured ~13-20ns/message extra, 7-19%
+  //    above baseline depending on n (round-2 perf-check).
+  // This intrusive list has no separate node: the link pointers live
+  // directly on the (already heap-allocated, by make_shared elsewhere)
+  // Message, so linking/unlinking touches no allocator. O(1) insert-at-tail,
+  // O(1) unlink-from-anywhere, O(n) full walk in original order (recover()).
+  // Ownership: next is the *owning* pointer — Consumer's _inFlightHead ->
+  // node1._inFlightLink.next -> node2._inFlightLink.next -> ... keeps every
+  // in-flight message alive even if the caller drops its own Message::Ptr
+  // without acknowledging (same guarantee the old container gave). prev is a
+  // non-owning back-pointer for O(1) unlink. All three fields are
+  // default/null when untracked (not yet delivered, AUTO_ACKNOWLEDGE,
+  // SESSION_TRANSACTED).
+  //
+  // owner (spec 23 round 3, B2 fix): which Consumer's _inFlight chain, if
+  // any, this message is currently linked into. nullptr means untracked.
+  // Lets acknowledgeOn() answer "is this message in MY chain" directly,
+  // instead of inferring "tracked by someone" from prev/head (the round-2
+  // design conflated the two — see the InFlightLink comment below for why
+  // that mattered). Set in Consumer::recv() when linking, cleared whenever
+  // the node is unlinked (acknowledgeOn(), recover(), clearInFlight()).
+  //
+  // CAUTION for maintainers: because `next` owns the next node, destroying a
+  // long, never-unlinked chain by simply letting Consumer's _inFlightHead go
+  // out of scope recurses one shared_ptr destructor per message (~one stack
+  // frame per in-flight message) — see Consumer::clearInFlight(), which must
+  // be used for any bulk teardown instead of letting the chain unwind itself.
+  //
+  // Spec 23 round 4 (review round 3, §18): wrapped in a small type whose
+  // copy/move operations are deliberately no-ops, instead of being three
+  // loose members that Message's own copy/move ctors and assignments had to
+  // list by name and skip. See the class-level comment above the (now
+  // `= default`) special member functions for why that mattered: a copy
+  // must never inherit chain membership, and "don't forget these three
+  // fields in four hand-written functions" is a maintenance trap that fails
+  // silently (drops a *new* field from the copy, not a chain-corruption bug)
+  // the moment someone adds a field to Message and doesn't also touch all
+  // four. Wrapping makes "a copy is in no chain" a property of the type: the
+  // struct's own copy/move ctor produces a default-constructed (empty) link
+  // no matter what the source held, so Message's copy/move members can go
+  // back to `= default` and a new field is copied correctly with zero extra
+  // code.
+  struct InFlightLink {
+    std::shared_ptr<Message> next;
+    Message* prev{nullptr};
+    Consumer* owner{nullptr};
+    InFlightLink() = default;
+    // Deliberately not "= default": a copy of the *link* is never itself
+    // linked into any chain, regardless of whether the source was — same
+    // reasoning as Message's own copy/move ctors, just now enforced by this
+    // type instead of by four hand-written bodies.
+    InFlightLink(const InFlightLink&) noexcept {}
+    InFlightLink(InFlightLink&&) noexcept {}
+    InFlightLink& operator=(const InFlightLink&) noexcept { return *this; }
+    InFlightLink& operator=(InFlightLink&&) noexcept { return *this; }
+  };
+  // mutable: acknowledgeOn() takes `const Message&` (it only reads the
+  // message otherwise) but must still unlink and clear this on acknowledge.
+  mutable InFlightLink _inFlightLink;
   friend class Consumer;
   friend class Destination;
   friend class Producer;
@@ -62,10 +133,40 @@ class Message {
  protected:
   Poco::JSON::Object propertiesToJSON() const;
 
-  Message(const Message &) = default;
-  Message(Message &&) = default;
-  Message &operator=(const Message &) = default;
-  Message &operator=(Message &&) = default;
+  // Spec 23 round 3 (B2 fix): a copy/move must NOT inherit chain membership.
+  // _inFlightLink encodes "this exact object is linked into that exact
+  // Consumer's in-flight list" — an identity fact about *this* heap
+  // allocation, not part of the message's logical value. The original
+  // `= default` copy ctor copied the owning next pointer verbatim, so a copy
+  // made via copy() (the delivery fan-out mechanism: see
+  // Consumer::preparePush, Destination::persistToOfflineSub,
+  // Destination::deliverCommitted) inherited a live link into the source's
+  // chain — corrupting it when the copy was later linked/unlinked on a
+  // different consumer (review round 2, B2: use-after-free under ASan,
+  // cross-consumer chain corruption).
+  //
+  // Spec 23 round 4 (review round 3, §18): rather than re-deriving "leave
+  // this field alone" by hand for every member below (which is what a
+  // round-2 hand-written copy/move ctor did for _inFlightNext/_inFlightPrev/
+  // _inFlightOwner, and which silently drops any *new* field an author
+  // forgets to add to all four of these functions), InFlightLink's own
+  // copy/move operations are no-ops by construction: copying or moving a
+  // Message::InFlightLink always yields a default (untracked) link,
+  // regardless of what the source held. That makes "a copy/move is in no
+  // chain" a property of the type instead of a fact this code has to
+  // remember, so the compiler-generated special member functions are once
+  // again correct — and, unlike the hand-written round-3 versions, they
+  // cannot go stale when a field is added to Message.
+  //
+  // Nothing in this codebase moves an in-flight Message (fan-out always
+  // copies) — and even if it did, transplanting the link would be actively
+  // wrong: neighboring nodes' prev/owner point at the *source* object's
+  // address, which a move does not update. InFlightLink's move ctor produces
+  // an empty link for exactly the same reason its copy ctor does.
+  Message(const Message &other) = default;
+  Message(Message &&other) noexcept = default;
+  Message &operator=(const Message &other) = default;
+  Message &operator=(Message &&other) noexcept = default;
 
  public:
   using Ptr = std::shared_ptr<Message>;
@@ -128,6 +229,17 @@ class Message {
   // there is no cache, or the cache predates the 0x02 wire format (see
   // toBytes()/fromBytes() for the offset table this mirrors).
   void patchCachedDeliveryTime(int64_t deliveryTime);
+
+  // Rebuild _cachedStorageBytes from the message's *current* state (type byte +
+  // toBytes()), unconditionally. Unlike patchCachedDeliveryTime — which patches
+  // an existing cache in place and is a no-op when there isn't one — this always
+  // (re)populates the cache. Needed by Session::recover() (spec 23): by the time
+  // recover() mutates jmsHeaders.redelivered/deliveryCount, Consumer::recv()
+  // has already consumed and cleared the original cache from first delivery, so
+  // a patch-style no-op would silently lose the update — the next recv() would
+  // fall back to the (stale, on-disk) bytes instead (ADR-0008). No-op for
+  // non-persistent messages, which carry no cache at all.
+  void refreshCachedStorageBytes();
 
   template <typename MessageType>
   static typename MessageType::Ptr As(const Message::Ptr &pmessage) {

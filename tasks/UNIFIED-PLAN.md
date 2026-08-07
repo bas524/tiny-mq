@@ -49,8 +49,8 @@
 | 12 Per-send DeliveryMode/Priority/TTL | A | M1 | ✅ done (SendOptions: send(msg,opts)/setDefault; priority/expiration/deliveryTime ingress) |
 | 44 Expiration sweep | A | M1 | ✅ done (recv-drop + deadline-cadence sweeper via scanPrefix; ExpirationTest ×4; cross-model review approved) |
 | 45 Priority ordering | A | M1 | ✅ done (PriorityQueueT: 10 бэндов + маска непустых + LightweightSemaphore вместо сигнальной очереди; PriorityOrderingTest ×5; ревью MiniMax-M3 + перф-гейт approved; корректность опирается на инвариант ADR-0005 «один consumer на очередь» — спека 26 обязана перепроверить) |
-| 13 Delivery delay | A | M1 | ⬜ planned |
-| 23 Session.recover() | B | M1 | ⬜ planned |
+| 13 Delivery delay | A | M1 | ✅ done (DeliveryScheduler: ленивый worker на destination, кламп абсурдного deliveryTime, отсчёт с commit-time; DeliveryDelayTest ×9; ADR-0007, ADR-0008; ревью 3 раунда approved) |
+| 23 Session.recover() | B | M1 | ✅ done (per-consumer in-flight на интрузивном списке `Message::InFlightLink`; redelivered/deliveryCount; RecoverTest ×11; ASan-гейт в CI; ревью 4 раунда + эскалация, approved) |
 | 24 Redelivery counter + DLQ | B | M1 | ⬜ planned |
 | 25 NoLocal | B | M1 | ⬜ planned |
 | 28 receiveNoWait | B | M1 | ⬜ planned |
@@ -124,8 +124,32 @@
   семафора) доказана через инвариант ADR-0005 «на одной `PriorityQueueT` ровно один
   consumer». Спека 26 (shared consumers) его нарушает и обязана повторить разбор §R2 ревью.
   Follow-up (не блокируют): F3 (durable-реплей приоритета без отдельного теста).
-- 13: delivery delay (min-heap по deliveryTime; таймер commit-time для транзакций).
-- 23: `Session.recover()` (per-consumer in-flight set).
+- ✅ 13: delivery delay — отдельный `DeliveryScheduler` (не логика внутри `Destination`):
+  `enqueueOrSchedule()` решает, отдать сообщение сразу или отложить; оба пути доставки
+  (`save` / `deliverCommitted`) идут через него, `replayFromStorage` переставляет таймеры.
+  Worker стартует **лениво**: назначения без delayed-трафика не создают потоков, горячий
+  путь платит одну проверку `deliveryTime != 0`. Отсчёт для транзакций — с момента commit.
+  Тесты `DeliveryDelayTest` ×9, перф транзакционных путей в пределах шума (+1.9%…−1.6%).
+  **[ADR-0007](../arch/0007-delivery-scheduler-per-destination-lazy-thread.md)** — потоковая
+  модель планировщика и условие её пересмотра (delayed-трафик на сотне назначений = сотня
+  спящих потоков). **[ADR-0008](../arch/0008-header-and-cached-bytes-invariant.md)** — заголовки
+  и `_cachedStorageBytes` меняются только вместе: этот дефект возник трижды в трёх местах.
+  Ревью 3 раунда (`docs/reviews/13-delivery-delay.review.md`), approved.
+  Уроки для следующих спек: граница значения, поставленная на ingress, не защищает пути
+  реплея и публичного поля; проверка «после переполнения» вырезается оптимизатором.
+- ✅ 23: `Session.recover()` — per-consumer набор неподтверждённых на интрузивном
+  двусвязном списке (`Message::InFlightLink`): O(1) вставка и отцепление без аллокатора.
+  `AUTO_ACKNOWLEDGE` из отслеживания исключён (по JMS подтверждается при возврате из
+  `recv()`); безусловное отслеживание давало неограниченный рост и −29% на горячем пути.
+  Заголовки синхронизируются через `refreshCachedStorageBytes()` — патч-метод здесь был бы
+  no-op, потому что `recv()` уже очистил кэш (ADR-0008 в действии). Тесты `RecoverTest` ×11,
+  полный сьют 135/135, под ASan чисто.
+  **Введён ASan-гейт в CI** (`.github/workflows/ci.yml`, задание `asan`) — условие ревью для
+  сохранения интрузивного дизайна. Тесты на use-after-free проходят в обычной debug-сборке
+  даже без фикса и падают только под ASan, то есть гейт несёт часть регрессионного покрытия.
+  Ревью 4 раунда с эскалацией к человеку по выбору структуры данных (решение: интрузивный).
+  Найдено 5 дефектов памяти, из них 2 преэкзистентных — починены как предусловие гейта.
+  Долги: `tasks/memory-safety/` (MS-01 `Consumer` переживает `Destination`, MS-02 включить LSan).
 - 24: redelivery counter + DLQ (RedeliveryPolicy, backoff через 13).
 - 25: noLocal (origin-connection id, фильтр в topic fan-out; нужна 01).
 - 28: `recvNoWait()`.

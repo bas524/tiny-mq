@@ -4,6 +4,7 @@
 
 #include "Session.h"
 #include "Connection.h"
+#include "Exceptions.h"
 #include "LogTracer.h"
 #include <Poco/Format.h>
 #include <Poco/UUIDGenerator.h>
@@ -238,6 +239,19 @@ void Session::rollback() {
     consumer.second->rollback();
   }
   _suffix = Poco::UUIDGenerator::defaultGenerator().createRandom().toString();
+}
+
+void Session::recover() {
+  TRACE(_logger);
+  if (_mode == AcknowledgeMode::SESSION_TRANSACTED) {
+    // JMS 2.0 § 8.4.8: recover() is illegal on a transacted session — the
+    // application must call rollback() instead. Mirrors jakarta.jms's
+    // IllegalStateException for this exact case.
+    throw IllegalStateException("Session.recover() is not valid on a transacted session; use rollback() instead");
+  }
+  for (auto &consumer : _consumers) {
+    consumer.second->recover();
+  }
 }
 
 }  // namespace tiny_mq

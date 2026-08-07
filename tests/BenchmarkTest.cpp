@@ -128,6 +128,52 @@ BENCHMARK_F(BenchmarkFixture, ClientAck_Persistent_RoundTrip)(benchmark::State& 
 }
 
 // ---------------------------------------------------------------------------
+// 3b. CLIENT_ACKNOWLEDGE batch — NOT_PERSISTENT
+//    send N -> recv N -> ack N. Exercises Consumer::_inFlight tracking
+//    (spec 23, Session.recover()) across a whole batch instead of one
+//    message at a time: ClientAck_Persistent_RoundTrip above interleaves
+//    send/recv/ack per iteration (always n=1 in flight) and is storage-bound,
+//    so it never surfaces the cost of removing an in-flight entry. This
+//    benchmark isolates that cost — with batch=1000 it makes an O(n^2)
+//    linear-scan-and-erase in acknowledgeOn() visible as a steep drop in
+//    items/sec relative to batch=1/100.
+//    Registered with batch sizes 1 / 100 / 1000.
+// ---------------------------------------------------------------------------
+BENCHMARK_DEFINE_F(BenchmarkFixture, ClientAck_Batch_NonPersistent)(benchmark::State& state) {
+    using namespace tiny_mq;
+    const int64_t batch = state.range(0);
+    Connection session_conn(*exchange);
+    Session &session = session_conn.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
+    auto dest = session.createDestination(destination::Queue, "bm_clientbatch_np");
+    auto producer = session.createProducer(dest);
+    auto consumer = session.createConsumer(dest);
+
+    std::vector<TextMessage> msgs;
+    msgs.reserve(static_cast<size_t>(batch));
+    for (int64_t i = 0; i < batch; ++i) {
+        msgs.push_back(session.createTextMessage(kPayload, Message::NOT_PERSISTENT));
+    }
+
+    for (auto _ : state) {
+        for (int64_t i = 0; i < batch; ++i) {
+            producer->send(msgs[static_cast<size_t>(i)]);
+        }
+        std::vector<Message::Ptr> received;
+        received.reserve(static_cast<size_t>(batch));
+        for (int64_t i = 0; i < batch; ++i) {
+            received.push_back(consumer->recv());
+        }
+        for (auto& r : received) {
+            consumer->acknowledgeOn(*r);
+        }
+        benchmark::DoNotOptimize(received);
+    }
+    state.SetItemsProcessed(state.iterations() * batch);
+}
+BENCHMARK_REGISTER_F(BenchmarkFixture, ClientAck_Batch_NonPersistent)
+    ->Arg(1)->Arg(100)->Arg(1000);
+
+// ---------------------------------------------------------------------------
 // 4. SESSION_TRANSACTED + NOT_PERSISTENT
 //    Commit buffers in memory only; no storage I/O.
 // ---------------------------------------------------------------------------
