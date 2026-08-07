@@ -38,6 +38,16 @@ void Message::patchCachedDeliveryTime(int64_t deliveryTime) {
   std::memcpy(_cachedStorageBytes.data() + kOffset, &deliveryTime, kSize);
 }
 
+void Message::refreshCachedStorageBytes() {
+  if (!isPersistent()) return;
+  auto bytesData = toBytes();
+  std::vector<char> data;
+  data.reserve(1 + bytesData.size());
+  data.push_back(static_cast<char>(type()));
+  data.insert(data.end(), bytesData.begin(), bytesData.end());
+  _cachedStorageBytes = std::move(data);
+}
+
 int64_t Message::number() const { return _number; }
 bool Message::hasProperty(const std::string& name) const { return _properties.hasProperty(name); }
 property::ValueType Message::propertyValueType(const std::string& name) const { return _properties.propertyValueType(name); }

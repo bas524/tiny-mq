@@ -101,6 +101,82 @@ jobs:
           path: junit-${{ matrix.os }}.xml
           retention-days: 14
 
+  asan:
+    name: ASan gate
+    # Постоянный гейт на класс ошибок памяти времени жизни (спека 23, раунд 4
+    # review): use-after-free/double-free ловятся автоматически при каждом
+    # push/PR, а не разовыми ручными пробами под ASan. Одной ubuntu-latest
+    # достаточно — цель гейта класс дефекта, а не платформа.
+    #
+    # Гейт зелёный с первого дня: полный сьют под ASan проходит 135/135 без
+    # единого срабатывания. Красный статус здесь означает «сломали сейчас», и
+    # только так гейт имеет смысл — заведомо красный никто не чинит.
+    #
+    # Введён после спеки 23, где ASan нашёл пять дефектов памяти, из которых два
+    # оказались давними и к текущей работе отношения не имели: heap-use-after-free
+    # в ~Consumer() (обращение к разрушаемому Destination) и heap-buffer-overflow
+    # в BytesMessageTest (чтение 30 байт за концом буфера). Оба чинились в рамках
+    # того же раунда, чтобы гейт мог быть настоящим.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Системные зависимости
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            curl zip unzip tar git python3 autoconf automake libtool \
+            uuid-dev
+          cmake --version && ninja --version
+
+      - name: Выкачать vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ env.VCPKG_TAG }}
+          path: vcpkg
+          fetch-depth: 1
+
+      - name: Кэш собранных пакетов vcpkg
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ runner.os }}-asan-${{ env.VCPKG_TAG }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-asan-${{ env.VCPKG_TAG }}-
+
+      - name: Подготовить vcpkg
+        run: |
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          ./vcpkg/bootstrap-vcpkg.sh -disableMetrics
+
+      - name: Конфигурирование и сборка (ASan)
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+        run: |
+          cmake -S . -B cmake-build-asan \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer -g" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+          cmake --build cmake-build-asan --parallel
+
+      - name: Тесты под ASan
+        run: |
+          rm -rf tiny-mq bench-mq
+          # Фильтр исключает только бенчи; под ним идут все 135 тестов.
+          #
+          # detect_leaks=0 — сознательно и временно. На Linux ASan включает
+          # LeakSanitizer по умолчанию, но вся верификация «гейт зелёный»
+          # делалась на arm64 macOS, где LSan недоступен в принципе. То есть
+          # утечки в этом сьюте никем и никогда не проверялись, и включать их
+          # вместе с гейтом значит с высокой вероятностью получить красный
+          # старт — ровно то, чего гейт должен избегать.
+          # Включение LSan — отдельная задача: tasks/memory-safety/02-enable-lsan.md
+          ASAN_OPTIONS=detect_stack_use_after_return=1:detect_leaks=0 \
+          ./cmake-build-asan/tiny_mq --gtest_filter='-*Bench*'
+
   package:
     name: Дистрибутив (${{ matrix.os }})
     needs: build-test

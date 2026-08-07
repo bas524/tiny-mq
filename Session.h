@@ -89,6 +89,15 @@ class Session {
 
   void rollback();
 
+  // JMS 2.0 § 8.4.8. Stops message delivery and requeues every message this
+  // session has received but not yet acknowledged, marking each
+  // headers.redelivered = true and incrementing headers.deliveryCount;
+  // redelivery preserves original receive order. Valid only for
+  // non-transacted sessions (AUTO_/CLIENT_/DUPS_OK_/INDIVIDUAL_ACKNOWLEDGE) —
+  // throws IllegalStateException on a transacted session, which must call
+  // rollback() instead.
+  void recover();
+
   const std::string &transactionId() const;
   Poco::UUID createRandomUUID() const;
   const std::string &id();

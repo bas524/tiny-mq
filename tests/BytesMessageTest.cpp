@@ -13,7 +13,14 @@ TEST_F(BytesMessageTest, testGetDataLength) {
   BytesMessage msg;
 
   const size_t len = 10;
-  BytesVector data(len, 1);
+  // setBytes is asked to read sizeof(uint32_t) * len bytes (see the
+  // dataSize() expectation below), so the source buffer must actually hold
+  // that many bytes. It previously held only `len` bytes, so setBytes read
+  // sizeof(uint32_t) * len - len = 30 bytes past the end of `data` — a
+  // heap-buffer-overflow only visible under ASan (caught incidentally while
+  // making the full suite ASan-clean for spec 23 round 4; unrelated to
+  // spec 23's own functionality).
+  BytesVector data(len * sizeof(uint32_t), 1);
 
   EXPECT_NO_THROW(msg.setBytes((const int8_t *)&data[0], sizeof(uint32_t) * len));
 

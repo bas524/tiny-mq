@@ -183,6 +183,8 @@ if (ENABLE_TESTS)
                  tests/AnyVisitorTest.cpp
                  tests/AnyVisitorTest.h
                  tests/StorageWorkerResilienceTest.cpp
+                 tests/RecoverTest.cpp
+                 tests/RecoverTest.h
                  )
   set(TEST_LIBS
       GTest::gtest
