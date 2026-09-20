@@ -71,7 +71,11 @@ RedeliveryPolicy redeliveryPolicy() const;
   новую политику. Потокобезопасность — как у `Destination` в целом: вызов до старта
   консьюмеров или из потока с affinity к destination (ADR-0005); конкурентная смена
   политики во время `recover()` не поддерживается и не тестируется.
-- **`Consumer::redeliver(Message::Ptr)`** (private, общий для `recover()` и `rollback()`).
+- **`Consumer::redeliver(Message::Ptr, bool sessionClosing)`** (private, общий для `recover()`
+  и `rollback()`). `sessionClosing == true` только на пути `~Session()` (Semantics 1): `~Session()`
+  вызывает `Session::rollback()` **до** `~Consumer()`, тем же `Consumer::rollback()`, что и
+  явный rollback, поэтому различение приходит параметром от `Session`, а не выводится внутри
+  `Consumer`.
   Предусловие: сообщение получено этим консьюмером и не подтверждено. Постусловие — ровно
   одно из двух: (а) сообщение снова в `_queue` (у queue family очередь принадлежит
   `Destination` и разделяется всеми её консьюмерами, поэтому переживает закрытие сессии) —
@@ -97,7 +101,9 @@ RedeliveryPolicy redeliveryPolicy() const;
    счётчик не трогает (наследие спеки 23). `rollback()` из `~Consumer()` (закрытие сессии
    без commit) считается повторной доставкой: счётчик и флаг ставятся, лимит проверяется
    (→ DLQ по Semantics 2), **но backoff не применяется** — сообщение возвращается в очередь
-   destination немедленно. Так ведёт себя ActiveMQ Classic: redelivery delay — состояние
+   destination немедленно. Механизм: `~Session()` вызывает `Session::rollback()` раньше
+   `~Consumer()`, поэтому «закрытие» передаётся явно — `Consumer::rollback(sessionClosing=true)`
+   → `redeliver(msg, true)`; явный `Session::rollback()` передаёт `false`. Так ведёт себя ActiveMQ Classic: redelivery delay — состояние
    консьюмера, при его закрытии неподтверждённые сообщения возвращаются брокеру и
    передиспатчиваются другому консьюмеру сразу, с `JMSRedelivered` и инкрементом счётчика.
 2. **Лимит.** Если после инкремента `deliveryCount > maxRedeliveries` (при
@@ -168,11 +174,13 @@ RedeliveryPolicy redeliveryPolicy() const;
 | `E6` | method | `Destination::setRedeliveryPolicy(RedeliveryPolicy)` | public |
 | `E7` | method | `Destination::redeliveryPolicy() const` | public |
 | `E8` | method | `Destination::deadLetter(Message::Ptr, std::string)` | private, noexcept-контракт |
-| `E9` | method | `Consumer::redeliver(Message::Ptr)` | private; общий путь `recover()`/`rollback()` |
+| `E9` | method | `Consumer::redeliver(Message::Ptr, bool sessionClosing)` | private; общий путь `recover()`/`rollback()` |
 | `E10` | header | `JMSXDeadLetterReason` | строковое свойство на копии в DLQ |
 | `E11` | header | `JMSXDeliveryCount` | имя в `ConnectionMetaData::jmsxPropertyNames`; поле уже есть |
 | `E12` | test-suite | `DlqTest` | `tests/DlqTest.{h,cpp}` |
 | `E13` | type | `Destination::_redeliveryPolicy` | private поле-хранилище политики |
+| `E14` | method | `Consumer::rollback(bool sessionClosing)` | существующий private метод, новый параметр (default `false`) |
+| `E15` | method | `Session::rollback(bool sessionClosing)` | private перегрузка; публичный `Session::rollback()` делегирует с `false`, `~Session()` — с `true` |
 
 Kind ∈ `type` · `method` · `header` · `storage-field` · `config` · `test-suite`.
 Полей формата `0x02` спека **не добавляет** (`deliveryCount` уже в формате).
@@ -314,8 +322,9 @@ S6 → T15, T22; S9 → T20; путь `~Consumer()` → T17 (лимит) и T21 
 
 ## Autonomy Level
 - `R2` (изолированная ветка `spec-24-redelivery-dlq`, приёмка человеком на мерже).
-- `R1` не требуется: формат хранения, сборочная среда и публичный API `Session` не меняются;
-  новый публичный API ограничен `Destination::setRedeliveryPolicy`/`redeliveryPolicy`.
+- `R1` не требуется: формат хранения, сборочная среда и публичный API `Session` не меняются
+  (E15 — private перегрузка); новый публичный API ограничен
+  `Destination::setRedeliveryPolicy`/`redeliveryPolicy`.
 
 ## Open questions
 - Персистентность `deliveryCount` через рестарт (Semantics 9) — **отдельная спека в M5**
