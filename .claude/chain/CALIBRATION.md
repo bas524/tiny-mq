@@ -25,28 +25,37 @@ AEF задаёт **стартовые** пороги (Appendix C фреймво�
 Модель фиксируется **в двух местах, и они означают разное**:
 
 1. **Frontmatter `model:` агента** — работает, когда агента вызывают как субагента
-   внутри сессии. Здесь допустимы только алиасы Claude Code (`opus` / `sonnet` /
-   `haiku` / `fable`). Прямое имя прокси-модели тут писать нельзя: вне прокси-сессии
-   оно не резолвится и агент падает с API-ошибкой.
+   внутри сессии. Здесь стоит **прямой идентификатор прокси-модели** (`glm-5.2`,
+   `deepseek-reasoner`, `MiniMax-M3`, …) — тот же, что обёртка `claude-<fn>` кладёт в
+   `ANTHROPIC_MODEL`. Так субагентная колонка сохраняет кросс-модельность (специалисты
+   на разных семействах, а не все на Anthropic). **Цена:** субагент резолвится только
+   из прокси-сессии (`claude-<fn>` из `~/.zshrc`, `ANTHROPIC_BASE_URL` на ai-proxy);
+   в прямой сессии Anthropic API имя не найдётся и агент упадёт с API-ошибкой. Решение
+   принято осознанно (2026-09-20): разнообразие моделей у гейтов — суть роли, а
+   субагентный запуск вне прокси в этом проекте не практикуется.
 2. **Обёртка в `route.sh`** — работает при процессном запуске стадии
-   (`CHAIN_EXEC=1`). Здесь имя обёртки из `~/.zshrc`, и именно оно определяет
-   реальную модель в событийной цепочке.
+   (`CHAIN_EXEC=1`). Здесь имя обёртки из `~/.zshrc`; обе колонки обязаны указывать
+   на одну и ту же модель.
 
-| Стадия | Frontmatter (субагент) | Обёртка (процесс) |
+| Стадия | Frontmatter (субагент, model id) | Обёртка (процесс) |
 |---|---|---|
-| spec-critic | `opus` | `claude-glm-5-2` |
-| jms-producer | `sonnet` | `claude-claude-sonnet-5` |
-| jms-reviewer | `opus` | `claude-minimax-m3` |
-| perf-specialist | `opus` | `claude-deepseek-reasoner` |
-| conformance-specialist | `opus` | `claude-glm-5-2` |
-| security-specialist | `opus` | `claude-deepseek-reasoner` |
-| doc-writer | `sonnet` | `claude-glm-5-2` |
-| knowledge-gardener | `sonnet` | — (рубеж человека) |
-| platform-agent | `sonnet` | — (R1, рубеж человека) |
-| jms-orchestrator | `opus` | — (не диспатчится) |
+| spec-critic | `glm-5.2` | `claude-glm-5-2` |
+| jms-producer | `claude-sonnet-5` | `claude-claude-sonnet-5` |
+| jms-reviewer | `MiniMax-M3` | `claude-minimax-m3` |
+| perf-specialist | `deepseek-reasoner` | `claude-deepseek-reasoner` |
+| conformance-specialist | `glm-5.2` | `claude-glm-5-2` |
+| security-specialist | `deepseek-reasoner` | `claude-deepseek-reasoner` |
+| doc-writer | `glm-5.2` | `claude-glm-5-2` |
+| knowledge-gardener | `claude-opus-4-8` | — (рубеж человека) |
+| platform-agent | `qwen3-coder-plus` | — (R1, рубеж человека) |
+| jms-orchestrator | `claude-opus-4-8` | — (не диспатчится) |
 
-Инвариант `producer ≠ reviewer` выполнен по обеим колонкам: `sonnet` ≠ `opus`,
-`claude-claude-sonnet-5` ≠ `claude-minimax-m3`.
+Инвариант `producer ≠ reviewer` выполнен по обеим колонкам: `claude-sonnet-5` ≠
+`MiniMax-M3`, `claude-claude-sonnet-5` ≠ `claude-minimax-m3`. Модель критика (`glm-5.2`)
+≠ модель producer'а — это же требование Standard 3 к разбиравшему критерии.
+
+Для `claude-opus-4-8` (оркестратор, садовник) обёртки в `~/.zshrc` нет — эти агенты не
+диспатчатся цепочкой; доступность id на прокси при субагентном вызове не проверялась.
 
 **Проверка перед запуском цепочки:** обёртка обязана существовать в `~/.zshrc`
 (`route.sh` проверяет через `wrapper_exists` и при отсутствии останавливается по

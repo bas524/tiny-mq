@@ -14,7 +14,7 @@ description: Независимое кросс-модельное ревью и�
 1. **Модель** — снимает модельную слепую зону. Привязка обеих колонок (субагент / процесс)
    зафиксирована в [CALIBRATION.md](../../chain/CALIBRATION.md); инвариант
    `producer ≠ reviewer` выполнен по обеим.
-   - как субагент: `jms-reviewer` (`model: opus`) против Producer (`model: sonnet`);
+   - как субагент: `jms-reviewer` (`model: MiniMax-M3`) против Producer (`model: claude-sonnet-5`);
    - как процесс: обёртка `claude-minimax-m3` против `claude-claude-sonnet-5`.
 2. **Контекст** — снимает загрязнение чужим рассуждением. Ревьюер стартует **с пустого
    контекста** и получает только спеку, дифф, `target_files` и пути к логам Producer'а.

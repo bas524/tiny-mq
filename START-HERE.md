@@ -37,22 +37,23 @@ cmake --preset user-release && cmake --build --preset release --parallel
 
 Проект ведётся по Agentic Engineering Framework: роли-агенты + скиллы + событийная цепочка.
 
-**Агенты** (`.claude/agents/`). Модель фиксируется в двух местах, и они означают разное:
-frontmatter `model:` — для вызова субагентом (только алиасы `opus`/`sonnet`), обёртка
-`claude-<fn>` — для процессного запуска цепочки. Единственный источник истины по привязке —
-**`.claude/chain/CALIBRATION.md`**; таблица ниже — краткая выжимка.
+**Агенты** (`.claude/agents/`). Модель фиксируется в двух местах, и они обязаны совпадать:
+frontmatter `model:` — прямой id прокси-модели для вызова субагентом (**резолвится только
+из прокси-сессии** `claude-<fn>`; в прямой Anthropic-сессии агент упадёт — осознанная цена
+за кросс-модельность), обёртка `claude-<fn>` — для процессного запуска цепочки. Единственный
+источник истины по привязке — **`.claude/chain/CALIBRATION.md`**; таблица ниже — выжимка.
 
-| Агент | Роль | Субагент | Процесс (`claude-<fn>`) |
+| Агент | Роль | Субагент (`model:`) | Процесс (`claude-<fn>`) |
 |---|---|---|---|
-| jms-orchestrator | Orchestrator | opus | — |
-| **spec-critic** | **Критик намерения (V IV §5.3)** | **opus** | **claude-glm-5-2** |
-| jms-producer | Producer | sonnet | claude-claude-sonnet-5 |
-| jms-reviewer | Reviewer (кросс-модель, S13) | opus | **claude-minimax-m3** |
-| perf-specialist / security-specialist | Specialist | opus | claude-deepseek-reasoner |
-| conformance-specialist | Specialist | opus | claude-glm-5-2 |
-| platform-agent | Platform | sonnet | — (R1) |
-| doc-writer | Knowledge (docs фич, S6/7) | sonnet | claude-glm-5-2 |
-| knowledge-gardener | Knowledge | sonnet | — (рубеж человека) |
+| jms-orchestrator | Orchestrator | claude-opus-4-8 | — |
+| **spec-critic** | **Критик намерения (V IV §5.3)** | **glm-5.2** | **claude-glm-5-2** |
+| jms-producer | Producer | claude-sonnet-5 | claude-claude-sonnet-5 |
+| jms-reviewer | Reviewer (кросс-модель, S13) | MiniMax-M3 | **claude-minimax-m3** |
+| perf-specialist / security-specialist | Specialist | deepseek-reasoner | claude-deepseek-reasoner |
+| conformance-specialist | Specialist | glm-5.2 | claude-glm-5-2 |
+| platform-agent | Platform | qwen3-coder-plus | — (R1) |
+| doc-writer | Knowledge (docs фич, S6/7) | glm-5.2 | claude-glm-5-2 |
+| knowledge-gardener | Knowledge | claude-opus-4-8 | — (рубеж человека) |
 
 **Скиллы** (`.claude/skills/`): `spec-critique`, `jms-spec-implement`, `cpp-verify`,
 `perf-check`, `cross-model-review`, `security-review`, `doc-write`, `adr-write`,
