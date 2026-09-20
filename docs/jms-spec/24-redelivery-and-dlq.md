@@ -176,6 +176,11 @@ Kind ∈ `type` · `method` · `header` · `storage-field` · `config` · `test-
   дублирование (сообщение после рестарта и в origin, и в DLQ), но не потеря. Отсюда порядок:
   сначала append в DLQ, затем удаление из origin. Дубль в origin после рестарта несёт
   `deliveryCount` из записи (см. Semantics 9) и пройдёт цикл заново.
+  **Механизм durable-порядка** между двумя storage с независимыми worker-потоками:
+  append в storage DLQ выполняется **синхронным** `ConcurrentLinearStorage::append`
+  (существующий API: возвращает `Record`, ждёт исполнения worker'ом), и только после его
+  возврата сабмитится удаление из origin (`remove`/`removeAsync`). Блокировка на пути
+  dead-lettering допустима: это не горячий путь. Новых операций storage не требуется.
 - Сетевых кадров нет (M1, in-process).
 
 ## Dependencies
