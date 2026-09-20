@@ -73,8 +73,10 @@ RedeliveryPolicy redeliveryPolicy() const;
   политики во время `recover()` не поддерживается и не тестируется.
 - **`Consumer::redeliver(Message::Ptr)`** (private, общий для `recover()` и `rollback()`).
   Предусловие: сообщение получено этим консьюмером и не подтверждено. Постусловие — ровно
-  одно из двух: (а) сообщение снова в `_queue` консьюмера (сразу или через
-  `DeliveryScheduler`) с `redelivered == true`, `deliveryCount` на 1 больше; (б) сообщение
+  одно из двух: (а) сообщение снова в `_queue` (у queue family очередь принадлежит
+  `Destination` и разделяется всеми её консьюмерами, поэтому переживает закрытие сессии) —
+  сразу или через `DeliveryScheduler`, с `redelivered == true`, `deliveryCount` на 1 больше;
+  на пути `~Consumer()` — только сразу, без scheduler; (б) сообщение
   удалено из origin (для persistent — запись storage удалена, как при ack) и передано
   в `Destination::deadLetter`. Инвариант: `deliveryCount` монотонно растёт для данного
   `uuid` в пределах жизни процесса.
@@ -92,7 +94,11 @@ RedeliveryPolicy redeliveryPolicy() const;
    режимы) **или** `Session::rollback()` (SESSION_TRANSACTED) — инкрементирует
    `jmsHeaders.deliveryCount` и ставит `jmsHeaders.redelivered = true`. Первая доставка
    счётчик не трогает (наследие спеки 23). `rollback()` из `~Consumer()` (закрытие сессии
-   без commit) считается повторной доставкой наравне с явным `rollback()`.
+   без commit) считается повторной доставкой: счётчик и флаг ставятся, лимит проверяется
+   (→ DLQ по Semantics 2), **но backoff не применяется** — сообщение возвращается в очередь
+   destination немедленно. Так ведёт себя ActiveMQ Classic: redelivery delay — состояние
+   консьюмера, при его закрытии неподтверждённые сообщения возвращаются брокеру и
+   передиспатчиваются другому консьюмеру сразу, с `JMSRedelivered` и инкрементом счётчика.
 2. **Лимит.** Если после инкремента `deliveryCount > maxRedeliveries` (при
    `maxRedeliveries >= 0`), сообщение **не** возвращается в очередь: вызывается
    `Destination::deadLetter` с reason `"maxRedeliveries exceeded"`. При
@@ -111,7 +117,8 @@ RedeliveryPolicy redeliveryPolicy() const;
    (спека 13); кэш байт обновляется (ADR-0008). Прикладной код видит обновлённый
    `JMSDeliveryTime` — это момент, с которого сообщение снова eligible for delivery
    (JMS 2.0 § 3.4.10). При `backoffMs == 0` — немедленная повторная доставка (текущее
-   поведение `recover()`).
+   поведение `recover()`). Backoff действует только для явных `recover()`/`rollback()`;
+   на пути `~Consumer()` он не применяется (Semantics 1).
 5. **Порядок.** Среди сообщений, повторно доставляемых одним вызовом `recover()`/`rollback()`
    с `backoffMs == 0`, сохраняется исходный порядок получения (наследие спеки 23). При
    `backoffMs > 0` порядок задаёт `DeliveryScheduler` по `deliveryTime`; равные
@@ -127,7 +134,10 @@ RedeliveryPolicy redeliveryPolicy() const;
 8. **Умолчание.** Destination без вызова `setRedeliveryPolicy` имеет
    `RedeliveryPolicy{}`: 6 повторов, без backoff, без DLQ → 7-я повторная доставка удаляет
    сообщение с `warning`. Это **изменение текущего поведения** (было: бесконечно); выбрано
-   потому, что бесконечный цикл отравленного сообщения хуже потери с записью в лог.
+   потому, что бесконечный цикл отравленного сообщения хуже потери с записью в лог. Прежнее
+   поведение доступно явно: `setRedeliveryPolicy({.maxRedeliveries = -1})` (Semantics 2).
+   Сверка с ActiveMQ: Classic — лимит 6, затем `ActiveMQ.DLQ`; Artemis — лимит 10, без
+   настроенного DLA сообщение отбрасывается. Бесконечно не крутит ни один.
 9. **Не переживает рестарт.** `deliveryCount` по-прежнему не пишется на диск при повторной
    доставке: после рестарта реплей даёт `0`, лимит отсчитывается заново. Это осознанное
    ограничение (стоимость записи на горячем пути), см. Open questions.
@@ -162,8 +172,10 @@ Kind ∈ `type` · `method` · `header` · `storage-field` · `config` · `test-
 - Формат `0x02` не меняется. `deliveryCount` в записи origin **не обновляется** при повторной
   доставке (см. Semantics 9); в записи DLQ-копии сохраняется итоговое значение.
 - Dead-lettering persistent сообщения = удаление записи из storage origin + append в storage
-  DLQ. Между двумя операциями процесс может упасть: допускается **потеря** (удалили, не
-  записали), но не дублирование — порядок операций: append в DLQ, затем удаление из origin.
+  DLQ. Между двумя операциями процесс может упасть. Инвариант — **at-least-once**: допускается
+  дублирование (сообщение после рестарта и в origin, и в DLQ), но не потеря. Отсюда порядок:
+  сначала append в DLQ, затем удаление из origin. Дубль в origin после рестарта несёт
+  `deliveryCount` из записи (см. Semantics 9) и пройдёт цикл заново.
 - Сетевых кадров нет (M1, in-process).
 
 ## Dependencies
@@ -245,13 +257,24 @@ queue через `CurrentTestName`, DLQ — `CurrentTestName + ".DLQ"`).
     DLQ = topic → то же. (контракт `setRedeliveryPolicy`.)
 17. `DeadLetteringOnSessionCloseRollback` — SESSION_TRANSACTED, `maxRedeliveries = 0`: recv без
     commit, закрыть сессию → сообщение в DLQ (rollback из teardown считается). (Semantics 1, 2.)
-18. `ExpiredMessageStillDeadLettered` — `maxRedeliveries = 0`, TTL истёк к моменту rollback:
-    сообщение в DLQ с исходным `expiration` (Semantics 7); повторный recv из DLQ после
-    истечения возвращает nullptr (правило спеки 44).
+18. `DlqCopyKeepsExpiration` — `maxRedeliveries = 0`, TTL = 2 s, rollback сразу после recv:
+    консьюмер DLQ получает копию с `expiration`, равным исходному (наблюдаемо, пока TTL не
+    истёк); после истечения TTL повторный recv из DLQ возвращает nullptr (правило спеки 44).
+    (Semantics 7.) Ветка «истёк уже к моменту rollback» через `recv` ненаблюдаема (копия
+    истекла в момент появления) и отдельным тестом не проверяется — только отсутствием
+    сообщения в origin.
+20. `RestartResetsCounterAndLimit` — `maxRedeliveries = 2`, persistent: два rollback
+    (`deliveryCount == 2`), `_exchange.reset()` и пересоздание: recv из origin даёт
+    `deliveryCount == 0`, `redelivered == false`; ещё три rollback нужны до DLQ. (Semantics 9.)
+21. `SessionCloseRequeuesWithoutBackoff` — SESSION_TRANSACTED, `backoffMs = 5000`,
+    `maxRedeliveries = 6`: recv без commit, закрыть сессию; новый консьюмер origin получает
+    сообщение в пределах 100 ms с `redelivered == true`, `deliveryCount == 1`,
+    `deliveryTime == 0`. (Semantics 1, 4 — путь `~Consumer()`.)
 19. `JmsxPropertyNamesListed` — `ConnectionMetaData::jmsxPropertyNames` содержит ровно
     `JMSXDeliveryCount` и `JMSXDeadLetterReason`. (Semantics 10.)
 
-Каждое утверждение `Semantics` 1–10 имеет пункт здесь (проверяет `spec-critic`, Standard 3).
+Каждое утверждение `Semantics` 1–10 имеет пункт здесь (проверяет `spec-critic`, Standard 3);
+S9 → T20, путь `~Consumer()` → T17 (лимит) и T21 (без backoff).
 Бенч: `tests/BenchmarkTest.cpp` — существующие `Transacted_*`/`ClientAck_*` покрывают горячий
 путь `recv`/`rollback`; отдельный бенч на `rollback` с политикой по умолчанию добавить, если
 перф-гейт сочтёт существующие недостаточными.
@@ -268,10 +291,12 @@ queue через `CurrentTestName`, DLQ — `CurrentTestName + ".DLQ"`).
   новый публичный API ограничен `Destination::setRedeliveryPolicy`/`redeliveryPolicy`.
 
 ## Open questions
-- Персистентность `deliveryCount` через рестарт (Semantics 9): запись на диск при каждой
-  повторной доставке стоит fsync на горячем пути; кандидат — ленивая запись при
-  dead-lettering или отдельная спека вместе с сетевым слоем. Не влияет на реализацию этой
-  спеки.
+- Персистентность `deliveryCount` через рестарт (Semantics 9) — **отдельная спека в M5**
+  (решение Owner, 2026-09-20). Готовый дизайн: `deliveryCount` лежит в записи `0x02` по
+  фиксированному смещению (+55 от начала записи, после `priority`); нужна одна новая
+  операция storage `PATCH_AT` (позиционная запись 4 байт, fire-and-forget через worker) и
+  вызов из `Consumer::redeliver` для persistent-сообщений. Формат не меняется, ADR не нужен.
+  Здесь не делается, чтобы не расширять скоуп 24 на storage.
 - Автосоздание DLQ по соглашению (`DLQ.<origin>`) требует доступа `Destination` к `Exchange`;
   отложено до спеки 43 (admin/introspection). Здесь DLQ задаётся явно.
 - Политика для topic family (Semantics 6): нужна модель «копия подписчика vs durable-запись»;
