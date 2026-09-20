@@ -1,7 +1,7 @@
 {
   "env": {
     "CHAIN_EXEC": "0",
-    "CHAIN_MAX_ITER": "2",
+    "CHAIN_MAX_ITER": "5",
     "CHAIN_MAX_DISPATCH": "12"
   },
   "hooks": {

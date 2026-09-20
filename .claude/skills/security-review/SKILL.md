@@ -17,7 +17,8 @@ description: Ревью безопасности сетевого слоя tiny-
 ## Вердикт
 ```
 status:   approved | rejected | N/A
-evidence: <что проверено; для in-process — «N/A: изменение не касается сетевого слоя»>
+evidence: ["handoffs/<spec>/logs/security-*.log"]   # пути к прогонам, не проза (Standard 15)
+artifact: <что проверено; для in-process — «N/A: изменение не касается сетевого слоя»>
 ```
 - `rejected` — конкретная уязвимость + затронутый критерий; системное решение → требуй ADR.
 - Не правь код сам — возвращай Producer'у.

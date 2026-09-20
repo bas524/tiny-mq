@@ -9,7 +9,11 @@ Producer-воркфлоу tiny-mq (AEF Standard 2 SDD + Standard 3 исполн�
 
 ## Шаги
 
-1. **Прочитать спеку.** Открой `docs/jms-spec/<NN>*.md`. Разбери разделы: `Semantics`, `Persistence / wire implications`, `Dependencies`, `Open questions` и — главное — **`Test plan`**. Проверь, что зависимости из `Dependencies` уже закрыты в `tasks/UNIFIED-PLAN.md`; если нет — останови и сообщи оркестратору.
+0. **Объявить `target_files`** (scope-lock, Standard 18) — набор файлов, которые ты будешь
+   менять. Роутер сверяет его с `git diff --name-only` и **останавливает цепочку** при
+   выходе за набор: граница, о нарушении которой только сообщают, границей не является.
+
+1. **Прочитать спеку.** Открой `docs/jms-spec/<NN>*.md`. Разбери разделы: `Semantics`, `Persistence / wire implications`, `Dependencies`, `Stop-conditions`, `Entity inventory`, `Open questions` и — главное — **`Test plan`**. Проверь, что зависимости из `Dependencies` уже закрыты в `tasks/UNIFIED-PLAN.md`; если нет — останови и сообщи оркестратору.
 
 2. **Критерии приёмки → тесты.** Каждый пункт `Test plan` = отдельный GTest-кейс в `tests/…Test.cpp` с именем как в спеке (напр. `ExpirationTest`). Это полный и единственный скоуп «сделано».
 
@@ -24,14 +28,32 @@ Producer-воркфлоу tiny-mq (AEF Standard 2 SDD + Standard 3 исполн�
 
 6. **Handoff-пакет** (AEF §5.2) для `jms-reviewer`:
    ```
-   artifact:   <дифф + новые тесты>
-   evidence:   <вывод tiny_mq GTest; вывод --gbench, если применимо>
-   status:     produced
-   provenance: model=<producer-model> role=Producer autonomy=R2
-   sdd_ref:    docs/jms-spec/<NN>.md
+   artifact:         <дифф + новые тесты>
+   evidence:         ["handoffs/<NN>/logs/cpp-verify.log", "handoffs/<NN>/logs/bench-*.log"]
+   evidence_summary: <строка для человека; доказательной силы не имеет>
+   status:           produced
+   target_files:     [<объявленный на шаге 0 набор>]
+   provenance:       model=<producer-model> role=Producer autonomy=R2
+   sdd_ref:          docs/jms-spec/<NN>.md
    ```
+   `evidence` — **пути к логам прогонов, а не проза о них** (Standard 15). Роутер проверяет,
+   что файлы существуют и непусты; отметка «выполнено» без прогона = сфабрикованная проверка.
+
+## Остановка вместо умолчания (Standard 2)
+
+Столкнулся с пунктом `Stop-conditions` или с неоднозначностью, которой там нет, — пиши
+`status: paused` и `question` с конкретным вопросом `Owner`'у спеки (адресата консультации
+подскажет роутер). Это **не отказ**: сделанное корректно,
+работа возобновляема с той же точки, и это отличается и от `rejected` (есть дефект), и от
+сбоя (нужен чек-пойнт).
+
+Запрещено: выбрать «наиболее вероятное» прочтение, реализовать оба варианта на всякий
+случай, отложить вопрос в `// TODO`.
 
 ## Не делать
 - Не расширять поведение за пределы спеки (изменение требований → новая дельта/ADR).
+- Не вводить сущности вне `Entity inventory` спеки (Standard 5): это дрейф и блокер до MR.
+  Реестр правит оркестратор через спеку, не ты.
+- Не выходить за `target_files` — нужен файл вне набора, значит скоуп понят неверно: `paused`.
 - Не коммитить (это R1 — рубеж человека/оркестратора).
 - Не подавлять предупреждения компилятора — чинить.

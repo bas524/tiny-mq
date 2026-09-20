@@ -14,14 +14,21 @@ description: Перф-гейт tiny-mq — прогнать бенчи и сра
    cd cmake-build-relwithdebinfo && ninja
    ```
 
-2. **Прогони бенчи** (бенчи — в `tests/BenchmarkTest.cpp`):
+2. **Прогони бенчи** (бенчи — в `tests/BenchmarkTest.cpp`), сохраняя вывод в файл —
+   `evidence` это путь к прогону, а не проза о нём (Standard 15):
    ```
-   ./cmake-build-relwithdebinfo/tiny_mq --gbench [--benchmark_filter=<regex>]
+   mkdir -p handoffs/<spec>/logs
+   ./cmake-build-relwithdebinfo/tiny_mq --gbench [--benchmark_filter=<regex>] \
+     --benchmark_repetitions=7 2>&1 | tee handoffs/<spec>/logs/bench-<path>.log
    ```
    Фильтром сузь до затронутого горячего пути (send, recv, routing, serialize, storage, ack).
 
 3. **Сравни с baseline.** Baseline — зафиксированный эталон (хранится в `bench-mq/`; если файла нет — попроси `platform-agent` завести и заверсионировать его, а текущий прогон прими как первый baseline с пометкой).
-   - Метрики: throughput и/или latency по затронутым бенчам.
+   - Метрики: throughput и/или latency по затронутым бенчам; сравнивай **медиану `cpu_time`**.
+   - `main` меряется в **отдельном git worktree**, ABBA-чередованием с веткой. Два бенча
+     внутри одной ветки стоимость фичи не измеряют: после изменения оба уже идут по новому коду.
+   - Оценка по диффу вердиктом не является. В этом проекте оценка «горячий путь не задет»
+     дважды расходилась с замером на 2.7–4.4% — мерь, а не рассуждай.
 
 4. **Вердикт:**
    - регрессия **> ~5%** без обоснования → **блокер** (`status: rejected`), укажи было/стало, метрику и фильтр;
@@ -30,4 +37,7 @@ description: Перф-гейт tiny-mq — прогнать бенчи и сра
 ## Если бенча нет
 Изменение горячего пути без бенча **не наблюдаемо** → добавь бенч в `tests/BenchmarkTest.cpp` до вынесения вердикта. «Нет бенча» ≠ «нет регрессии».
 
-Верни в `evidence`: числа бенчей (baseline vs current) по затронутым путям.
+Верни в `evidence`: **пути к логам прогонов** (`handoffs/<spec>/logs/bench-*.log`) — свои,
+не чужие. Числа baseline vs current кладутся в `evidence_summary` и в отчёт `docs/reviews/`;
+как свидетельство они не засчитываются, потому что число, переписанное из чужого отчёта,
+проверкой не является (Standard 15).

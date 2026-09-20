@@ -9,9 +9,15 @@ description: Проектный verify для tiny-mq — собрать и пр
 
 ## Процедура
 
+0. **Куда писать вывод.** Все прогоны сохраняются в файл — `evidence` в handoff-пакете
+   это **путь к логу, а не проза о нём** (Standard 15). Заведи каталог:
+   ```
+   mkdir -p handoffs/<spec>/logs
+   ```
+
 1. **Сборка** (директория преднастроена):
    ```
-   cd cmake-build-debug && ninja
+   cd cmake-build-debug && ninja 2>&1 | tee ../handoffs/<spec>/logs/build.log
    ```
    Если конфигурируешь с нуля — только с vcpkg-toolchain:
    ```
@@ -21,12 +27,14 @@ description: Проектный verify для tiny-mq — собрать и пр
 
 2. **Все тесты:**
    ```
-   ./cmake-build-debug/tiny_mq
+   ./cmake-build-debug/tiny_mq --gtest_filter='-*Bench*' 2>&1 | tee handoffs/<spec>/logs/cpp-verify.log
    ```
    Один набор по фильтру:
    ```
    ./cmake-build-debug/tiny_mq --gtest_filter=<Suite>.*
    ```
+   Фильтр обязателен: бинарь без аргументов падает в SIGSEGV (`main.cpp:207` разыменовывает
+   `argv[1]` при `argc==1`) — пустой запуск даёт не «упавшие тесты», а отсутствие прогона.
 
 3. **Warnings-as-errors.** Сборка обязана быть чистой по `-Wall -Werror -Wextra -Wshadow`. Любое предупреждение = падение сборки = не пройдено. Чини причину, не подавляй.
 
@@ -34,4 +42,12 @@ description: Проектный verify для tiny-mq — собрать и пр
 - `ninja` собрался без ошибок и предупреждений;
 - `./cmake-build-debug/tiny_mq` — все тесты зелёные (0 failed).
 
-Верни в `evidence`: строку итогов GTest (`[  PASSED  ] N tests`) и, при падении, точный `[  FAILED  ]` + имя теста. Не объявляй «done» без зелёного прогона.
+## Что возвращать (Standard 15)
+
+В `evidence` — **пути к логам**: `handoffs/<spec>/logs/build.log`,
+`handoffs/<spec>/logs/cpp-verify.log`. Роутер проверяет, что файлы существуют и непусты;
+их отсутствие трактуется как сфабрикованная проверка и останавливает цепочку.
+
+Строку итогов (`[  PASSED  ] N tests`, при падении — `[  FAILED  ]` + имя теста) клади в
+`evidence_summary` — поле для чтения человеком, **без доказательной силы**. Не объявляй
+«done» без зелёного прогона и не пересказывай лог вместо того, чтобы на него сослаться.
