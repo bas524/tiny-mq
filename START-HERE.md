@@ -37,27 +37,68 @@ cmake --preset user-release && cmake --build --preset release --parallel
 
 Проект ведётся по Agentic Engineering Framework: роли-агенты + скиллы + событийная цепочка.
 
-**Агенты** (`.claude/agents/`, каждый со своей моделью через ai-proxy):
+**Агенты** (`.claude/agents/`). Модель фиксируется в двух местах, и они обязаны совпадать:
+frontmatter `model:` — прямой id прокси-модели для вызова субагентом (**резолвится только
+из прокси-сессии** `claude-<fn>`; в прямой Anthropic-сессии агент упадёт — осознанная цена
+за кросс-модельность), обёртка `claude-<fn>` — для процессного запуска цепочки. Единственный
+источник истины по привязке — **`.claude/chain/CALIBRATION.md`**; таблица ниже — выжимка.
 
-| Агент | Роль | Модель (`claude-<fn>`) |
-|---|---|---|
-| jms-orchestrator | Orchestrator | claude-claude-opus-4-8 |
-| jms-producer | Producer | claude-claude-sonnet-4-6 |
-| jms-reviewer | Reviewer (кросс-модель, S12) | **claude-minimax-m3** |
-| perf-specialist / security-specialist | Specialist | claude-deepseek-reasoner |
-| conformance-specialist | Specialist | claude-glm-5-2 |
-| platform-agent | Platform | claude-qwen3-coder-plus |
-| doc-writer | Knowledge (docs фич, S5/6) | claude-glm-5-2 |
-| knowledge-gardener | Knowledge | claude-claude-opus-4-8 |
+| Агент | Роль | Субагент (`model:`) | Процесс (`claude-<fn>`) |
+|---|---|---|---|
+| jms-orchestrator | Orchestrator | claude-opus-4-8 | — |
+| **spec-critic** | **Критик намерения (V IV §5.3)** | **glm-5.2** | **claude-glm-5-2** |
+| jms-producer | Producer | claude-sonnet-5 | claude-claude-sonnet-5 |
+| jms-reviewer | Reviewer (кросс-модель, S13) | MiniMax-M3 | **claude-minimax-m3** |
+| perf-specialist / security-specialist | Specialist | deepseek-reasoner | claude-deepseek-reasoner |
+| conformance-specialist | Specialist | glm-5.2 | claude-glm-5-2 |
+| platform-agent | Platform | qwen3-coder-plus | — (R1) |
+| doc-writer | Knowledge (docs фич, S6/7) | glm-5.2 | claude-glm-5-2 |
+| knowledge-gardener | Knowledge | claude-opus-4-8 | — (рубеж человека) |
 
-**Скиллы** (`.claude/skills/`): `jms-spec-implement`, `cpp-verify`, `perf-check`,
-`cross-model-review`, `security-review`, `doc-write`, `adr-write`, `milestone-status`.
+**Скиллы** (`.claude/skills/`): `spec-critique`, `jms-spec-implement`, `cpp-verify`,
+`perf-check`, `cross-model-review`, `security-review`, `doc-write`, `adr-write`,
+`milestone-status`.
 
-**Протокол:** Producer → Reviewer (на другой модели!) → Specialist gate → Orchestrator;
-после `approved` — Doc-writer (`docs/features/<NN>-*.md`) → рубеж человека (milestone + commit).
-Handoff-контракт и разрешение конфликтов — `.claude/chain/HANDOFF.md` (default-deny, N=2 → человек).
+**Протокол:** Критик намерения → Producer → Reviewer (на другой модели **и с чистым
+контекстом**) → Specialist gate → Orchestrator; после `approved` — Doc-writer
+(`docs/features/<NN>-*.md`) → рубеж человека (milestone + commit).
+Handoff-контракт и разрешение конфликтов — `.claude/chain/HANDOFF.md`
+(default-deny, **N=5** → человек; пороги — `CALIBRATION.md`).
+
+**Три правила, на которых стоит цепочка** (AEF Std 5/15/18, добавлены после сверки с
+фреймворком от 2026-08-11; номера — по изданию от 2026-09-19, см. ниже):
+
+1. `evidence` — **массив путей к логам прогонов**, не проза. Отчёт исполнителя о своей
+   проверке — заявление, а не свидетельство; роутер проверяет существование файлов.
+2. Проверяющий **прогоняет проверки заново** и не получает на вход разбор производителя
+   (две оси независимости: модель + контекст).
+3. `target_files` — scope-lock: правка вне объявленного набора **останавливает** цепочку.
+   Не теоретическое: `.cache/` и `cmake-build-asan/` (2613 файлов) уже уезжали в коммит.
+
+Плюс `status: paused` — остановка по `Stop-conditions` спеки. Это **не ошибка**: работа
+корректна и возобновляема, в отличие от `rejected` (есть дефект) и сбоя (нужен чек-пойнт).
+Решение на `paused` — за **`Owner`** спеки (конкретный человек, поле Standard 2); роутер
+рядом печатает **подсказку о консультации** — роль из замкнутой таблицы Том II §1.2
+(локальное соответствие — `CALIBRATION.md`), событие `CONSULT` в `chain.log`.
 **Автономия:** R2 по умолчанию; R1 (подтверждение) на `git` / `CMakeLists` / vcpkg;
 блокирующий gate — только на необратимом рубеже (мерж в main).
+
+**Сверка с AEF от 2026-09-19** (коммит `a21c2bf` фреймворка). Что изменилось в harness:
+- **Стандарты перенумерованы сплошняком 1–23** — все ссылки в `.claude/`, шаблоне спеки,
+  ADR обновлены. Соответствие старых → новых: 22→**5** (Closed-world), 23→**15**
+  (Verification Integrity), 5–13 → +1, 14–21 → +2. `docs/reviews/*` не тронуты — это
+  evidence-артефакты, зафиксированные во времени, там номера старого издания.
+- **`Owner` в спеке** — конкретный человек в роли Engineer, не роль и не автор; без него
+  спека невалидна. Добавлен в `_template.md`; **у 32 существующих спек поля нет** — заполнить
+  при следующем касании каждой (кандидат на gardener).
+- **Вопросы критика машиночитаемы:** `questions[]` с закрытым множеством `options` + `other`
+  и `answer_goes_to`; ответ оркестратор вносит **в спеку**, не в чат. `clean` при непустых
+  `questions` роутер понижает до `needs-work`.
+- **Садовник сверяет `Entity inventory` с кодом** по коммитам мимо цепочки; расхождение —
+  дрейф-флаг в Follow-up (порог `< 5`, CALIBRATION.md).
+- Метка класса документа (Standard 6): спека — K1, `docs/features/` — K2, `docs/reviews/` — K4.
+- `SEEN` в `chain.log` теперь несёт `model=` — атрибуция harness'ом (Standard 20), для
+  критика это запись о разборе критериев по Standard 3.
 
 ## Событийная цепочка (`.claude/chain/`)
 
@@ -91,11 +132,21 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
 ```
 
 1. Прочитать `docs/jms-spec/NN-*.md` — раздел «Test plan» = критерии приёмки.
-2. **Producer** (`claude-claude-sonnet-5`): реализация + тесты по Test plan.
-3. **Reviewer** (`claude-minimax-m3`) — обязательно другая модель, чем у Producer.
-4. **Perf-гейт** (`claude-deepseek-reasoner`), если тронут горячий путь.
-5. **Doc-writer** (`claude-glm-5-2`) → `docs/features/NN-*.md`.
-6. Рубеж человека: коммит + `milestone-status`.
+   Спека обязана быть валидным SDD: 10 полей (включая `Stop-conditions` и `Owner`) +
+   непустой машиночитаемый `Entity inventory`. Шаблон — `docs/jms-spec/_template.md`.
+2. **Критик намерения** (`claude-glm-5-2`): «что понял / что НЕ понял» по тексту спеки,
+   до кода. `questions[]` — закрытые варианты + `other`; вердикт не `clean` → оркестратор
+   отвечает правкой секций `answer_goes_to` спеки, точечно; лимит раундов 3.
+3. **Producer** (`claude-claude-sonnet-5`): реализация + тесты по Test plan.
+   Объявляет `target_files`, пишет логи в `handoffs/<spec>/logs/`.
+4. **Reviewer** (`claude-minimax-m3`) — другая модель **и чистый контекст**: прогоняет
+   тесты сам, сверяет с логами Producer'а, делает closed-world drift audit.
+5. **Perf-гейт** (`claude-deepseek-reasoner`), если тронут горячий путь.
+6. **Doc-writer** (`claude-glm-5-2`) → `docs/features/NN-*.md`.
+7. Рубеж человека: коммит + `milestone-status`.
+
+Журнал роутера `handoffs/<spec>/chain.log` пишет harness — это *свидетельство*; `*.json`
+пишет о себе агент — это *заявление*. При расхождении верить журналу (Std 20).
 
 Уроки спеки 45, стоящие дороже всего:
 - **Перф мерить только main-vs-ветка на release.** Сравнение двух бенчей внутри одной
@@ -131,3 +182,6 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
 - `main.cpp:207` — SIGSEGV при `argc==1` (см. выше).
 - `CLAUDE.md`/`tasks/CONTINUE-HERE.md` местами описывают старый `ninja`-путь и неверно
   утверждают, что `--gtest_filter` не поддерживается (поддерживается). Кандидат на gardener.
+- **`Owner` отсутствует во всех 32 спеках** `docs/jms-spec/` (поле введено сверкой с AEF
+  2026-09-19). Роутер на `paused` по такой спеке печатает «Owner не заполнен — спека
+  невалидна». Заполнять при следующем касании спеки, начиная со спеки 13.

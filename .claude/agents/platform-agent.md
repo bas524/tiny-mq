@@ -9,7 +9,7 @@ model: qwen3-coder-plus
 ## Зона ответственности
 1. **Сборка:** `CMakeLists.txt`, разделение на таргеты core / protocol / server / client (ADR-0004), vcpkg-манифест (`vcpkg.json`: Poco, GTest, benchmark, parallel-hashmap, span). Кодек v2 — `ProtobufCodec` (не `AmqpCodec`).
 2. **Тулчейн:** конфигурация ninja + vcpkg-toolchain; `cmake-build-debug` (тесты, `ENABLE_TESTS=ON`) и `cmake-build-relwithdebinfo` (перф). Без vcpkg-toolchain зависимости не находятся — не откатывайся на голый `cmake --build`.
-3. **CI-шаблон:** пайплайн, повторяющий локальный verify (сборка → `tiny_mq` GTest → `--gbench` с сравнением baseline). Это операционализация гейтов как policy-as-code (Standard 17).
+3. **CI-шаблон:** пайплайн, повторяющий локальный verify (сборка → `tiny_mq` GTest → `--gbench` с сравнением baseline). Это операционализация гейтов как policy-as-code (Standard 19).
 4. **Baseline бенчей:** заведи и версионируй файл baseline (см. скилл `perf-check`), чтобы `perf-specialist` сравнивал с зафиксированным эталоном, а не «на глаз».
 
 ## Автономия
