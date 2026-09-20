@@ -58,15 +58,15 @@ struct RedeliveryPolicy {
 
 ```cpp
 // Destination.h — публичные (единственные публичные мутаторы Destination)
-void            setRedeliveryPolicy(RedeliveryPolicy policy);   // только queue family
+void            setRedeliveryPolicy(RedeliveryPolicy policy);   // обе семьи; DLQ — queue family
 RedeliveryPolicy redeliveryPolicy() const;
 ```
 
 Контракты модулей (Standard 9):
 
-- **`Destination::setRedeliveryPolicy`.** Предусловие: `isQueueFamily()`; иначе бросает
-  `Poco::InvalidAccessException` и политику не меняет. `policy.deadLetterQueue`, если задан,
-  обязан быть queue family и не совпадать с `this`; иначе `Poco::InvalidArgumentException`.
+- **`Destination::setRedeliveryPolicy`.** Применима к обеим семьям destination.
+  `policy.deadLetterQueue`, если задан, обязан быть queue family и не совпадать с `this`;
+  иначе `Poco::InvalidArgumentException`, политика не меняется.
   Постусловие: следующая повторная доставка по любому консьюмеру этой destination использует
   новую политику. Потокобезопасность — как у `Destination` в целом: вызов до старта
   консьюмеров или из потока с affinity к destination (ADR-0005); конкурентная смена
@@ -76,9 +76,10 @@ RedeliveryPolicy redeliveryPolicy() const;
   одно из двух: (а) сообщение снова в `_queue` (у queue family очередь принадлежит
   `Destination` и разделяется всеми её консьюмерами, поэтому переживает закрытие сессии) —
   сразу или через `DeliveryScheduler`, с `redelivered == true`, `deliveryCount` на 1 больше;
-  на пути `~Consumer()` — только сразу, без scheduler; (б) сообщение
-  удалено из origin (для persistent — запись storage удалена, как при ack) и передано
-  в `Destination::deadLetter`. Инвариант: `deliveryCount` монотонно растёт для данного
+  на пути `~Consumer()` — только сразу, без scheduler; у topic family `_queue` — очередь
+  этого подписчика; (б) сообщение удалено из origin — для persistent запись удалена из
+  **storage этого консьюмера** (`Consumer::_storage`: storage destination у очереди, storage
+  подписки у durable-подписчика), как при ack — и передано в `Destination::deadLetter`. Инвариант: `deliveryCount` монотонно растёт для данного
   `uuid` в пределах жизни процесса.
 - **`Destination::deadLetter(Message::Ptr, std::string reason)`** (private).
   Постусловие: при `deadLetterQueue != nullptr` в DLQ появляется **копия** сообщения с
@@ -118,28 +119,37 @@ RedeliveryPolicy redeliveryPolicy() const;
    `JMSDeliveryTime` — это момент, с которого сообщение снова eligible for delivery
    (JMS 2.0 § 3.4.10). При `backoffMs == 0` — немедленная повторная доставка (текущее
    поведение `recover()`). Backoff действует только для явных `recover()`/`rollback()`;
-   на пути `~Consumer()` он не применяется (Semantics 1).
+   на пути `~Consumer()` он не применяется (Semantics 1). Выставленный backoff'ом
+   `deliveryTime` **в storage-запись не пишется** (как и `deliveryCount`, Semantics 9):
+   после рестарта persistent-сообщение видно сразу. Отложенность через рестарт гарантирует
+   только `deliveryTime`, заданный при отправке (спека 13).
 5. **Порядок.** Среди сообщений, повторно доставляемых одним вызовом `recover()`/`rollback()`
    с `backoffMs == 0`, сохраняется исходный порядок получения (наследие спеки 23). При
    `backoffMs > 0` порядок задаёт `DeliveryScheduler` по `deliveryTime`; равные
    `deliveryTime` — порядок постановки в scheduler.
-6. **Область действия.** Политика — свойство queue-family destination. Для topic family
-   `setRedeliveryPolicy` бросает; поведение топиков не меняется (бесконечная повторная
-   доставка в очередь подписчика). Причина: dead-lettering копии одного подписчика при
-   живой durable-записи у другого требует отдельной модели — вынесено в Open questions.
+6. **Область действия.** Политика — свойство destination обеих семей; **единица
+   применения лимита и DLQ — очередь консьюмера** (у queue family — общая очередь destination,
+   у topic family — очередь каждого подписчика). Так делают ActiveMQ Classic
+   (`IndividualDeadLetterStrategy.topicPrefix`, `destinationPerDurableSubscriber`), Artemis
+   (подписка = очередь под `address-settings`) и Qpid Broker-J (подписка = очередь с
+   `maximumDeliveryAttempts`). Следствия для топика: копия, превысившая лимит у одного
+   подписчика, уходит в DLQ (одна DLQ-копия на подписчика), остальные подписчики не задеты;
+   у durable-подписчика origin-запись удаляется из storage **его подписки**, а не destination;
+   счётчик у каждого подписчика свой.
 7. **Взаимодействие с истечением срока (спека 44).** Если на момент повторной доставки
    сообщение уже истекло, действует правило спеки 44 (drop на recv-пути / sweeper);
    dead-lettering по лимиту не подменяет истечение и не отменяется им: истёкшее сообщение,
    превысившее лимит, идёт в DLQ с сохранённым `expiration` и там подчиняется спеке 44.
-8. **Умолчание.** Destination без вызова `setRedeliveryPolicy` имеет
+8. **Умолчание.** Любая destination (обеих семей) без вызова `setRedeliveryPolicy` имеет
    `RedeliveryPolicy{}`: 6 повторов, без backoff, без DLQ → 7-я повторная доставка удаляет
    сообщение с `warning`. Это **изменение текущего поведения** (было: бесконечно); выбрано
    потому, что бесконечный цикл отравленного сообщения хуже потери с записью в лог. Прежнее
    поведение доступно явно: `setRedeliveryPolicy({.maxRedeliveries = -1})` (Semantics 2).
    Сверка с ActiveMQ: Classic — лимит 6, затем `ActiveMQ.DLQ`; Artemis — лимит 10, без
    настроенного DLA сообщение отбрасывается. Бесконечно не крутит ни один.
-9. **Не переживает рестарт.** `deliveryCount` по-прежнему не пишется на диск при повторной
-   доставке: после рестарта реплей даёт `0`, лимит отсчитывается заново. Это осознанное
+9. **Не переживает рестарт.** `deliveryCount` (и `deliveryTime` backoff'а, Semantics 4)
+   не пишутся на диск при повторной доставке: после рестарта реплей даёт `0`, сообщение
+   видно сразу, лимит отсчитывается заново. Это осознанное
    ограничение (стоимость записи на горячем пути), см. Open questions.
 10. **`ConnectionMetaData::jmsxPropertyNames`** после этой спеки содержит
     `{"JMSXDeliveryCount", "JMSXDeadLetterReason"}`.
@@ -171,8 +181,8 @@ Kind ∈ `type` · `method` · `header` · `storage-field` · `config` · `test-
 - DLQ — обычная `Destination` queue family; новых типов storage нет.
 - Формат `0x02` не меняется. `deliveryCount` в записи origin **не обновляется** при повторной
   доставке (см. Semantics 9); в записи DLQ-копии сохраняется итоговое значение.
-- Dead-lettering persistent сообщения = удаление записи из storage origin + append в storage
-  DLQ. Между двумя операциями процесс может упасть. Инвариант — **at-least-once**: допускается
+- Dead-lettering persistent сообщения = удаление записи из storage origin (у durable-подписчика —
+  из storage его подписки) + append в storage DLQ. Между двумя операциями процесс может упасть. Инвариант — **at-least-once**: допускается
   дублирование (сообщение после рестарта и в origin, и в DLQ), но не потеря. Отсюда порядок:
   сначала append в DLQ, затем удаление из origin. Дубль в origin после рестарта несёт
   `deliveryCount` из записи (см. Semantics 9) и пройдёт цикл заново.
@@ -198,6 +208,8 @@ Kind ∈ `type` · `method` · `header` · `storage-field` · `config` · `test-
 - Реализация backoff требует трогать `DeliveryScheduler` иначе, чем через
   `Destination::enqueueOrSchedule` (например, менять его публичный интерфейс) — остановиться:
   ADR-0007.
+- Dead-lettering у durable-подписчика требует менять `persistToOfflineSub`/раскладку
+  `durable-<clientID>-<name>` или durable-ключ — остановиться (спека 03, ADR-инвариант).
 - `rollback()` на пути `~Consumer()` не может выполнить dead-lettering без риска исключения,
   которое нельзя проглотить корректно (ADR-0006), — остановиться, не «отключать»
   dead-lettering в деструкторе молча.
@@ -256,10 +268,14 @@ queue через `CurrentTestName`, DLQ — `CurrentTestName + ".DLQ"`).
     fast path `recv` читает кэш). (Semantics 4.)
 14. `RedeliveryOrderPreservedWithoutBackoff` — CLIENT_ACK, три сообщения, recover: порядок
     тот же (регресс спеки 23 при новом общем пути `redeliver`). (Semantics 5.)
-15. `SetPolicyOnTopicThrows` — `setRedeliveryPolicy` на `Topic` → `Poco::InvalidAccessException`;
-    `redeliveryPolicy()` не изменился. (Semantics 6.)
+15. `TopicSubscriberDeadLetteredIndependently` — `Topic`, `maxRedeliveries = 1`, DLQ задан,
+    два CLIENT_ACK-подписчика A и B, одно persistent-сообщение: A делает recover дважды →
+    у A origin пуст, в DLQ ровно одна копия; B получает сообщение обычным образом с
+    `deliveryCount == 0`, B.recover → B получает повторно (`deliveryCount == 1`), DLQ
+    по-прежнему с одной копией. (Semantics 6.)
 16. `SetPolicyRejectsSelfOrTopicAsDlq` — DLQ = сама очередь → `Poco::InvalidArgumentException`;
-    DLQ = topic → то же. (контракт `setRedeliveryPolicy`.)
+    DLQ = topic → то же; `setRedeliveryPolicy` на `Topic` с DLQ-очередью — принимается.
+    (контракт `setRedeliveryPolicy`.)
 17. `DeadLetteringOnSessionCloseRollback` — SESSION_TRANSACTED, `maxRedeliveries = 0`: recv без
     commit, закрыть сессию → сообщение в DLQ (rollback из teardown считается). (Semantics 1, 2.)
 18. `DlqCopyKeepsExpiration` — `maxRedeliveries = 0`, TTL = 2 s, rollback сразу после recv:
@@ -268,18 +284,24 @@ queue через `CurrentTestName`, DLQ — `CurrentTestName + ".DLQ"`).
     (Semantics 7.) Ветка «истёк уже к моменту rollback» через `recv` ненаблюдаема (копия
     истекла в момент появления) и отдельным тестом не проверяется — только отсутствием
     сообщения в origin.
-20. `RestartResetsCounterAndLimit` — `maxRedeliveries = 2`, persistent: два rollback
-    (`deliveryCount == 2`), `_exchange.reset()` и пересоздание: recv из origin даёт
-    `deliveryCount == 0`, `redelivered == false`; ещё три rollback нужны до DLQ. (Semantics 9.)
+20. `RestartResetsCounterAndLimit` — `maxRedeliveries = 2`, `backoffMs = 5000`, persistent:
+    два rollback (`deliveryCount == 2`, отложено), `_exchange.reset()` и пересоздание: recv из
+    origin в пределах 100 ms даёт сообщение с `deliveryCount == 0`, `redelivered == false`,
+    `deliveryTime == 0`; ещё три rollback нужны до DLQ. (Semantics 4, 9.)
 21. `SessionCloseRequeuesWithoutBackoff` — SESSION_TRANSACTED, `backoffMs = 5000`,
     `maxRedeliveries = 6`: recv без commit, закрыть сессию; новый консьюмер origin получает
     сообщение в пределах 100 ms с `redelivered == true`, `deliveryCount == 1`,
     `deliveryTime == 0`. (Semantics 1, 4 — путь `~Consumer()`.)
+22. `DurableSubscriberDeadLetterRemovesFromDurableStorage` — `Topic`, durable-подписчик
+    `(clientID, name)`, `maxRedeliveries = 0`, DLQ задан, persistent-сообщение: recv → recover →
+    копия в DLQ; `_exchange.reset()` и пересоздание, durable-подписчик переподключается:
+    сообщения у него нет (storage подписки очищен), консьюмер DLQ получает копию.
+    (Semantics 3, 6; персистентный durable-путь обязателен.)
 19. `JmsxPropertyNamesListed` — `ConnectionMetaData::jmsxPropertyNames` содержит ровно
     `JMSXDeliveryCount` и `JMSXDeadLetterReason`. (Semantics 10.)
 
 Каждое утверждение `Semantics` 1–10 имеет пункт здесь (проверяет `spec-critic`, Standard 3);
-S9 → T20, путь `~Consumer()` → T17 (лимит) и T21 (без backoff).
+S6 → T15, T22; S9 → T20; путь `~Consumer()` → T17 (лимит) и T21 (без backoff).
 Бенч: `tests/BenchmarkTest.cpp` — существующие `Transacted_*`/`ClientAck_*` покрывают горячий
 путь `recv`/`rollback`; отдельный бенч на `rollback` с политикой по умолчанию добавить, если
 перф-гейт сочтёт существующие недостаточными.
@@ -304,7 +326,5 @@ S9 → T20, путь `~Consumer()` → T17 (лимит) и T21 (без backoff).
   Здесь не делается, чтобы не расширять скоуп 24 на storage.
 - Автосоздание DLQ по соглашению (`DLQ.<origin>`) требует доступа `Destination` к `Exchange`;
   отложено до спеки 43 (admin/introspection). Здесь DLQ задаётся явно.
-- Политика для topic family (Semantics 6): нужна модель «копия подписчика vs durable-запись»;
-  отдельная спека после 26 (shared consumers).
 - `JMSXOriginalDestination` на копии в DLQ — не требуется JMS; добавить, если понадобится
   admin-плоскости (спека 43).
