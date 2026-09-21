@@ -351,16 +351,18 @@ EOF
         dispatch "claude-deepseek-v4-pro" "Specialist(perf)" "$p"
         ;;
       perf|conformance|security)
+        # Change id for the OpenSpec delta: "<NN>-<slug>" from the SDD file name.
+        cid="$(basename "$sdd" .md)"
         p="$(write_prompt docwriter <<EOF
 Ты doc-writer (AEF Standard 6/7, роль Knowledge). Роль — .claude/agents/doc-writer.md, процедура — .claude/skills/doc-write.
 Ревью и специалист-гейт пройдены: $pkg. Спека: $sdd.
 Перед созданием нового файла выполни каскад REUSE > EXTEND > JUSTIFY > ESCALATE (Standard 16 п.9):
 поищи существующий док по этой фиче и расширь его, вместо того чтобы плодить второй.
-Напиши OpenSpec-дельту принятой реализации (гибрид AEF × OpenSpec, правила — openspec/README.md): каталог openspec/changes/<spec-id>/ с .openspec.yaml, proposal.md, design.md и specs/<capability>/spec.md (## ADDED/MODIFIED/REMOVED Requirements; Semantics N → ### Requirement: с SHALL; Test plan T → #### Scenario: WHEN/THEN + строка «- Test: \`Suite.Case\`» с реальным именем GTest из диффа).
+Напиши OpenSpec-дельту принятой реализации (гибрид AEF × OpenSpec, правила — openspec/README.md): каталог openspec/changes/$cid/ с .openspec.yaml, proposal.md, design.md и specs/<capability>/spec.md (## ADDED/MODIFIED/REMOVED Requirements; Semantics N → ### Requirement: с SHALL; Test plan T → #### Scenario: WHEN/THEN + строка «- Test: Suite.Case» с реальным именем GTest из диффа).
 Документируй принятую реализацию, а не замысел спеки: если они расходятся, опиши фактическое поведение и отметь расхождение.
-Прогони python3 .claude/chain/openspec.py validate <spec-id> → 0 ошибок; лог в $outdir/logs/openspec-validate.log — это твой evidence. archive НЕ делай (рубеж человека).
+Прогони python3 .claude/chain/openspec.py validate $cid → 0 ошибок; лог в $outdir/logs/openspec-validate.log — это твой evidence. archive НЕ делай (рубеж человека).
 Ты headless-процесс: никаких фоновых команд; сессия завершена только когда записан пакет.
-target_files — только файлы внутри openspec/changes/<spec-id>/. Запиши $outdir/docwriter.json со stage=docwriter,
+target_files — только файлы внутри openspec/changes/$cid/. Запиши $outdir/docwriter.json со stage=docwriter,
 status=documented, iteration=$iter, ядром artifact/evidence/provenance + target_files.
 EOF
 )"
