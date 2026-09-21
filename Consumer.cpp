@@ -12,10 +12,12 @@
 #include <Poco/UUIDGenerator.h>
 #include <Poco/StringTokenizer.h>
 #include <Poco/Timestamp.h>
+#include <cmath>
 #include <limits>
 #include <optional>
 #include <utility>
 #include "LogTracer.h"
+#include "RedeliveryPolicy.h"
 
 namespace tiny_mq {
 Consumer::Consumer(Destination& destination, Session& session, std::shared_ptr<QueueT> queue, const Poco::UUID& uuid, Poco::Path path, std::shared_ptr<linear_storage::ConcurrentLinearStorage> storage, std::shared_ptr<TransactionBuffer> transactionBuffer, std::shared_ptr<Selector> selector)
@@ -272,7 +274,7 @@ void Consumer::commit() {
   // Queue is now empty; reuse the existing object instead of reallocating.
 }
 
-void Consumer::rollback() {
+void Consumer::rollback(bool sessionClosing) {
   TRACE(_logger);
   // Logs the cached _destinationUri, not a live _destination.get() call:
   // this method also runs from ~Consumer() (drains any un-acked transacted
@@ -284,10 +286,7 @@ void Consumer::rollback() {
     msg.reset();
     _transactQueue->wait_dequeue_timed(msg, 1000);
     if (msg != nullptr) {
-      _queue->enqueue(msg);
-      poco_trace(_logger.get(),
-                 Poco::format("rollback message[%?d][%s] to %s",
-                              msg->number(), msg->uuid.toString(), _destinationUri));
+      redeliver(msg, sessionClosing);
     }
   } while (msg != nullptr);
   // Queue drained in place; no reallocation needed.
@@ -317,27 +316,89 @@ void Consumer::recover() {
     node->_inFlightLink.prev = nullptr;
     node->_inFlightLink.owner = nullptr;  // no longer linked into this chain
 
-    node->jmsHeaders.redelivered = true;
-    ++node->jmsHeaders.deliveryCount;
-    // Keep the serialized cache in sync with the header mutation just made
-    // (ADR-0008): recv() already consumed and cleared _cachedStorageBytes on
-    // this message's first delivery, so without this the *next* recv() would
-    // fall back to the stale on-disk bytes and silently drop redelivered/
-    // deliveryCount. Never touches the on-disk record or any durable-
-    // subscriber storage — the message was already persisted there on its
-    // first delivery; recover() only re-arms in-memory delivery.
-    node->refreshCachedStorageBytes();
-    // Tokenless enqueue — no producer context here, same as Consumer::rollback().
-    _queue->enqueue(node);
-    poco_trace(_logger.get(),
-               Poco::format("recover: redeliver message[%?d][%s] to %s",
-                            node->number(), node->uuid.toString(), _destinationUri));
+    // recover() is never called from ~Consumer()/~Session() teardown (that
+    // path drains _transactQueue via rollback(), not _inFlightHead) — always
+    // the live-session Session::recover() path, so sessionClosing=false.
+    redeliver(node, /*sessionClosing=*/false);
     ++requeued;
     node = std::move(next);
   }
   poco_debug(_logger.get(),
              Poco::format("recover: requeued %z message(s) to %s",
                           requeued, _destinationUri));
+}
+
+void Consumer::redeliver(Message::Ptr message, bool sessionClosing) {
+  TRACE(_logger);
+  message->jmsHeaders.redelivered = true;
+  ++message->jmsHeaders.deliveryCount;
+  const int32_t deliveryCount = message->jmsHeaders.deliveryCount;
+
+  RedeliveryPolicy policy = _destination.get().redeliveryPolicy();
+
+  if (policy.maxRedeliveries >= 0 && deliveryCount > policy.maxRedeliveries) {
+    // Dead-letter: append to the DLQ (synchronous — see Destination::deadLetter)
+    // BEFORE removing the origin record, so a crash between the two leaves an
+    // at-least-once (duplicate-tolerant, never-lose) trail rather than a hole.
+    _destination.get().deadLetter(message, "maxRedeliveries exceeded");
+    if (message->isPersistent()) {
+      linear_storage::Record rec;
+      if (message->_storageTomId != std::numeric_limits<Poco::UInt32>::max()) {
+        rec.tomId  = message->_storageTomId;
+        rec.offset = message->_storageOffset;
+        message->uuid.copyTo(rec.header.uuid.data());  // let remove() drop the index entry
+      } else {
+        rec = _storage->record(message->uuid);
+      }
+      if (rec.tomId != std::numeric_limits<Poco::UInt32>::max()) {
+        _storage->removeAsync(rec);
+      }
+    }
+    poco_debug(_logger.get(),
+               Poco::format("redeliver: dead-lettered message[%?d][%s] from %s (deliveryCount=%?d)",
+                            message->number(), message->uuid.toString(), _destinationUri, deliveryCount));
+    return;
+  }
+
+  // Backoff (Semantics 4) applies only to an explicit recover()/rollback() on
+  // a live session — never on the ~Session() teardown path (Semantics 1):
+  // a message survives a session close by going straight back onto the
+  // destination's queue, visible immediately.
+  const bool applyBackoff = !sessionClosing && policy.backoffMs > 0;
+  if (applyBackoff) {
+    // min(backoffMs * 2^(deliveryCount-1), maxBackoffMs) — computed in double
+    // to avoid integer overflow for a large deliveryCount (e.g. an unlimited-
+    // redeliveries policy); the result is clamped to maxBackoffMs regardless.
+    const double factor = std::pow(2.0, static_cast<double>(deliveryCount - 1));
+    const double rawDelayMs = static_cast<double>(policy.backoffMs) * factor;
+    const int64_t delayMs = rawDelayMs < static_cast<double>(policy.maxBackoffMs)
+                                 ? static_cast<int64_t>(rawDelayMs)
+                                 : policy.maxBackoffMs;
+    message->jmsHeaders.deliveryTime = Poco::Timestamp().epochMicroseconds() / 1000 + delayMs;
+  } else {
+    // Immediate requeue: any stale deliveryTime from an earlier backoff round
+    // (e.g. sessionClosing suppressed backoff this time) must not linger.
+    message->jmsHeaders.deliveryTime = 0;
+  }
+  // Keep the serialized cache in sync with the header mutations just made
+  // (ADR-0008): recv() already consumed and cleared _cachedStorageBytes on
+  // this message's first delivery, so without this the *next* recv() would
+  // fall back to the stale on-disk bytes and silently drop redelivered/
+  // deliveryCount/deliveryTime. Never touches the on-disk record or any
+  // durable-subscriber storage — the message was already persisted there on
+  // its first delivery; redeliver() only re-arms in-memory delivery.
+  message->refreshCachedStorageBytes();
+
+  if (applyBackoff) {
+    _destination.get().enqueueOrSchedule(_queue, std::move(message));
+  } else {
+    // Tokenless enqueue — no producer context here.
+    _queue->enqueue(std::move(message));
+  }
+  poco_trace(_logger.get(),
+             Poco::format("redeliver: requeue message[%?d][%s] to %s (deliveryCount=%?d, backoff=%s)",
+                          message->number(), message->uuid.toString(), _destinationUri,
+                          deliveryCount, applyBackoff ? "true" : "false"));
 }
 
 void Consumer::clearInFlight() noexcept {

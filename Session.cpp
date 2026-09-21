@@ -25,7 +25,10 @@ Session::Session(Connection &connection, Session::AcknowledgeMode mode)
 }
 Session::~Session() {
   try {
-    rollback();
+    // sessionClosing=true (spec 24, E15): still redelivers/counts/DLQs every
+    // in-flight transacted message, but never applies backoff — see
+    // Consumer::redeliver's sessionClosing contract.
+    rollback(true);
   } catch (...) {
     poco_error(_logger.get(), "rollback() threw in destructor — ignoring");
   }
@@ -228,7 +231,9 @@ void Session::commit() {
   _suffix = Poco::UUIDGenerator::defaultGenerator().createRandom().toString();
 }
 
-void Session::rollback() {
+void Session::rollback() { rollback(false); }
+
+void Session::rollback(bool sessionClosing) {
   TRACE(_logger);
   std::string oldSuffix = _suffix;
   _suffix.clear();
@@ -236,7 +241,7 @@ void Session::rollback() {
     producer.second->rollback(oldSuffix);
   }
   for (auto &consumer : _consumers) {
-    consumer.second->rollback();
+    consumer.second->rollback(sessionClosing);
   }
   _suffix = Poco::UUIDGenerator::defaultGenerator().createRandom().toString();
 }

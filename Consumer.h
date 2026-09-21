@@ -83,7 +83,9 @@ class Consumer {
   Message::Ptr preparePush(int64_t number, const Producer &producer, const Message &message);
   void push(int64_t number, const Producer &producer, const Message &message);
   void commit();
-  void rollback();
+  // sessionClosing=true only from Session::rollback(bool)'s ~Session() path
+  // (spec 24, E14) — see redeliver()'s contract for what that changes.
+  void rollback(bool sessionClosing = false);
   // Session.recover() (spec 23): requeue every in-flight (received, not yet
   // acknowledged) message onto this consumer's queue, in original receive
   // order, with headers.redelivered set and headers.deliveryCount incremented.
@@ -91,6 +93,18 @@ class Consumer {
   // persisted there (or in the destination's own storage) from their first
   // delivery; recover() only re-arms in-memory delivery.
   void recover();
+  // Spec 24 (E9): shared redelivery path for recover() and rollback(). Sets
+  // redelivered/increments deliveryCount, then either dead-letters the
+  // message (deliveryCount exceeds the destination's RedeliveryPolicy — see
+  // Destination::deadLetter) or requeues it, applying exponential backoff via
+  // Destination::enqueueOrSchedule when the policy calls for it.
+  // sessionClosing=true (only ever passed from the ~Session() teardown path,
+  // via rollback(true)) still increments the counter and checks the DLQ
+  // limit, but never applies backoff: the message goes straight back onto
+  // the destination's queue, since backoff is a property of a live consumer
+  // that's going away (Semantics 1, ActiveMQ Classic's redelivery-on-close
+  // model).
+  void redeliver(Message::Ptr message, bool sessionClosing);
   // Unlink and drop every in-flight message without redelivering (used by
   // ~Consumer() for messages recover() never got to). Walks the intrusive
   // chain one node at a time, extracting `next` before dropping the current

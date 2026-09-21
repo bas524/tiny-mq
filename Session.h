@@ -87,6 +87,14 @@ class Session {
 
   void commit();
 
+  // Explicit application rollback (JMS 2.0 § 4.4, SESSION_TRANSACTED):
+  // redelivers every buffered in-flight message with headers.redelivered =
+  // true and headers.deliveryCount incremented, honoring the destination's
+  // RedeliveryPolicy backoff/DLQ (spec 24, Consumer::redeliver). ~Session()
+  // reaches the same in-flight messages via the private rollback(bool)
+  // overload below with sessionClosing=true, which still increments the
+  // counter (and can still dead-letter) but never applies backoff — see
+  // Consumer::redeliver's sessionClosing contract.
   void rollback();
 
   // JMS 2.0 § 8.4.8. Stops message delivery and requeues every message this
@@ -108,6 +116,10 @@ class Session {
   // Sessions are created only through Connection::createSession.
   Session(Connection &connection, AcknowledgeMode mode = AcknowledgeMode::AUTO_ACKNOWLEDGE);
   friend class Connection;
+
+  // Spec 24 (E15): sessionClosing=true only from ~Session() — see the public
+  // rollback() comment above. The public rollback() delegates here with false.
+  void rollback(bool sessionClosing);
 
   AcknowledgeMode _mode;
   std::reference_wrapper<Poco::Logger> _logger;

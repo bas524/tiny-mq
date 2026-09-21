@@ -13,6 +13,7 @@
 #include "ConcurrentLinearStorage.h"
 #include "TransactionBuffer.h"
 #include "DeliveryScheduler.h"
+#include "RedeliveryPolicy.h"
 
 namespace tiny_mq {
 class Session;
@@ -49,6 +50,9 @@ class Destination {
   phmap::parallel_node_hash_map<std::string, DurableSubState> _durableSubs;
   // Reverse lookup: consumer UUID -> subscription name (durable consumers only)
   phmap::parallel_node_hash_map<Poco::UUID, std::string> _consumerToSubName;
+  // Spec 24: redelivery/DLQ policy. Applies to both destination families; unit
+  // of the redelivery limit/DLQ is the consumer's own queue (Consumer::redeliver).
+  RedeliveryPolicy _redeliveryPolicy;
 
  public:
   using Ptr = std::shared_ptr<Destination>;
@@ -61,6 +65,15 @@ class Destination {
   std::string typeName() const;
   const std::string &uri() const;
   size_t hash() const;
+
+  // Spec 24: set/get the redelivery/DLQ policy. Applies to both destination
+  // families. Throws Poco::InvalidArgumentException (policy left unchanged)
+  // if policy.deadLetterQueue is non-null and either equals this destination
+  // or is not queue-family. Call before consumers start, or from the
+  // destination-affinity thread — concurrent policy change during an
+  // in-flight recover()/rollback() is unsupported/untested.
+  void setRedeliveryPolicy(RedeliveryPolicy policy);
+  RedeliveryPolicy redeliveryPolicy() const;
 
  private:
   Destination(destination::Type type, std::string name, Poco::Path path);
@@ -116,6 +129,18 @@ class Destination {
   // Serialise message to [type-byte][toBytes()] and append to an offline durable
   // sub's storage.  Selector matching must be performed by the caller.
   static void persistToOfflineSub(DurableSubState &sub, const Message &message);
+
+  // Spec 24: dead-letter a message that exceeded its redelivery policy's
+  // maxRedeliveries. If _redeliveryPolicy.deadLetterQueue is set, a copy
+  // (preserving body/headers, final deliveryCount/redelivered, with
+  // JMSXDeadLetterReason=reason and deliveryTime reset to 0) is appended to
+  // its storage — persistent iff message is persistent. If unset, the
+  // message is dropped with a warning log. Must not throw (ADR-0006): the
+  // caller (Consumer::redeliver, reachable from ~Consumer()) requires this;
+  // any failure while writing the DLQ copy is caught and logged as an error.
+  // Does NOT touch the origin record — the caller removes it from its own
+  // storage.
+  void deadLetter(Message::Ptr message, std::string reason) noexcept;
 
   // Transaction buffer access
   TransactionBuffer::Ptr getTransactionBuffer() const;
