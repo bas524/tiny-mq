@@ -116,6 +116,14 @@ check_scope_lock() {
   [ -n "$changed" ] || return 0
 
   local declared; declared="$(jq -r '(.target_files // []) | .[]' "$pkg" 2>/dev/null)"
+  # Read-only stages (critic/reviewer/perf/conformance/security) declare no set,
+  # but the working tree legitimately carries the producer's UNCOMMITTED work
+  # (the producer never commits — that is the R1 human gate). So their baseline
+  # is the producer's declared set, not an empty one: anything beyond it is the
+  # read-only stage editing code (Law 6). Spec 24 review tripped this falsely.
+  if [ -z "$declared" ] && [ -s "$outdir/producer.json" ]; then
+    declared="$(jq -r '(.target_files // []) | .[]' "$outdir/producer.json" 2>/dev/null)"
+  fi
 
   local f out=""
   while IFS= read -r f; do
