@@ -356,10 +356,12 @@ EOF
 Ревью и специалист-гейт пройдены: $pkg. Спека: $sdd.
 Перед созданием нового файла выполни каскад REUSE > EXTEND > JUSTIFY > ESCALATE (Standard 16 п.9):
 поищи существующий док по этой фиче и расширь его, вместо того чтобы плодить второй.
-Напиши/обнови документацию функциональности в docs/features/ (что делает · семантика · как пользоваться · ограничения · проверяемость по Test plan); в шапке — метка класса «Класс: K2 — Engineering» (Standard 6).
+Напиши OpenSpec-дельту принятой реализации (гибрид AEF × OpenSpec, правила — openspec/README.md): каталог openspec/changes/<spec-id>/ с .openspec.yaml, proposal.md, design.md и specs/<capability>/spec.md (## ADDED/MODIFIED/REMOVED Requirements; Semantics N → ### Requirement: с SHALL; Test plan T → #### Scenario: WHEN/THEN + строка «- Test: \`Suite.Case\`» с реальным именем GTest из диффа).
 Документируй принятую реализацию, а не замысел спеки: если они расходятся, опиши фактическое поведение и отметь расхождение.
-target_files — только файлы документации. Запиши $outdir/docwriter.json со stage=docwriter,
-status=documented, iteration=$iter, ядром artifact/evidence/provenance.
+Прогони python3 .claude/chain/openspec.py validate <spec-id> → 0 ошибок; лог в $outdir/logs/openspec-validate.log — это твой evidence. archive НЕ делай (рубеж человека).
+Ты headless-процесс: никаких фоновых команд; сессия завершена только когда записан пакет.
+target_files — только файлы внутри openspec/changes/<spec-id>/. Запиши $outdir/docwriter.json со stage=docwriter,
+status=documented, iteration=$iter, ядром artifact/evidence/provenance + target_files.
 EOF
 )"
         dispatch "claude-glm-5-2" "DocWriter" "$p"

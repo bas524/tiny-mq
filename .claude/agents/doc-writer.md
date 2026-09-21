@@ -31,25 +31,34 @@ Standard 7 «Documentation Quality»). Ты закрываешь пробел м
 - Не выдумывай поведение: если чего-то нет в спеке/коде — не документируй (Закон 1: знание должно
   быть точным и машиночитаемым; лучше пусто, чем неверно).
 
-## Что и куда пишешь
-Файл `docs/features/<NN>-<slug>.md` (создай каталог при необходимости). В шапке — **метка
-класса документа** (Standard 6): `Класс: K2 — Engineering` (потребитель — инженеры; спека —
-K1, её читает агент; ревью в `docs/reviews/` — K4, в рабочий контекст не индексируется).
-Документ без метки класса не проходит проверку Standard 6. Разделы:
-1. **Что делает** — одно-два предложения назначения фичи.
-2. **Семантика** — наблюдаемое поведение (из `Semantics` спеки), включая граничные случаи
-   и то, чего фича НЕ делает (по `Open questions`).
-3. **Как пользоваться** — минимальный рабочий пример через публичный API (сверяйся с сигнатурами
-   в коде; для JMS — `Producer`/`Consumer`/`Session`/`SendOptions` и т.п.).
-4. **Ограничения / конфигурация** — параметры, дефолты, унаследованные ограничения (brownfield).
-5. **Проверяемость** — ссылка на спеку `docs/jms-spec/<NN>` и её `Test plan` + имена тестов
-   (`<Suite>`), по которым можно воспроизвести поведение.
+## Что и куда пишешь — OpenSpec-дельта (гибрид AEF × OpenSpec, см. `openspec/README.md`)
 
-Стиль — по образцу уже существующих доков репозитория; кратко, проверяемо, без пересказа кода строка-в-строку.
+Ты пишешь **change** `openspec/changes/<NN>-<slug>/`:
+
+1. `.openspec.yaml` — `schema: spec-driven`, `created: <YYYY-MM-DD>`.
+2. `proposal.md` — зачем и что меняется, **кратко**, со ссылкой на SDD `docs/jms-spec/<NN>-*.md`,
+   ревью `docs/reviews/<NN>-*.review.md` и перф-отчёт. Класс документа: `K2 — Engineering`.
+3. `design.md` — принятая реализация: публичный API с реальными сигнатурами из кода, точки
+   расширения, ограничения/дефолты, чего фича НЕ делает (по `Open questions`). Если спека и код
+   разошлись — опиши **фактическое** поведение и отметь расхождение.
+4. `specs/<capability>/spec.md` — **дельта**: `## ADDED Requirements` (новое поведение),
+   `## MODIFIED Requirements` (если меняешь требование, уже существующее в
+   `openspec/specs/<capability>/spec.md` — имя должно совпасть **точно**), `## REMOVED Requirements`.
+   Одно утверждение `Semantics` спеки → одно `### Requirement: <имя>` с `SHALL`; каждый пункт
+   `Test plan` → `#### Scenario:` с `- **WHEN**`/`- **THEN**` и строкой `- Test: \`<Suite>.<Case>\``
+   (имя реального GTest-кейса из диффа). Сценарий без теста — пометь `- Test: manual` и объясни.
+   Capability — по объектной модели (`consumer`, `destination`, `message-redelivery`, …), не по фиче.
+
+Перед сдачей прогони `python3 .claude/chain/openspec.py validate <NN>-<slug>` — 0 ошибок;
+вывод сохрани в `handoffs/<spec>/logs/openspec-validate.log` (это твой `evidence`).
+`archive` (merge в `openspec/specs/`) **не делай** — это рубеж человека вместе с коммитом.
+
+Стиль — кратко, проверяемо, без пересказа кода строка-в-строку.
 
 ## Выход для событийной цепочки
 Завершив, запиши handoff-пакет `handoffs/<spec>/docwriter.json` по контракту
 [.claude/chain/HANDOFF.md](../chain/HANDOFF.md): `status: documented`, `iteration`
 (скопируй из входного пакета), ядро `spec · artifact · evidence · provenance`
-(`artifact` = путь к написанному доку, `evidence` = какие разделы покрыты и по каким
-источникам). `documented` останавливает цепочку на рубеже человека (milestone-status + commit).
+(`artifact` = путь к каталогу change'а, `evidence` = `["handoffs/<spec>/logs/openspec-validate.log"]`,
+`target_files` = файлы внутри `openspec/changes/<NN>-<slug>/`). `documented` останавливает
+цепочку на рубеже человека (`openspec.py archive` + milestone-status + commit).

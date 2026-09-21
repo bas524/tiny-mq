@@ -59,6 +59,13 @@ frontmatter `model:` — прямой id прокси-модели для выз
 `perf-check`, `cross-model-review`, `security-review`, `doc-write`, `adr-write`,
 `milestone-status`.
 
+**Гибрид AEF × OpenSpec** (решение Owner 2026-09-21, спека 24 — первая): SDD в
+`docs/jms-spec/` остаётся *предложением*; «что система делает сейчас» живёт в
+`openspec/specs/<capability>/spec.md` и собирается из дельт `openspec/changes/<NN-slug>/`,
+которые пишет doc-writer после приёмки. Инструмент — `.claude/chain/openspec.py`
+(`validate` / `archive`; npm-CLI прокси не пропускает). Правила — `openspec/README.md`.
+`docs/features/` больше не пополняется (бэкфилл закрытых спек в `openspec/specs` — садовник).
+
 **Протокол:** Критик намерения → Producer → Reviewer (на другой модели **и с чистым
 контекстом**) → Specialist gate → Orchestrator; после `approved` — Doc-writer
 (`docs/features/<NN>-*.md`) → рубеж человека (milestone + commit).
@@ -142,8 +149,9 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
 4. **Reviewer** (`claude-minimax-m3`) — другая модель **и чистый контекст**: прогоняет
    тесты сам, сверяет с логами Producer'а, делает closed-world drift audit.
 5. **Perf-гейт** (`claude-deepseek-v4-pro`), если тронут горячий путь.
-6. **Doc-writer** (`claude-glm-5-2`) → `docs/features/NN-*.md`.
-7. Рубеж человека: коммит + `milestone-status`.
+6. **Doc-writer** (`claude-glm-5-2`) → OpenSpec-дельта `openspec/changes/NN-slug/`
+   (+ `openspec.py validate` в evidence).
+7. Рубеж человека: `openspec.py archive NN-slug` → коммит + `milestone-status`.
 
 Журнал роутера `handoffs/<spec>/chain.log` пишет harness — это *свидетельство*; `*.json`
 пишет о себе агент — это *заявление*. При расхождении верить журналу (Std 20).

@@ -1,6 +1,6 @@
 ---
 name: doc-write
-description: Написать/обновить документацию функциональности tiny-mq по закрытой спеке. Используй после approved-ревью, до milestone-status. Источник истины — docs/jms-spec/NN и её «Test plan»; вывод — docs/features/NN-*.md. Триггеры: «задокументируй фичу», «опиши функциональность спеки NN», стадия doc-writer в цепочке.
+description: Написать OpenSpec-дельту принятой реализации спеки tiny-mq (гибрид AEF × OpenSpec). Используй после approved-ревью и перф-гейта, до milestone-status. Источник истины — docs/jms-spec/NN, дифф и тесты; вывод — openspec/changes/NN-slug/ (proposal, design, specs/<capability>/spec.md). Триггеры: «задокументируй фичу», «опиши функциональность спеки NN», стадия doc-writer в цепочке.
 ---
 
 # doc-write
@@ -27,18 +27,24 @@ scheduled delivery; 23 → 24 переиспользует `deliveryCount`). Т�
 ## Шаги
 1. Прочитай `docs/jms-spec/<NN>.md` (`Semantics`, `Test plan`, `Open questions`, `Dependencies`)
    и дифф реализации из handoff-пакета Producer. Сверь публичный API по коду (сигнатуры реальны).
-2. Напиши/обнови `docs/features/<NN>-<slug>.md`; в шапке — метка класса
-   `Класс: K2 — Engineering` (Standard 6: у каждого документа есть класс; K4-историческое
-   в рабочий контекст агента не попадает). Разделы:
-   **Что делает · Семантика (вкл. чего НЕ делает) · Как пользоваться (пример на публичном API) ·
-   Ограничения/конфигурация · Проверяемость (ссылка на спеку + `Test plan` + имена тестов)**.
+2. Создай change `openspec/changes/<NN>-<slug>/` (формат и правила — `openspec/README.md`,
+   роль — `.claude/agents/doc-writer.md`): `.openspec.yaml`, `proposal.md` (зачем, ссылки на
+   SDD/ревью), `design.md` (принятая реализация: API, дефолты, чего НЕ делает),
+   `specs/<capability>/spec.md` — дельта `## ADDED/MODIFIED/REMOVED Requirements`:
+   `Semantics` N → `### Requirement:` с `SHALL`; `Test plan` T → `#### Scenario:` WHEN/THEN +
+   `- Test: \`<Suite>.<Case>\``. Если требование уже есть в `openspec/specs/<capability>/spec.md` —
+   MODIFIED с точным именем.
+   Прогони `python3 .claude/chain/openspec.py validate <NN>-<slug>` → 0 ошибок, лог в
+   `handoffs/<spec>/logs/openspec-validate.log`.
 3. Никакого «впрок»: документируй только то, что есть в спеке и коде (Закон 1 — точность важнее полноты).
 4. Стиль — как в существующих доках репо; кратко и проверяемо.
 
 ## Выход
 Handoff-пакет `handoffs/<spec>/docwriter.json` со `status: documented`, ядром
-`spec · artifact · evidence · provenance` (`artifact` = путь к доку). После этого цепочка
-останавливается на рубеже человека: `milestone-status` (спека → done) + коммит.
+`spec · artifact · evidence · provenance` (`artifact` = каталог change'а, `evidence` = лог
+validate, `target_files` = файлы change'а). После этого цепочка останавливается на рубеже
+человека: `python3 .claude/chain/openspec.py archive <NN>-<slug>` (merge в
+`openspec/specs/`) + `milestone-status` + коммит.
 
 ## Границы (что это НЕ)
 - Не ADR (архитектурное «почему» → скилл `adr-write`).
