@@ -121,8 +121,10 @@ check_scope_lock() {
   # (the producer never commits — that is the R1 human gate). So their baseline
   # is the producer's declared set, not an empty one: anything beyond it is the
   # read-only stage editing code (Law 6). Spec 24 review tripped this falsely.
-  if [ -z "$declared" ] && [ -s "$outdir/producer.json" ]; then
-    declared="$(jq -r '(.target_files // []) | .[]' "$outdir/producer.json" 2>/dev/null)"
+  # The same holds for later modifying stages (docwriter): their own set is
+  # checked ON TOP of the producer's still-uncommitted files, not instead.
+  if [ "$stage" != "producer" ] && [ -s "$outdir/producer.json" ]; then
+    declared="$(printf '%s\n%s' "$declared" "$(jq -r '(.target_files // []) | .[]' "$outdir/producer.json" 2>/dev/null)")"
   fi
 
   local f out=""

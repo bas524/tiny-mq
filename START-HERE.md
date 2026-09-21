@@ -29,9 +29,12 @@ cmake --preset user-release && cmake --build --preset release --parallel
   очереди. Ревью (MiniMax-M3) и перф-гейт (deepseek-reasoner) approved; перф к master
   −2.2% / +2.5%. См. [docs/features/45-priority-ordering.md](docs/features/45-priority-ordering.md)
   и [docs/reviews/45-priority-ordering.perf.md](docs/reviews/45-priority-ordering.perf.md).
-- **Следующий шаг — спека 13 (delivery delay):** min-heap по `deliveryTime`, таймер
-  commit-time для транзакций. Источник: `docs/jms-spec/13-delivery-delay.md`; статус
-  в UNIFIED-PLAN / CONTINUE-HERE.
+- **Спеки 13, 23 — ✅ закрыты** (см. UNIFIED-PLAN). **Спека 24 (redelivery + DLQ) — ✅ закрыта**
+  2026-09-21: первая по обновлённому AEF и первая с OpenSpec-дельтой
+  (`openspec/specs/message-redelivery/spec.md`). Ревью: `docs/reviews/24-redelivery-dlq.review.md`,
+  перф: `docs/reviews/24-redelivery-dlq.perf.md`.
+- **Следующий шаг — M1: 28 → 25 → 30** (`tasks/CONTINUE-HERE.md`); каждую сначала довести
+  до SDD по `_template.md`.
 
 ## AEF-harness (`.claude/`)
 
@@ -166,6 +169,24 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
   измерения и при этом небезопасную рекомендацию (fast-path, ломавший главный критерий
   приёмки спеки).
 - Сводные поля JSON у агентов бывают устаревшими при верном разборе в `.md` — читать `.md`.
+
+## Уроки спеки 24 (harness)
+
+Цепочка на 24 вскрыла и починила шесть дефектов `route.sh`/процесса — все в коммитах ветки:
+- **headless-стадия не имеет права уходить в фон**: Producer запустил сборку `run_in_background`
+  и вышел без пакета; правило «никаких фоновых команд, сессия завершена = записан пакет» —
+  во всех промптах диспатча;
+- **инфра-сбои (429/400 прокси) неотличимы от молчания агента** — пишутся руками как
+  `INFRA-FAIL`; `dispatch` должен проверять код возврата (ещё не сделано);
+- scope-lock read-only и docwriter стадий сверяется с **`target_files` Producer'а** (его работа
+  не закоммичена — R1), а не с пустым набором;
+- потолок диспатчей — **per-spec** (`handoffs/<spec>/.dispatches`), не глобальный;
+- маркер `.routed` надо переносить вместе с переименованным пакетом; legacy-пакет без ядра
+  блокирует сканирование (`NOTREADY` не маркируется — ещё не сделано);
+- в heredoc промпта внутри `$( … )` нельзя `#` и обратные кавычки — парсер подстановки;
+- привязка `deepseek-reasoner` устарела → `deepseek-v4-pro` (CALIBRATION.md).
+Критик за 3 раунда нашёл 7 реальных пробелов спеки (перевёрнутый инвариант, backoff из
+деструктора, durable-порядок двух storage, топики); лимит 3 сработал → решение Owner.
 
 ## Follow-up / долги (не блокеры)
 
