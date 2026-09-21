@@ -358,7 +358,8 @@ EOF
 Ревью и специалист-гейт пройдены: $pkg. Спека: $sdd.
 Перед созданием нового файла выполни каскад REUSE > EXTEND > JUSTIFY > ESCALATE (Standard 16 п.9):
 поищи существующий док по этой фиче и расширь его, вместо того чтобы плодить второй.
-Напиши OpenSpec-дельту принятой реализации (гибрид AEF × OpenSpec, правила — openspec/README.md): каталог openspec/changes/$cid/ с .openspec.yaml, proposal.md, design.md и specs/<capability>/spec.md (## ADDED/MODIFIED/REMOVED Requirements; Semantics N → ### Requirement: с SHALL; Test plan T → #### Scenario: WHEN/THEN + строка «- Test: Suite.Case» с реальным именем GTest из диффа).
+Напиши OpenSpec-дельту принятой реализации (гибрид AEF × OpenSpec, правила — openspec/README.md): каталог openspec/changes/$cid/ с .openspec.yaml, proposal.md, design.md и specs/<capability>/spec.md (секции ADDED/MODIFIED/REMOVED Requirements; Semantics N → заголовок «Requirement:» с SHALL; Test plan T → заголовок «Scenario:» WHEN/THEN + строка «- Test: Suite.Case» с реальным именем GTest из диффа; точный формат — в openspec/README.md, решётки заголовков там).
+Внимание: в этом промпте нет символов решётки намеренно — это ограничение bash, формат бери из README.
 Документируй принятую реализацию, а не замысел спеки: если они расходятся, опиши фактическое поведение и отметь расхождение.
 Прогони python3 .claude/chain/openspec.py validate $cid → 0 ошибок; лог в $outdir/logs/openspec-validate.log — это твой evidence. archive НЕ делай (рубеж человека).
 Ты headless-процесс: никаких фоновых команд; сессия завершена только когда записан пакет.
