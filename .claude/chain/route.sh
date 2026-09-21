@@ -205,8 +205,11 @@ write_prompt() {  # $1 = stage name; body on stdin; echoes the file path
 
 dispatch() {  # $1 = claude-<model> function, $2 = next stage label, $3 = prompt file
   mark_routed
-  local n; n=$(( $(cat "$CHAIN_DIR/.dispatches" 2>/dev/null || echo 0) + 1 ))
-  echo "$n" > "$CHAIN_DIR/.dispatches"
+  # Per-spec counter: the breaker guards one chain against looping, so a
+  # global file would trip on the accumulated history of every past spec
+  # (it did: 13 dispatches across specs 45/13/23/24 stopped spec 24's perf gate).
+  local n; n=$(( $(cat "$outdir/.dispatches" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$outdir/.dispatches"
   if [ "$n" -gt "$MAX_DISPATCH" ]; then
     jlog "CEILING dispatches=$n max=$MAX_DISPATCH"
     echo "[chain] dispatch ceiling $MAX_DISPATCH reached — stop (circuit breaker)" >&2; exit 0
