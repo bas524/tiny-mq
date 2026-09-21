@@ -389,6 +389,10 @@ void Consumer::redeliver(Message::Ptr message, bool sessionClosing) {
   // its first delivery; redeliver() only re-arms in-memory delivery.
   message->refreshCachedStorageBytes();
 
+  // Log fields are captured before the move below: `message` is null after
+  // it, and poco_trace evaluates its arguments whenever trace level is on.
+  const int64_t number = message->number();
+  const std::string uuid = message->uuid.toString();
   if (applyBackoff) {
     _destination.get().enqueueOrSchedule(_queue, std::move(message));
   } else {
@@ -397,7 +401,7 @@ void Consumer::redeliver(Message::Ptr message, bool sessionClosing) {
   }
   poco_trace(_logger.get(),
              Poco::format("redeliver: requeue message[%?d][%s] to %s (deliveryCount=%?d, backoff=%s)",
-                          message->number(), message->uuid.toString(), _destinationUri,
+                          number, uuid, _destinationUri,
                           deliveryCount, applyBackoff ? "true" : "false"));
 }
 
