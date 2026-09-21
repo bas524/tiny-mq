@@ -188,6 +188,22 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
 Критик за 3 раунда нашёл 7 реальных пробелов спеки (перевёрнутый инвариант, backoff из
 деструктора, durable-порядок двух storage, топики); лимит 3 сработал → решение Owner.
 
+**Открытое после мержа PR #7 — заведено задачами, не прозой:**
+- [MS-03](tasks/memory-safety/03-macos-ci-teardown-hang.md) — плавающее зависание
+  `DurableSubscriberTest` на macOS CI (3 ч); причина не установлена, watchdog в `ci.yml`
+  снимет стек при следующем проявлении.
+- [MS-01](tasks/memory-safety/01-consumer-outlives-destination.md) — экспозиция выросла:
+  `redeliver()` дёргает `_destination` с пути `~Consumer()`; дешёвая страховка описана.
+- [HR-01](tasks/harness/01-route-sh-robustness.md) — `dispatch` не видит 429/400/обрыва,
+  `NOTREADY` не маркируется, правило «foreground only» не во всех промптах.
+- [HR-02](tasks/harness/02-openspec-backfill-and-owner.md) — бэкфилл `openspec/specs` по
+  12 закрытым спекам, `Owner` в 31 спеке.
+- Спека **46** (M5) — персистентность `deliveryCount`/backoff через рестарт, заготовка с
+  дизайном `PATCH_AT`.
+- `gh` из этого шелла работает только без прокси:
+  `env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy gh …` (логин — в отдельном
+  терминале); API GitHub для публичного репо доступен так же через `curl`.
+
 ## Follow-up / долги (не блокеры)
 
 - **Спека 26 (shared consumers) — обязательное условие, не пожелание.** Корректность
@@ -211,6 +227,5 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
 - `main.cpp:207` — SIGSEGV при `argc==1` (см. выше).
 - `CLAUDE.md`/`tasks/CONTINUE-HERE.md` местами описывают старый `ninja`-путь и неверно
   утверждают, что `--gtest_filter` не поддерживается (поддерживается). Кандидат на gardener.
-- **`Owner` отсутствует во всех 32 спеках** `docs/jms-spec/` (поле введено сверкой с AEF
-  2026-09-19). Роутер на `paused` по такой спеке печатает «Owner не заполнен — спека
-  невалидна». Заполнять при следующем касании спеки, начиная со спеки 13.
+- **`Owner` отсутствует в 31 из 32 спек** `docs/jms-spec/` — см. HR-02; заполнять при
+  касании, спека 24 — образец.

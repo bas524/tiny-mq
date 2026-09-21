@@ -65,6 +65,7 @@
 | 41 AuthN/AuthZ/TLS | E | M3 | ⬜ planned |
 | 42 Flow control | E | M3 | ⬜ planned |
 | 43 Admin/introspection | E | M3 | ⬜ planned |
+| 46 Persist redelivery state (deliveryCount/backoff через рестарт) | B | M5 | ⬜ planned (заготовка по решению Owner при закрытии 24; дизайн PATCH_AT в спеке) |
 | 60 C++ client (over STOMP) | F | M4 | ⬜ planned |
 | 61 Java client (JMS provider, over STOMP) | F | M5 | ⬜ planned |
 | 40-v2 Wire protocol v2 (protobuf) | E | M6 | ⬜ planned |
