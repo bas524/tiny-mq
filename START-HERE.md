@@ -49,7 +49,7 @@ frontmatter `model:` — прямой id прокси-модели для выз
 | **spec-critic** | **Критик намерения (V IV §5.3)** | **glm-5.2** | **claude-glm-5-2** |
 | jms-producer | Producer | claude-sonnet-5 | claude-claude-sonnet-5 |
 | jms-reviewer | Reviewer (кросс-модель, S13) | MiniMax-M3 | **claude-minimax-m3** |
-| perf-specialist / security-specialist | Specialist | deepseek-reasoner | claude-deepseek-reasoner |
+| perf-specialist / security-specialist | Specialist | deepseek-reasoner | claude-deepseek-v4-pro |
 | conformance-specialist | Specialist | glm-5.2 | claude-glm-5-2 |
 | platform-agent | Platform | qwen3-coder-plus | — (R1) |
 | doc-writer | Knowledge (docs фич, S6/7) | glm-5.2 | claude-glm-5-2 |
@@ -141,7 +141,7 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
    Объявляет `target_files`, пишет логи в `handoffs/<spec>/logs/`.
 4. **Reviewer** (`claude-minimax-m3`) — другая модель **и чистый контекст**: прогоняет
    тесты сам, сверяет с логами Producer'а, делает closed-world drift audit.
-5. **Perf-гейт** (`claude-deepseek-reasoner`), если тронут горячий путь.
+5. **Perf-гейт** (`claude-deepseek-v4-pro`), если тронут горячий путь.
 6. **Doc-writer** (`claude-glm-5-2`) → `docs/features/NN-*.md`.
 7. Рубеж человека: коммит + `milestone-status`.
 

@@ -345,10 +345,10 @@ Regression горячего пути > ~5% без обоснования = statu
 Standard 15: числа обязаны быть из твоего прогона, сохранённого в $outdir/logs/. Ссылка на чужой замер вердиктом не является.
 Код не правь. Запиши отчёт в docs/reviews/ и handoff в $outdir/perf.json со stage=perf,
 status=approved|rejected, iteration=$iter, artifact, evidence = массив путей к логам бенчей,
-provenance={model:deepseek-reasoner,role:Specialist,autonomy:R2}.
+provenance={model:deepseek-v4-pro,role:Specialist,autonomy:R2}.
 EOF
 )"
-        dispatch "claude-deepseek-reasoner" "Specialist(perf)" "$p"
+        dispatch "claude-deepseek-v4-pro" "Specialist(perf)" "$p"
         ;;
       perf|conformance|security)
         p="$(write_prompt docwriter <<EOF
