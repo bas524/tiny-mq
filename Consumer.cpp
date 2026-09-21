@@ -391,8 +391,11 @@ void Consumer::redeliver(Message::Ptr message, bool sessionClosing) {
 
   // Log fields are captured before the move below: `message` is null after
   // it, and poco_trace evaluates its arguments whenever trace level is on.
-  const int64_t number = message->number();
-  const std::string uuid = message->uuid.toString();
+  // [[maybe_unused]]: in release builds poco_trace compiles away entirely
+  // (POCO_LOG_DEBUG off) and these would trip -Werror=unused-variable — the
+  // same pattern as `requeued` in recover().
+  [[maybe_unused]] const int64_t number = message->number();
+  [[maybe_unused]] const std::string uuid = message->uuid.toString();
   if (applyBackoff) {
     _destination.get().enqueueOrSchedule(_queue, std::move(message));
   } else {
