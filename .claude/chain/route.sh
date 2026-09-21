@@ -116,6 +116,16 @@ check_scope_lock() {
   [ -n "$changed" ] || return 0
 
   local declared; declared="$(jq -r '(.target_files // []) | .[]' "$pkg" 2>/dev/null)"
+  # Read-only stages (critic/reviewer/perf/conformance/security) declare no set,
+  # but the working tree legitimately carries the producer's UNCOMMITTED work
+  # (the producer never commits — that is the R1 human gate). So their baseline
+  # is the producer's declared set, not an empty one: anything beyond it is the
+  # read-only stage editing code (Law 6). Spec 24 review tripped this falsely.
+  # The same holds for later modifying stages (docwriter): their own set is
+  # checked ON TOP of the producer's still-uncommitted files, not instead.
+  if [ "$stage" != "producer" ] && [ -s "$outdir/producer.json" ]; then
+    declared="$(printf '%s\n%s' "$declared" "$(jq -r '(.target_files // []) | .[]' "$outdir/producer.json" 2>/dev/null)")"
+  fi
 
   local f out=""
   while IFS= read -r f; do
@@ -197,8 +207,11 @@ write_prompt() {  # $1 = stage name; body on stdin; echoes the file path
 
 dispatch() {  # $1 = claude-<model> function, $2 = next stage label, $3 = prompt file
   mark_routed
-  local n; n=$(( $(cat "$CHAIN_DIR/.dispatches" 2>/dev/null || echo 0) + 1 ))
-  echo "$n" > "$CHAIN_DIR/.dispatches"
+  # Per-spec counter: the breaker guards one chain against looping, so a
+  # global file would trip on the accumulated history of every past spec
+  # (it did: 13 dispatches across specs 45/13/23/24 stopped spec 24's perf gate).
+  local n; n=$(( $(cat "$outdir/.dispatches" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$outdir/.dispatches"
   if [ "$n" -gt "$MAX_DISPATCH" ]; then
     jlog "CEILING dispatches=$n max=$MAX_DISPATCH"
     echo "[chain] dispatch ceiling $MAX_DISPATCH reached — stop (circuit breaker)" >&2; exit 0
@@ -334,21 +347,26 @@ Regression горячего пути > ~5% без обоснования = statu
 Standard 15: числа обязаны быть из твоего прогона, сохранённого в $outdir/logs/. Ссылка на чужой замер вердиктом не является.
 Код не правь. Запиши отчёт в docs/reviews/ и handoff в $outdir/perf.json со stage=perf,
 status=approved|rejected, iteration=$iter, artifact, evidence = массив путей к логам бенчей,
-provenance={model:deepseek-reasoner,role:Specialist,autonomy:R2}.
+provenance={model:deepseek-v4-pro,role:Specialist,autonomy:R2}.
 EOF
 )"
-        dispatch "claude-deepseek-reasoner" "Specialist(perf)" "$p"
+        dispatch "claude-deepseek-v4-pro" "Specialist(perf)" "$p"
         ;;
       perf|conformance|security)
+        # Change id for the OpenSpec delta: "<NN>-<slug>" from the SDD file name.
+        cid="$(basename "$sdd" .md)"
         p="$(write_prompt docwriter <<EOF
 Ты doc-writer (AEF Standard 6/7, роль Knowledge). Роль — .claude/agents/doc-writer.md, процедура — .claude/skills/doc-write.
 Ревью и специалист-гейт пройдены: $pkg. Спека: $sdd.
 Перед созданием нового файла выполни каскад REUSE > EXTEND > JUSTIFY > ESCALATE (Standard 16 п.9):
 поищи существующий док по этой фиче и расширь его, вместо того чтобы плодить второй.
-Напиши/обнови документацию функциональности в docs/features/ (что делает · семантика · как пользоваться · ограничения · проверяемость по Test plan); в шапке — метка класса «Класс: K2 — Engineering» (Standard 6).
+Напиши OpenSpec-дельту принятой реализации (гибрид AEF × OpenSpec, правила — openspec/README.md): каталог openspec/changes/$cid/ с .openspec.yaml, proposal.md, design.md и specs/<capability>/spec.md (секции ADDED/MODIFIED/REMOVED Requirements; Semantics N → заголовок «Requirement:» с SHALL; Test plan T → заголовок «Scenario:» WHEN/THEN + строка «- Test: Suite.Case» с реальным именем GTest из диффа; точный формат — в openspec/README.md, решётки заголовков там).
+Внимание: в этом промпте нет символов решётки намеренно — это ограничение bash, формат бери из README.
 Документируй принятую реализацию, а не замысел спеки: если они расходятся, опиши фактическое поведение и отметь расхождение.
-target_files — только файлы документации. Запиши $outdir/docwriter.json со stage=docwriter,
-status=documented, iteration=$iter, ядром artifact/evidence/provenance.
+Прогони python3 .claude/chain/openspec.py validate $cid → 0 ошибок; лог в $outdir/logs/openspec-validate.log — это твой evidence. archive НЕ делай (рубеж человека).
+Ты headless-процесс: никаких фоновых команд; сессия завершена только когда записан пакет.
+target_files — только файлы внутри openspec/changes/$cid/. Запиши $outdir/docwriter.json со stage=docwriter,
+status=documented, iteration=$iter, ядром artifact/evidence/provenance + target_files.
 EOF
 )"
         dispatch "claude-glm-5-2" "DocWriter" "$p"

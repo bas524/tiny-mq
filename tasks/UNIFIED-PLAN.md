@@ -51,7 +51,7 @@
 | 45 Priority ordering | A | M1 | ✅ done (PriorityQueueT: 10 бэндов + маска непустых + LightweightSemaphore вместо сигнальной очереди; PriorityOrderingTest ×5; ревью MiniMax-M3 + перф-гейт approved; корректность опирается на инвариант ADR-0005 «один consumer на очередь» — спека 26 обязана перепроверить) |
 | 13 Delivery delay | A | M1 | ✅ done (DeliveryScheduler: ленивый worker на destination, кламп абсурдного deliveryTime, отсчёт с commit-time; DeliveryDelayTest ×9; ADR-0007, ADR-0008; ревью 3 раунда approved) |
 | 23 Session.recover() | B | M1 | ✅ done (per-consumer in-flight на интрузивном списке `Message::InFlightLink`; redelivered/deliveryCount; RecoverTest ×11; ASan-гейт в CI; ревью 4 раунда + эскалация, approved) |
-| 24 Redelivery counter + DLQ | B | M1 | ⬜ planned |
+| 24 Redelivery counter + DLQ | B | M1 | ✅ done (RedeliveryPolicy per destination, единица — очередь консьюмера/подписки; счётчик и на rollback; лимит → DLQ-копия с JMSXDeadLetterReason; backoff через DeliveryScheduler, не из ~Session(); DlqTest ×22; критик 3 раунда + решение Owner, ревью MiniMax-M3 approved, перф deepseek-v4-pro ≤ +2.4 %; первая OpenSpec-дельта → openspec/specs/message-redelivery) |
 | 25 NoLocal | B | M1 | ⬜ planned |
 | 28 receiveNoWait | B | M1 | ⬜ planned |
 | 30 Selector grammar audit | C | M1 | ⬜ planned |

@@ -89,9 +89,42 @@ jobs:
           rm -rf tiny-mq bench-mq
           # Бинарь без аргументов падает в SIGSEGV (main.cpp:207 разыменовывает
           # argv[1] при argc==1) — фильтр обязателен, пустой запуск недопустим.
+          #
+          # Watchdog: полный набор идёт ~25 с; зависший тест (PR #7, macOS:
+          # DurableSubscriberTest висел 3+ часа до 6-часового лимита runner'а)
+          # не должен ни съедать лимит, ни оставаться без стека. Через
+          # TEST_TIMEOUT секунд снимаем стеки всех потоков и падаем.
+          TEST_TIMEOUT=900
           ./cmake-build-debug/tiny_mq \
             --gtest_filter='-*Bench*' \
-            --gtest_output=xml:junit-${{ matrix.os }}.xml
+            --gtest_output=xml:junit-${{ matrix.os }}.xml &
+          pid=$!
+          waited=0
+          while kill -0 "$pid" 2>/dev/null; do
+            if [ "$waited" -ge "$TEST_TIMEOUT" ]; then
+              echo "::error::tests hung for ${TEST_TIMEOUT}s — dumping stacks of pid $pid"
+              if [ "$RUNNER_OS" = "macOS" ]; then
+                sample "$pid" 3 -file hang-${{ matrix.os }}.txt || true
+                cat hang-${{ matrix.os }}.txt || true
+              else
+                sudo apt-get install -y -qq gdb >/dev/null 2>&1 || true
+                sudo gdb -p "$pid" -batch -ex 'thread apply all bt' 2>&1 | tee hang-${{ matrix.os }}.txt || true
+              fi
+              kill -9 "$pid" || true
+              exit 124
+            fi
+            sleep 5; waited=$((waited+5))
+          done
+          wait "$pid"
+
+      - name: Выгрузить стеки зависания
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hang-stacks-${{ matrix.os }}
+          path: hang-${{ matrix.os }}.txt
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Выгрузить отчёт о тестах
         if: always()

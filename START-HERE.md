@@ -29,9 +29,12 @@ cmake --preset user-release && cmake --build --preset release --parallel
   очереди. Ревью (MiniMax-M3) и перф-гейт (deepseek-reasoner) approved; перф к master
   −2.2% / +2.5%. См. [docs/features/45-priority-ordering.md](docs/features/45-priority-ordering.md)
   и [docs/reviews/45-priority-ordering.perf.md](docs/reviews/45-priority-ordering.perf.md).
-- **Следующий шаг — спека 13 (delivery delay):** min-heap по `deliveryTime`, таймер
-  commit-time для транзакций. Источник: `docs/jms-spec/13-delivery-delay.md`; статус
-  в UNIFIED-PLAN / CONTINUE-HERE.
+- **Спеки 13, 23 — ✅ закрыты** (см. UNIFIED-PLAN). **Спека 24 (redelivery + DLQ) — ✅ закрыта**
+  2026-09-21: первая по обновлённому AEF и первая с OpenSpec-дельтой
+  (`openspec/specs/message-redelivery/spec.md`). Ревью: `docs/reviews/24-redelivery-dlq.review.md`,
+  перф: `docs/reviews/24-redelivery-dlq.perf.md`.
+- **Следующий шаг — M1: 28 → 25 → 30** (`tasks/CONTINUE-HERE.md`); каждую сначала довести
+  до SDD по `_template.md`.
 
 ## AEF-harness (`.claude/`)
 
@@ -49,7 +52,7 @@ frontmatter `model:` — прямой id прокси-модели для выз
 | **spec-critic** | **Критик намерения (V IV §5.3)** | **glm-5.2** | **claude-glm-5-2** |
 | jms-producer | Producer | claude-sonnet-5 | claude-claude-sonnet-5 |
 | jms-reviewer | Reviewer (кросс-модель, S13) | MiniMax-M3 | **claude-minimax-m3** |
-| perf-specialist / security-specialist | Specialist | deepseek-reasoner | claude-deepseek-reasoner |
+| perf-specialist / security-specialist | Specialist | deepseek-v4-pro | claude-deepseek-v4-pro |
 | conformance-specialist | Specialist | glm-5.2 | claude-glm-5-2 |
 | platform-agent | Platform | qwen3-coder-plus | — (R1) |
 | doc-writer | Knowledge (docs фич, S6/7) | glm-5.2 | claude-glm-5-2 |
@@ -58,6 +61,13 @@ frontmatter `model:` — прямой id прокси-модели для выз
 **Скиллы** (`.claude/skills/`): `spec-critique`, `jms-spec-implement`, `cpp-verify`,
 `perf-check`, `cross-model-review`, `security-review`, `doc-write`, `adr-write`,
 `milestone-status`.
+
+**Гибрид AEF × OpenSpec** (решение Owner 2026-09-21, спека 24 — первая): SDD в
+`docs/jms-spec/` остаётся *предложением*; «что система делает сейчас» живёт в
+`openspec/specs/<capability>/spec.md` и собирается из дельт `openspec/changes/<NN-slug>/`,
+которые пишет doc-writer после приёмки. Инструмент — `.claude/chain/openspec.py`
+(`validate` / `archive`; npm-CLI прокси не пропускает). Правила — `openspec/README.md`.
+`docs/features/` больше не пополняется (бэкфилл закрытых спек в `openspec/specs` — садовник).
 
 **Протокол:** Критик намерения → Producer → Reviewer (на другой модели **и с чистым
 контекстом**) → Specialist gate → Orchestrator; после `approved` — Doc-writer
@@ -141,9 +151,10 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
    Объявляет `target_files`, пишет логи в `handoffs/<spec>/logs/`.
 4. **Reviewer** (`claude-minimax-m3`) — другая модель **и чистый контекст**: прогоняет
    тесты сам, сверяет с логами Producer'а, делает closed-world drift audit.
-5. **Perf-гейт** (`claude-deepseek-reasoner`), если тронут горячий путь.
-6. **Doc-writer** (`claude-glm-5-2`) → `docs/features/NN-*.md`.
-7. Рубеж человека: коммит + `milestone-status`.
+5. **Perf-гейт** (`claude-deepseek-v4-pro`), если тронут горячий путь.
+6. **Doc-writer** (`claude-glm-5-2`) → OpenSpec-дельта `openspec/changes/NN-slug/`
+   (+ `openspec.py validate` в evidence).
+7. Рубеж человека: `openspec.py archive NN-slug` → коммит + `milestone-status`.
 
 Журнал роутера `handoffs/<spec>/chain.log` пишет harness — это *свидетельство*; `*.json`
 пишет о себе агент — это *заявление*. При расхождении верить журналу (Std 20).
@@ -158,6 +169,24 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
   измерения и при этом небезопасную рекомендацию (fast-path, ломавший главный критерий
   приёмки спеки).
 - Сводные поля JSON у агентов бывают устаревшими при верном разборе в `.md` — читать `.md`.
+
+## Уроки спеки 24 (harness)
+
+Цепочка на 24 вскрыла и починила шесть дефектов `route.sh`/процесса — все в коммитах ветки:
+- **headless-стадия не имеет права уходить в фон**: Producer запустил сборку `run_in_background`
+  и вышел без пакета; правило «никаких фоновых команд, сессия завершена = записан пакет» —
+  во всех промптах диспатча;
+- **инфра-сбои (429/400 прокси) неотличимы от молчания агента** — пишутся руками как
+  `INFRA-FAIL`; `dispatch` должен проверять код возврата (ещё не сделано);
+- scope-lock read-only и docwriter стадий сверяется с **`target_files` Producer'а** (его работа
+  не закоммичена — R1), а не с пустым набором;
+- потолок диспатчей — **per-spec** (`handoffs/<spec>/.dispatches`), не глобальный;
+- маркер `.routed` надо переносить вместе с переименованным пакетом; legacy-пакет без ядра
+  блокирует сканирование (`NOTREADY` не маркируется — ещё не сделано);
+- в heredoc промпта внутри `$( … )` нельзя `#` и обратные кавычки — парсер подстановки;
+- привязка `deepseek-reasoner` устарела → `deepseek-v4-pro` (CALIBRATION.md).
+Критик за 3 раунда нашёл 7 реальных пробелов спеки (перевёрнутый инвариант, backoff из
+деструктора, durable-порядок двух storage, топики); лимит 3 сработал → решение Owner.
 
 ## Follow-up / долги (не блокеры)
 

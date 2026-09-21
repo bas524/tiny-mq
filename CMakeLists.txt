@@ -116,6 +116,7 @@ add_executable(tiny_mq
                DeliveryScheduler.h
                Selector.cpp
                Selector.h
+               RedeliveryPolicy.h
                )
 
 set(POCO_LIBS
@@ -185,6 +186,8 @@ if (ENABLE_TESTS)
                  tests/StorageWorkerResilienceTest.cpp
                  tests/RecoverTest.cpp
                  tests/RecoverTest.h
+                 tests/DlqTest.cpp
+                 tests/DlqTest.h
                  )
   set(TEST_LIBS
       GTest::gtest

@@ -26,7 +26,7 @@ AEF задаёт **стартовые** пороги (Appendix C фреймво�
 
 1. **Frontmatter `model:` агента** — работает, когда агента вызывают как субагента
    внутри сессии. Здесь стоит **прямой идентификатор прокси-модели** (`glm-5.2`,
-   `deepseek-reasoner`, `MiniMax-M3`, …) — тот же, что обёртка `claude-<fn>` кладёт в
+   `deepseek-v4-pro`, `MiniMax-M3`, …) — тот же, что обёртка `claude-<fn>` кладёт в
    `ANTHROPIC_MODEL`. Так субагентная колонка сохраняет кросс-модельность (специалисты
    на разных семействах, а не все на Anthropic). **Цена:** субагент резолвится только
    из прокси-сессии (`claude-<fn>` из `~/.zshrc`, `ANTHROPIC_BASE_URL` на ai-proxy);
@@ -42,9 +42,9 @@ AEF задаёт **стартовые** пороги (Appendix C фреймво�
 | spec-critic | `glm-5.2` | `claude-glm-5-2` |
 | jms-producer | `claude-sonnet-5` | `claude-claude-sonnet-5` |
 | jms-reviewer | `MiniMax-M3` | `claude-minimax-m3` |
-| perf-specialist | `deepseek-reasoner` | `claude-deepseek-reasoner` |
+| perf-specialist | `deepseek-v4-pro` | `claude-deepseek-v4-pro` |
 | conformance-specialist | `glm-5.2` | `claude-glm-5-2` |
-| security-specialist | `deepseek-reasoner` | `claude-deepseek-reasoner` |
+| security-specialist | `deepseek-v4-pro` | `claude-deepseek-v4-pro` |
 | doc-writer | `glm-5.2` | `claude-glm-5-2` |
 | knowledge-gardener | `claude-opus-4-8` | — (рубеж человека) |
 | platform-agent | `qwen3-coder-plus` | — (R1, рубеж человека) |
@@ -53,6 +53,10 @@ AEF задаёт **стартовые** пороги (Appendix C фреймво�
 Инвариант `producer ≠ reviewer` выполнен по обеим колонкам: `claude-sonnet-5` ≠
 `MiniMax-M3`, `claude-claude-sonnet-5` ≠ `claude-minimax-m3`. Модель критика (`glm-5.2`)
 ≠ модель producer'а — это же требование Standard 3 к разбиравшему критерии.
+
+**История привязок.** 2026-09-21: `deepseek-reasoner` исчез из каталога прокси
+(`400 requested model not found` на перф-гейте спеки 24); perf-/security-specialist
+перепривязаны на `deepseek-v4-pro` решением Owner. Ревью спеки 45 шло ещё на reasoner.
 
 Для `claude-opus-4-8` (оркестратор, садовник) обёртки в `~/.zshrc` нет — эти агенты не
 диспатчатся цепочкой; доступность id на прокси при субагентном вызове не проверялась.

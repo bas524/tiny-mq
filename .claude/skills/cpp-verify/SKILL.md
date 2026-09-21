@@ -38,8 +38,15 @@ description: Проектный verify для tiny-mq — собрать и пр
 
 3. **Warnings-as-errors.** Сборка обязана быть чистой по `-Wall -Werror -Wextra -Wshadow`. Любое предупреждение = падение сборки = не пройдено. Чини причину, не подавляй.
 
+4. **Release-сборка тоже обязательна** (`cmake --preset user-release && cmake --build --preset release --parallel`,
+   вывод в `handoffs/<spec>/logs/build-release.log`). В release `poco_trace`/`poco_debug`
+   компилируются в ничто (`POCO_LOG_DEBUG` выключен), и переменная, живущая только ради лога,
+   становится `-Werror=unused-variable` — debug этого не видит. Так упала сборка дистрибутива
+   в PR #7 (спека 24). Приём для таких переменных — `[[maybe_unused]]`, как `requeued` в
+   `Consumer::recover()`.
+
 ## Критерий прохождения
-- `ninja` собрался без ошибок и предупреждений;
+- debug **и release** собрались без ошибок и предупреждений;
 - `./cmake-build-debug/tiny_mq` — все тесты зелёные (0 failed).
 
 ## Что возвращать (Standard 15)

@@ -26,9 +26,8 @@ struct ConnectionMetaData {
   int jmsMajorVersion{2};
   int jmsMinorVersion{0};
 
-  // JMSX-defined properties the broker understands.  Empty until a spec that
-  // introduces one (e.g. JMSXDeliveryCount in spec 24) lands.
-  std::vector<std::string> jmsxPropertyNames{};
+  // JMSX-defined properties the broker understands (spec 24: redelivery + DLQ).
+  std::vector<std::string> jmsxPropertyNames{"JMSXDeliveryCount", "JMSXDeadLetterReason"};
 };
 
 }  // namespace tiny_mq

@@ -108,10 +108,16 @@ Topic_AutoAck_NonPersistent ≈669.6k).
   `RecoverTest` ×11, сьют 135/135, под ASan чисто. Ревью 4 раунда, approved.
 - ⬜ 24 redelivery+DLQ → 25 noLocal → 28 receiveNoWait → 30 аудит грамматики Selector.
 
-**Следующий шаг — 24 (redelivery counter + DLQ):** `RedeliveryPolicy`, backoff через
-механизм задержки спеки 13. Тесты по `docs/jms-spec/24-redelivery-and-dlq.md`.
-Опирается на `deliveryCount`/`redelivered` из спеки 23 — учти, что они **не переживают
-рестарт** (замерено ревью: сумма 0 после реплея).
+**Спека 24 (redelivery + DLQ) — ✅ закрыта** (ветка `spec-24-redelivery-dlq`, MR в main).
+Первая спека по обновлённому AEF (критик ×3 → решение Owner → Producer с двумя `paused`/сбоями →
+ревью → перф) и первая с OpenSpec-дельтой: `openspec/specs/message-redelivery/spec.md` —
+текущая истина о повторной доставке. `deliveryCount`/`deliveryTime` backoff'а по-прежнему
+**не переживают рестарт** — отдельная спека в M5 (дизайн `PATCH_AT` в Open questions спеки 24).
+
+**Следующий шаг — по зависимостям M1:** 25 (NoLocal, зависит от 01 — закрыта), 28 (receiveNoWait,
+без зависимостей), 30 (Selector audit). Все три — короткие спеки старого формата: перед
+критиком довести до SDD по `_template.md` (Owner, Entity inventory, Stop-conditions,
+Semantics в форме Requirement/Scenario с `Test:`). Рекомендуемый порядок: 28 → 25 → 30.
 
 **Что учесть по опыту спек 45 и 13:**
 - Перф мерить только на release и только main-vs-ветка (main в отдельном `git worktree`),

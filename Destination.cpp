@@ -423,6 +423,71 @@ Destination::~Destination() {
 
 size_t Destination::hash() const { return _hash; }
 
+void Destination::setRedeliveryPolicy(RedeliveryPolicy policy) {
+  TRACE(_logger);
+  if (policy.deadLetterQueue) {
+    if (policy.deadLetterQueue.get() == this || !policy.deadLetterQueue->isQueueFamily()) {
+      throw Poco::InvalidArgumentException(
+          "RedeliveryPolicy::deadLetterQueue must be a queue-family destination other than this one");
+    }
+  }
+  _redeliveryPolicy = std::move(policy);
+}
+
+RedeliveryPolicy Destination::redeliveryPolicy() const {
+  return _redeliveryPolicy;
+}
+
+void Destination::deadLetter(Message::Ptr message, std::string reason) noexcept {
+  TRACE(_logger);
+  if (!message) return;
+  try {
+    auto dlq = _redeliveryPolicy.deadLetterQueue;
+    if (!dlq) {
+      poco_warning(_logger.get(),
+                   Poco::format("dead-letter: no DLQ configured for %s — dropping message[%s] reason=%s deliveryCount=%?d",
+                                _uri, message->uuid.toString(), reason, message->jmsHeaders.deliveryCount));
+      return;
+    }
+
+    Message::Ptr copy = message->copy();
+    copy->jmsHeaders.deliveryTime = 0;
+    copy->setStringProperty("JMSXDeadLetterReason", reason);
+
+    if (copy->isPersistent()) {
+      // Same [type-byte][toBytes()] wire layout as persistToOfflineSub/preparePush.
+      auto bytesData = copy->toBytes();
+      std::vector<char> data;
+      data.reserve(1 + bytesData.size());
+      data.push_back(static_cast<char>(copy->type()));
+      data.insert(data.end(), bytesData.begin(), bytesData.end());
+      auto rec = dlq->_storage->append(copy->uuid, data);
+      copy->_cachedStorageBytes = data;
+      copy->_storageTomId = rec.tomId;
+      copy->_storageOffset = rec.offset;
+    }
+
+    // Deliver to an already-connected DLQ consumer immediately (T7); a consumer
+    // created later replays the persistent copy from storage via
+    // Destination::createConsumer's replayStoredMessages call. No queue yet
+    // means no consumer has ever attached — a non-persistent copy is then lost,
+    // same as an ordinary send to a consumer-less queue.
+    if (dlq->_queue) {
+      dlq->enqueueOrSchedule(dlq->_queue, std::move(copy));
+    }
+
+    poco_information(_logger.get(),
+                     Poco::format("dead-letter: message[%s] from %s -> %s reason=%s deliveryCount=%?d",
+                                  message->uuid.toString(), _uri, dlq->uri(), reason, message->jmsHeaders.deliveryCount));
+  } catch (const std::exception& e) {
+    poco_error(_logger.get(), Poco::format("deadLetter: failed for message[%s] from %s: %s",
+                                           message->uuid.toString(), _uri, std::string(e.what())));
+  } catch (...) {
+    poco_error(_logger.get(), Poco::format("deadLetter: failed for message[%s] from %s — unknown exception",
+                                           message->uuid.toString(), _uri));
+  }
+}
+
 TransactionBuffer::Ptr Destination::getTransactionBuffer() const {
   return _transactionBuffer;
 }
