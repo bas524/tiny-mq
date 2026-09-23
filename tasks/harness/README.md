@@ -7,5 +7,5 @@ doc-writer (первая OpenSpec-дельта). Шесть дефектов `ro
 
 | Задача | Статус | Суть |
 |---|---|---|
-| [HR-01](01-route-sh-robustness.md) | ⬜ open | `dispatch` не видит инфра-сбоев (429/400/ENOTFOUND), `NOTREADY` не маркируется, правило «foreground only» не во всех промптах |
+| [HR-01](01-route-sh-robustness.md) | 🟡 частично | Осталось: `dispatch` не видит инфра-сбоев (429/400/обрыв) и не пишет код возврата. Закрыто переносом harness 2026-09-23: маркер `.notready`, правило «foreground only» во всех промптах, dry-run тест роутера |
 | [HR-02](02-openspec-backfill-and-owner.md) | ⬜ open | Бэкфилл `openspec/specs` по закрытым спекам; `Owner` в 31 спеке |

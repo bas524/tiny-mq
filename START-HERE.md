@@ -59,8 +59,8 @@ frontmatter `model:` — прямой id прокси-модели для выз
 | knowledge-gardener | Knowledge | claude-opus-4-8 | — (рубеж человека) |
 
 **Скиллы** (`.claude/skills/`): `spec-critique`, `jms-spec-implement`, `cpp-verify`,
-`perf-check`, `cross-model-review`, `security-review`, `doc-write`, `adr-write`,
-`milestone-status`.
+`perf-check`, `cross-model-review`, `security-review`, `doc-write`, `change-brief`,
+`adr-write`, `milestone-status`.
 
 **Гибрид AEF × OpenSpec** (решение Owner 2026-09-21, спека 24 — первая): SDD в
 `docs/jms-spec/` остаётся *предложением*; «что система делает сейчас» живёт в
@@ -70,8 +70,9 @@ frontmatter `model:` — прямой id прокси-модели для выз
 `docs/features/` больше не пополняется (бэкфилл закрытых спек в `openspec/specs` — садовник).
 
 **Протокол:** Критик намерения → Producer → Reviewer (на другой модели **и с чистым
-контекстом**) → Specialist gate → Orchestrator; после `approved` — Doc-writer
-(`docs/features/<NN>-*.md`) → рубеж человека (milestone + commit).
+контекстом**) → Specialist gate → Doc-writer (дельта в `openspec/`) → **стадия объяснения**
+(`explainer`: объяснение изменения для человека, `docs/reviews/<NN>-*.brief.md`) →
+рубеж человека (archive + milestone + commit).
 Handoff-контракт и разрешение конфликтов — `.claude/chain/HANDOFF.md`
 (default-deny, **N=5** → человек; пороги — `CALIBRATION.md`).
 
@@ -92,6 +93,28 @@ Handoff-контракт и разрешение конфликтов — `.clau
 (локальное соответствие — `CALIBRATION.md`), событие `CONSULT` в `chain.log`.
 **Автономия:** R2 по умолчанию; R1 (подтверждение) на `git` / `CMakeLists` / vcpkg;
 блокирующий gate — только на необратимом рубеже (мерж в main).
+
+**Сверка с AEF от 2026-09-23.** Harness приведён к обновлённому изданию фреймворка и к эталонному
+набору [aef-harness-kit](https://gitlab.corp.mail.ru/a.bychuk/aef-harness-kit):
+
+- **стадия объяснения** после doc-writer (Standard 4): агент `explainer`, скилл `change-brief`,
+  шаблон `docs/reviews/_brief-template.md`, статус `explained` вместо `documented` как точка STOP;
+- **`chain.env`** — исполняемая привязка обёрток, моделей, раскладки и состава гейтов
+  (`SPECIALIST_GATES`). Роутер больше не знает имён обёрток: они в одном месте, обоснование — в
+  `CALIBRATION.md`;
+- **имена событий журнала через дефис**: `NOT-READY`, `BAD-EVIDENCE`, `SCOPE-VIOLATION`,
+  `NO-WRAPPER`, `UNKNOWN-STATUS`, `UNKNOWN-GATE`. Журналы прошлых прогонов не правятся — они K4;
+- **пакет без ядра помечается `.notready`** и не блокирует сканирование свежих пакетов
+  (часть [HR-01](tasks/harness/01-route-sh-robustness.md) закрыта);
+- **правило «никаких фоновых команд»** — во всех промптах диспатча, проверяется тестом;
+- **dry-run тест роутера** `.claude/chain/tests/route_dryrun.sh` — 25 кейсов на синтетических
+  пакетах: ядро, evidence, scope-lock и его слоение, маршруты гейтов, `paused` с подсказкой,
+  эскалация, потолок, default-deny. Прогонять при каждой правке роутера;
+- **`Spec ref` в maintenance-задаче** (Standard 2): дефект определяется относительно действующей
+  спецификации, а не мнения;
+- **модель поставки** записана в `chain.env` и `CALIBRATION.md`: один развёрнутый экземпляр,
+  знание живёт в `master`. С появлением релизов (M5) добавляется `SUPPORTED_VERSIONS`, и сверка
+  садовника идёт по каждой поддерживаемой версии (Том II §2.2, Standard 8).
 
 **Сверка с AEF от 2026-09-19** (коммит `a21c2bf` фреймворка). Что изменилось в harness:
 - **Стандарты перенумерованы сплошняком 1–23** — все ссылки в `.claude/`, шаблоне спеки,
@@ -154,7 +177,11 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
 5. **Perf-гейт** (`claude-deepseek-v4-pro`), если тронут горячий путь.
 6. **Doc-writer** (`claude-glm-5-2`) → OpenSpec-дельта `openspec/changes/NN-slug/`
    (+ `openspec.py validate` в evidence).
-7. Рубеж человека: `openspec.py archive NN-slug` → коммит + `milestone-status`.
+7. **Стадия объяснения** (`claude-glm-5-2`, роль `explainer`): объяснение изменения для человека —
+   что меняется в поведении и устройстве, где был неочевидный выбор, что откатывается. Вердикта
+   в нём нет по построению: оно готовит решение, а не подтверждает чужое. Шаблон —
+   `docs/reviews/_brief-template.md`, статус `explained`.
+8. Рубеж человека: `openspec.py archive NN-slug` → коммит + `milestone-status`.
 
 Журнал роутера `handoffs/<spec>/chain.log` пишет harness — это *свидетельство*; `*.json`
 пишет о себе агент — это *заявление*. При расхождении верить журналу (Std 20).
