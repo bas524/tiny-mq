@@ -15,7 +15,7 @@ handoffs/<spec>/logs/*.log       прогоны, на которые ссыла�
 handoffs/<spec>/chain.log        журнал роутера (пишет harness, не агент)
 ```
 
-`<stage>` ∈ `critic` · `producer` · `reviewer` · `perf` · `conformance` · `security` · `docwriter` · `orchestrator`.
+`<stage>` ∈ `critic` · `producer` · `reviewer` · `perf` · `conformance` · `security` · `docwriter` · `explainer` · `orchestrator`.
 
 ## Формат пакета (ядро обязательно — §5.2)
 
@@ -86,7 +86,8 @@ handoffs/<spec>/chain.log        журнал роутера (пишет harness
 | `rejected` | если `iteration < CHAIN_MAX_ITER` (=5) → возвращает **Producer** на правку (iteration+1); иначе **эскалация человеку** |
 | `approved` | reviewer → перф-гейт; специалист → **Doc-writer** (скилл `doc-write`) |
 | `paused` | **STOP**: сработали `Stop-conditions` спеки — вопрос `Owner`'у спеки + **подсказка о консультации** (ниже). Не ошибка: работа корректна и **возобновляема** |
-| `documented` | **STOP**: рубеж человека/оркестратора (R1) — `milestone-status` + коммит. Не автозапускается (Standard 21) |
+| `documented` | запускает **стадию объяснения**: её вход — дельта и отчёты гейтов, а не код заново |
+| `explained` | **STOP**: рубеж человека (R1) — прочитать объяснение, затем `openspec.py archive` + `milestone-status` + коммит. Не автозапускается (Standard 21) |
 | `escalated` | **STOP**: human decision point (§5.3) |
 | прочее | **default-deny**: STOP |
 
@@ -157,6 +158,12 @@ handoffs/<spec>/chain.log        журнал роутера (пишет harness
 `*.json` пишет о себе сам агент. Это *заявление*: оно дополняет журнал деталями
 намерения и принятых решений, но не заменяет его.
 
+Есть и третий автор. Запись, которую вносит **человек** (`HUMAN-DECISION`, `RESUME`, `HUMAN-GATE`),
+— **запись решения**: она правомерна для того, что произвести может только человек. Но она не
+заменяет событие, которое harness мог наблюдать сам — код возврата стадии, отсутствие пакета,
+отказ прокси. Такое событие, внесённое рукой, — дефект роутера, который надо чинить
+([HR-01](../../tasks/harness/01-route-sh-robustness.md)), а не свидетельство.
+
 **При расхождении приоритет у записи harness**, а само расхождение фиксируется как
 отдельное событие (`MISMATCH` в `chain.log`) и разбирается как возможная
 сфабрикованная проверка.
@@ -180,7 +187,7 @@ options[…, "other"], answer_goes_to}`. `options` — **закрытое мно
    оркестратор, точечно, только секции из `answer_goes_to`, без попутной переработки).
 2. Producer пишет `producer.json` + логи прогонов.
 3. Хук ловит завершение → `route.sh` → Reviewer → `reviewer.json`.
-4. `approved` → перф-гейт → Doc-writer → `documented` → STOP на рубеже R1
+4. `approved` → перф-гейт → Doc-writer → стадия объяснения → `explained` → STOP на рубеже R1
    (человек закрывает спеку); `rejected` → назад к Producer (≤5 раундов).
 
 **Диспатч по умолчанию — dry-run** (роутер печатает команду). Включить реальный запуск:

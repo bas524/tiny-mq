@@ -59,8 +59,8 @@ frontmatter `model:` — прямой id прокси-модели для выз
 | knowledge-gardener | Knowledge | claude-opus-4-8 | — (рубеж человека) |
 
 **Скиллы** (`.claude/skills/`): `spec-critique`, `jms-spec-implement`, `cpp-verify`,
-`perf-check`, `cross-model-review`, `security-review`, `doc-write`, `adr-write`,
-`milestone-status`.
+`perf-check`, `cross-model-review`, `security-review`, `doc-write`, `change-brief`,
+`adr-write`, `milestone-status`.
 
 **Гибрид AEF × OpenSpec** (решение Owner 2026-09-21, спека 24 — первая): SDD в
 `docs/jms-spec/` остаётся *предложением*; «что система делает сейчас» живёт в
@@ -70,8 +70,9 @@ frontmatter `model:` — прямой id прокси-модели для выз
 `docs/features/` больше не пополняется (бэкфилл закрытых спек в `openspec/specs` — садовник).
 
 **Протокол:** Критик намерения → Producer → Reviewer (на другой модели **и с чистым
-контекстом**) → Specialist gate → Orchestrator; после `approved` — Doc-writer
-(`docs/features/<NN>-*.md`) → рубеж человека (milestone + commit).
+контекстом**) → Specialist gate → Doc-writer (дельта в `openspec/`) → **стадия объяснения**
+(`explainer`: объяснение изменения для человека, `docs/reviews/<NN>-*.brief.md`) →
+рубеж человека (archive + milestone + commit).
 Handoff-контракт и разрешение конфликтов — `.claude/chain/HANDOFF.md`
 (default-deny, **N=5** → человек; пороги — `CALIBRATION.md`).
 
@@ -92,6 +93,28 @@ Handoff-контракт и разрешение конфликтов — `.clau
 (локальное соответствие — `CALIBRATION.md`), событие `CONSULT` в `chain.log`.
 **Автономия:** R2 по умолчанию; R1 (подтверждение) на `git` / `CMakeLists` / vcpkg;
 блокирующий gate — только на необратимом рубеже (мерж в main).
+
+**Сверка с AEF от 2026-09-23.** Harness приведён к обновлённому изданию фреймворка и к эталонному
+набору [aef-harness-kit](https://gitlab.corp.mail.ru/a.bychuk/aef-harness-kit):
+
+- **стадия объяснения** после doc-writer (Standard 4): агент `explainer`, скилл `change-brief`,
+  шаблон `docs/reviews/_brief-template.md`, статус `explained` вместо `documented` как точка STOP;
+- **`chain.env`** — исполняемая привязка обёрток, моделей, раскладки и состава гейтов
+  (`SPECIALIST_GATES`). Роутер больше не знает имён обёрток: они в одном месте, обоснование — в
+  `CALIBRATION.md`;
+- **имена событий журнала через дефис**: `NOT-READY`, `BAD-EVIDENCE`, `SCOPE-VIOLATION`,
+  `NO-WRAPPER`, `UNKNOWN-STATUS`, `UNKNOWN-GATE`. Журналы прошлых прогонов не правятся — они K4;
+- **пакет без ядра помечается `.notready`** и не блокирует сканирование свежих пакетов
+  (часть [HR-01](tasks/harness/01-route-sh-robustness.md) закрыта);
+- **правило «никаких фоновых команд»** — во всех промптах диспатча, проверяется тестом;
+- **dry-run тест роутера** `.claude/chain/tests/route_dryrun.sh` — 25 кейсов на синтетических
+  пакетах: ядро, evidence, scope-lock и его слоение, маршруты гейтов, `paused` с подсказкой,
+  эскалация, потолок, default-deny. Прогонять при каждой правке роутера;
+- **`Spec ref` в maintenance-задаче** (Standard 2): дефект определяется относительно действующей
+  спецификации, а не мнения;
+- **модель поставки** записана в `chain.env` и `CALIBRATION.md`: один развёрнутый экземпляр,
+  знание живёт в `master`. С появлением релизов (M5) добавляется `SUPPORTED_VERSIONS`, и сверка
+  садовника идёт по каждой поддерживаемой версии (Том II §2.2, Standard 8).
 
 **Сверка с AEF от 2026-09-19** (коммит `a21c2bf` фреймворка). Что изменилось в harness:
 - **Стандарты перенумерованы сплошняком 1–23** — все ссылки в `.claude/`, шаблоне спеки,
@@ -154,7 +177,11 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
 5. **Perf-гейт** (`claude-deepseek-v4-pro`), если тронут горячий путь.
 6. **Doc-writer** (`claude-glm-5-2`) → OpenSpec-дельта `openspec/changes/NN-slug/`
    (+ `openspec.py validate` в evidence).
-7. Рубеж человека: `openspec.py archive NN-slug` → коммит + `milestone-status`.
+7. **Стадия объяснения** (`claude-glm-5-2`, роль `explainer`): объяснение изменения для человека —
+   что меняется в поведении и устройстве, где был неочевидный выбор, что откатывается. Вердикта
+   в нём нет по построению: оно готовит решение, а не подтверждает чужое. Шаблон —
+   `docs/reviews/_brief-template.md`, статус `explained`.
+8. Рубеж человека: `openspec.py archive NN-slug` → коммит + `milestone-status`.
 
 Журнал роутера `handoffs/<spec>/chain.log` пишет harness — это *свидетельство*; `*.json`
 пишет о себе агент — это *заявление*. При расхождении верить журналу (Std 20).
@@ -188,6 +215,22 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
 Критик за 3 раунда нашёл 7 реальных пробелов спеки (перевёрнутый инвариант, backoff из
 деструктора, durable-порядок двух storage, топики); лимит 3 сработал → решение Owner.
 
+**Открытое после мержа PR #7 — заведено задачами, не прозой:**
+- [MS-03](tasks/memory-safety/03-macos-ci-teardown-hang.md) — плавающее зависание
+  `DurableSubscriberTest` на macOS CI (3 ч); причина не установлена, watchdog в `ci.yml`
+  снимет стек при следующем проявлении.
+- [MS-01](tasks/memory-safety/01-consumer-outlives-destination.md) — экспозиция выросла:
+  `redeliver()` дёргает `_destination` с пути `~Consumer()`; дешёвая страховка описана.
+- [HR-01](tasks/harness/01-route-sh-robustness.md) — `dispatch` не видит 429/400/обрыва,
+  `NOTREADY` не маркируется, правило «foreground only» не во всех промптах.
+- [HR-02](tasks/harness/02-openspec-backfill-and-owner.md) — бэкфилл `openspec/specs` по
+  12 закрытым спекам, `Owner` в 31 спеке.
+- Спека **46** (M5) — персистентность `deliveryCount`/backoff через рестарт, заготовка с
+  дизайном `PATCH_AT`.
+- `gh` из этого шелла работает только без прокси:
+  `env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy gh …` (логин — в отдельном
+  терминале); API GitHub для публичного репо доступен так же через `curl`.
+
 ## Follow-up / долги (не блокеры)
 
 - **Спека 26 (shared consumers) — обязательное условие, не пожелание.** Корректность
@@ -211,6 +254,5 @@ zsh -ic 'claude-<model> --permission-mode acceptEdits \
 - `main.cpp:207` — SIGSEGV при `argc==1` (см. выше).
 - `CLAUDE.md`/`tasks/CONTINUE-HERE.md` местами описывают старый `ninja`-путь и неверно
   утверждают, что `--gtest_filter` не поддерживается (поддерживается). Кандидат на gardener.
-- **`Owner` отсутствует во всех 32 спеках** `docs/jms-spec/` (поле введено сверкой с AEF
-  2026-09-19). Роутер на `paused` по такой спеке печатает «Owner не заполнен — спека
-  невалидна». Заполнять при следующем касании спеки, начиная со спеки 13.
+- **`Owner` отсутствует в 31 из 32 спек** `docs/jms-spec/` — см. HR-02; заполнять при
+  касании, спека 24 — образец.
