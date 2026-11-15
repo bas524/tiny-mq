@@ -1,52 +1,54 @@
 ---
 name: doc-write
-description: Написать OpenSpec-дельту принятой реализации спеки tiny-mq (гибрид AEF × OpenSpec). Используй после approved-ревью и перф-гейта, до milestone-status. Источник истины — docs/jms-spec/NN, дифф и тесты; вывод — openspec/changes/NN-slug/ (proposal, design, specs/<capability>/spec.md). Триггеры: «задокументируй фичу», «опиши функциональность спеки NN», стадия doc-writer в цепочке.
+description: Написать дельту принятой реализации SDD tiny-mq в спецификацию-факт (гибрид AEF и OpenSpec). Используй после одобренного ревью и шлюзов, до `milestone-status`. Источник истины — SDD, дифф и тесты, вывод — openspec/changes/<NN>-<slug>/. Триггеры: «задокументируй доработку», «опиши поведение SDD NN», стадия `doc-writer` в цепочке.
 ---
 
 # doc-write
 
-Контур Knowledge (Standard 6 «Documentation Levels» + Standard 7 «Documentation Quality»).
-Описывает **что делает фича и как ей пользоваться** — по факту принятой реализации.
+На partial эта стадия не запускается. После полного допуска укажи в `.openspec.yaml`
+`task_ref: <путь исходной постановки>`. Сохраняй рядом с ID полный Источник с редакцией и фрагментом,
+сценарии и условия измерений. Подробности — openspec/README.md.
+
+Стадия знания (Стандарты 6 и 7). Описывает, **что система делает сейчас**, по факту
+принятой реализации, в спецификации-факте (Том II, §2.2).
 
 ## Предусловие
-Реализация закрыта Reviewer'ом (`status: approved`) и `cpp-verify` зелёный. Документируем
-принятое поведение, а не замысел.
 
-## Проверка на дубликат — до записи (Standard 16 п. 9)
+Реализация принята (`approved` от агента-рецензента и всех шлюзов), `verify` зелёный.
 
-Прежде чем создавать файл, поищи по `docs/` существующий док про эту же фичу:
+## Проверка на дубликат — до записи (Стандарт 16, п. 9)
 
-```
-REUSE (уже описано → сошлись) > EXTEND (есть близкое → расширь) > JUSTIFY (новое → обоснуй) > ESCALATE (сомнение → человек)
-```
-
-Типичный случай для tiny-mq: фича размазана по нескольким спекам (13 → 24 переиспользует
-scheduled delivery; 23 → 24 переиспользует `deliveryCount`). Тогда правильный ход —
-`EXTEND` существующего дока со ссылкой, а не второй файл с пересечением на 70%.
+`REUSE > EXTEND > JUSTIFY > ESCALATE`: требование уже есть в `openspec/specs/<capability>/spec.md`?
+→ `MODIFIED` с точным именем, а не второе требование с пересечением.
 
 ## Шаги
-1. Прочитай `docs/jms-spec/<NN>.md` (`Semantics`, `Test plan`, `Open questions`, `Dependencies`)
-   и дифф реализации из handoff-пакета Producer. Сверь публичный API по коду (сигнатуры реальны).
-2. Создай change `openspec/changes/<NN>-<slug>/` (формат и правила — `openspec/README.md`,
-   роль — `.claude/agents/doc-writer.md`): `.openspec.yaml`, `proposal.md` (зачем, ссылки на
-   SDD/ревью), `design.md` (принятая реализация: API, дефолты, чего НЕ делает),
-   `specs/<capability>/spec.md` — дельта `## ADDED/MODIFIED/REMOVED Requirements`:
-   `Semantics` N → `### Requirement:` с `SHALL`; `Test plan` T → `#### Scenario:` WHEN/THEN +
-   `- Test: \`<Suite>.<Case>\``. Если требование уже есть в `openspec/specs/<capability>/spec.md` —
-   MODIFIED с точным именем.
+
+1. Прочитай `docs/jms-spec/<NN>-*.md` (`Acceptance Criteria`, `Test plan`, `Open questions`, `Dependencies`)
+   и дифф реализации. Сверь публичный API по коду (сигнатуры реальны).
+2. Создай изменение `openspec/changes/<NN>-<slug>/` (формат — `openspec/README.md`):
+   `.openspec.yaml`, `proposal.md`, `design.md`, `specs/<capability>/spec.md` — дельта
+   `## ADDED/MODIFIED/REMOVED Requirements`: требование → `### Requirement:` с `SHALL` и строкой
+   `ID:` из SDD (при MODIFIED — прежний идентификатор);
+   сценарий → `#### Scenario:` с WHEN и THEN и строкой `- Test: <Suite.Case>`.
    Прогони `python3 .claude/chain/openspec.py validate <NN>-<slug>` → 0 ошибок, лог в
-   `handoffs/<spec>/logs/openspec-validate.log`.
-3. Никакого «впрок»: документируй только то, что есть в спеке и коде (Закон 1 — точность важнее полноты).
-4. Стиль — как в существующих доках репо; кратко и проверяемо.
+   `handoffs/current/<spec>/logs/openspec-validate.log`.
+3. Никакого «впрок»: только то, что есть в SDD и коде (Закон 1). Если SDD и код разошлись, опиши
+   фактическое поведение и отметь расхождение.
+4. Стиль — кратко и проверяемо.
+5. Продуктовая дельта (Том IV, §10.6). Изменилась функция продукта или появилось новое понятие доменной модели —
+   подготовь `handoffs/current/<spec>/product-delta.md` по `templates/product-delta.md`, с ID функций и понятий,
+   ссылкой на SDD и целевым набором для задачи знания. В `product-kb` не пиши: это отдельная задача знания.
 
 ## Выход
-Handoff-пакет `handoffs/<spec>/docwriter.json` со `status: documented`, ядром
-`spec · artifact · evidence · provenance` (`artifact` = каталог change'а, `evidence` = лог
-validate, `target_files` = файлы change'а). После этого цепочка останавливается на рубеже
-человека: `python3 .claude/chain/openspec.py archive <NN>-<slug>` (merge в
-`openspec/specs/`) + `milestone-status` + коммит.
+
+`handoffs/current/<spec>/docwriter.json` со `status: documented`, ядром (`artifact` — каталог
+изменения, `evidence` — лог `validate`, `target_files` — файлы изменения, `product_delta` — путь или `null`).
+Дальше рубеж человека: `openspec.py archive <NN>-<slug>`, `milestone-status` и коммит. Если есть продуктовая
+дельта, человек вместе с MR компонента заводит задачу знания (`templates/knowledge-task.md`).
 
 ## Границы (что это НЕ)
-- Не ADR (архитектурное «почему» → скилл `adr-write`).
-- Не сопровождение базы знаний/статуса (→ `knowledge-gardener` / `milestone-status`).
-- Не тесты (→ `jms-spec-implement`).
+
+- Не ADR (→ `adr-write`).
+- Не сопровождение базы знаний (→ `knowledge-gardener`, `milestone-status`).
+- Не запись в знание продукта (→ задача знания, `.claude/chain/kb-task.py`).
+- Не тесты (→ `implement`).

@@ -16,6 +16,7 @@
 #include <map>
 #include <limits>
 #include <vector>
+#include <variant>
 #include <array>
 #include <algorithm>
 #include <atomic>
@@ -39,6 +40,12 @@ class Consumer;  // for Message::InFlightLink::owner (spec 23 round 3, B2 fix)
 // coincidence to be split apart. 10 years in ms; far beyond any legitimate
 // delay/TTL, comfortably below where the conversions overflow.
 constexpr int64_t kMaxFutureHeaderMs = 315360000000LL;  // 10 years
+
+using CorrelationId = std::variant<std::monostate, std::string, BytesVector>;
+
+constexpr bool hasStorageHeaders(uint8_t version) {
+  return version == 0x02 || version == 0x03;
+}
 
 class Message {
  private:
@@ -175,19 +182,32 @@ class Message {
   enum Reliability { NOT_PERSISTENT = 0, PERSISTENT };
   Reliability reliability = NOT_PERSISTENT;
 
-  // Standard JMS message headers (JMS 2.0 § 3.4). Persisted in the 0x02 binary
-  // wire format; 0x01 records read back with default-valued Headers.
+  // The fixed storage prefix is shared by versions 0x02 and 0x03.
   struct Headers {
     std::string messageId;        // JMSMessageID, typically "ID:<uuid>"
     int64_t     timestamp     = 0;  // JMSTimestamp, ms since epoch
     int64_t     expiration    = 0;  // JMSExpiration, 0 = never
     int64_t     deliveryTime  = 0;  // JMSDeliveryTime (JMS 2.0), 0 = immediate
     int32_t     priority      = 4;  // JMSPriority, 0..9, default 4
-    int32_t     deliveryCount = 0;  // JMSXDeliveryCount
+    int32_t     deliveryCount = 0;  // Native count of retries, excluding the first delivery
     bool        redelivered   = false;
     std::string replyTo;          // destination URI
     std::string correlationId;
     std::string type;             // JMSType
+    std::string destination;
+    std::shared_ptr<const BytesVector> binaryCorrelationId;
+    bool explicitEmptyCorrelationId = false;
+    bool explicitEmptyType = false;
+    bool nullText = false;
+
+    int32_t jmsDeliveryCount() const {
+      if (deliveryCount >= std::numeric_limits<int32_t>::max() - 1) return std::numeric_limits<int32_t>::max();
+      return std::max(redelivered ? 2 : 1, deliveryCount + 1);
+    }
+
+    void setCorrelationId(CorrelationId value);
+    CorrelationId getCorrelationId() const;
+    void setType(std::variant<std::monostate, std::string> value);
   };
   Headers jmsHeaders;
   struct PersistentInfo {
@@ -264,19 +284,34 @@ class Message {
   const T &property(const std::string &name) const {
     return _properties.template property<T>(name);
   }
+  const PropertyValue* findProperty(const std::string& name) const { return _properties.find(name); }
   bool hasProperty(const std::string &name) const;
   property::ValueType propertyValueType(const std::string &name) const;
-  virtual BytesVector dataAsBytes() const = 0;
+  // The Jakarta provider supplies delivery mode, priority, and absolute times
+  // from its send options. Its sent envelope owns this attempt's identity.
+  void prepareForJakartaSend(std::string destination, Reliability mode, int32_t priority,
+                             int64_t expiration, int64_t deliveryTime,
+                             bool disableId, bool disableTimestamp);
+  void setNullProperty(std::string name);
+  virtual BytesVector dataAsBytes() const { return {}; }
   BytesVector propertiesAsBytes() const;
   BytesVector toBytes() const;
-  virtual void setDataFromBytes(const BytesVector &bytes) = 0;
+  virtual void setDataFromBytes(const BytesVector &) {}
   void setPropertiesFromBytes(const BytesVector &bytes);
   void fromBytes(const BytesVector &bytes);
-  virtual void clearData() = 0;
-  virtual Poco::JSON::Object toJSON() const = 0;
-  virtual Message::Ptr copy() const = 0;
-  virtual Type type() const = 0;
+  virtual void clearData() {}
+  virtual Poco::JSON::Object toJSON() const { return propertiesToJSON(); }
+  virtual Message::Ptr copy() const { return Ptr(new Message(*this)); }
+  virtual Type type() const { return UNDEFINED; }
+
+ protected:
+  virtual bool bodyNeedsExtendedStorage() const { return false; }
+  virtual bool emptyOpaqueBodyPresent() const { return false; }
+  virtual void restoreEmptyOpaqueBody() {}
 };
+using MessageEnvelope = Message::Headers;
+using MessageBody = Message::Type;
+
 namespace message {
 std::string dump(const Message &msg);
 }

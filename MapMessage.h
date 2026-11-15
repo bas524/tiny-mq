@@ -41,6 +41,9 @@ class MapMessage : public Message {
 
   BytesVector dataAsBytes() const override;
   void setDataFromBytes(const BytesVector &bytes) override;
+
+ private:
+  bool bodyNeedsExtendedStorage() const override { return _bodyProps.needsExtendedStorage(); }
 };
 }  // namespace tiny_mq
 #endif  // TINY_MQ__MAPMESSAGE_H_

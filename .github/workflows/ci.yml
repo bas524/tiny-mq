@@ -134,6 +134,28 @@ jobs:
           path: junit-${{ matrix.os }}.xml
           retention-days: 14
 
+  java-message-contract:
+    name: Jakarta Messaging contract (Java)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Получить Jakarta Messaging API 3.1.0
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            --output jakarta.jms-api-3.1.0.jar \
+            https://repo.maven.apache.org/maven2/jakarta/jms/jakarta.jms-api/3.1.0/jakarta.jms-api-3.1.0.jar
+          echo '6605e08075ab389c359451c7854808cf4b1575e1ea6317e534e9d4df088096df  jakarta.jms-api-3.1.0.jar' | sha256sum --check
+
+      - name: Тесты контракта сообщений
+        run: tests/java/run.sh "$RUNNER_TEMP/jakarta.jms-api-3.1.0.jar"
+
   asan:
     name: ASan gate
     # Постоянный гейт на класс ошибок памяти времени жизни (спека 23, раунд 4

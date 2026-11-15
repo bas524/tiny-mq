@@ -1,6 +1,6 @@
 # Бэкфилл `openspec/specs` и поле `Owner` в спеках (HR-02)
 
-> **Это maintenance-задача, а не SDD.** См. `tasks/_maintenance-template.md`.
+> Задача сопровождения по [действующему шаблону](../../templates/maintenance-task.md).
 
 - **Класс:** maintenance (knowledge / test-infra)
 - **Статус:** open

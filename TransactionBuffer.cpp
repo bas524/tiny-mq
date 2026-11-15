@@ -3,6 +3,7 @@
 //
 
 #include "TransactionBuffer.h"
+#include "Message.h"
 #include "LogTracer.h"
 #include <Poco/FileStream.h>
 #include <Poco/StringTokenizer.h>
@@ -28,7 +29,7 @@ constexpr size_t kDeliveryTimeSize = 8;
 
 void patchDeliveryTimeInBytes(std::vector<char>& data, int64_t deliveryTime) {
     if (data.size() < kDeliveryTimeOffset + kDeliveryTimeSize) return;
-    if (static_cast<uint8_t>(data[1]) != 0x02) return;  // pre-header format: nothing to patch
+    if (!hasStorageHeaders(static_cast<uint8_t>(data[1]))) return;  // pre-header format: nothing to patch
     std::memcpy(data.data() + kDeliveryTimeOffset, &deliveryTime, kDeliveryTimeSize);
 }
 }  // namespace

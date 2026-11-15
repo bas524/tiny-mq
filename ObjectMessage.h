@@ -13,6 +13,7 @@ namespace tiny_mq {
 class ObjectMessage : public Message {
   BytesVector _body;
   std::string _className;
+  bool _bodyPresent = false;
 
  public:
   using Ptr = std::shared_ptr<ObjectMessage>;
@@ -29,6 +30,7 @@ class ObjectMessage : public Message {
 
   void setBody(BytesVector serialized, std::string className);
   const BytesVector &body() const;
+  bool hasSerializedBody() const { return _bodyPresent; }
   const std::string &className() const;
 
   void clearData() override;
@@ -38,6 +40,10 @@ class ObjectMessage : public Message {
 
   BytesVector dataAsBytes() const override;
   void setDataFromBytes(const BytesVector &bytes) override;
+
+ private:
+  bool emptyOpaqueBodyPresent() const override { return _bodyPresent && _body.empty(); }
+  void restoreEmptyOpaqueBody() override { _bodyPresent = true; }
 };
 }  // namespace tiny_mq
 
