@@ -1,6 +1,6 @@
 # Плавающее зависание полного набора тестов на macOS CI (MS-03)
 
-> **Это maintenance-задача, а не SDD.** См. `tasks/_maintenance-template.md`.
+> Задача сопровождения по [действующему шаблону](../../templates/maintenance-task.md).
 
 - **Класс:** maintenance (defect-fix, concurrency / teardown)
 - **Статус:** open

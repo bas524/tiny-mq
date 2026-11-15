@@ -2,7 +2,7 @@
 
 > **Заготовка, не валидный SDD.** Заведена 2026-09-21 решением Owner при закрытии спеки 24:
 > `deliveryCount` и `deliveryTime` backoff'а не переживают рестарт — осознанное ограничение
-> спеки 24 (Semantics 4, 9). Перед передачей агенту довести до `_template.md`: Owner,
+> спеки 24 (Semantics 4, 9). Перед передачей агенту довести до [шаблона SDD](../../templates/sdd.md): Owner,
 > Entity inventory, Stop-conditions, Semantics в форме Requirement/Scenario с `Test:`.
 >
 > Класс документа: **K1 — Executable** (Standard 6).

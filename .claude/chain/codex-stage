@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -eu
+
+case "${0##*/}" in
+  codex-openai)
+    provider=(-c 'model_provider="openai"' --model gpt-6.1-sol)
+    ;;
+  codex-deepseek|codex-deepseek-pro)
+    provider=(--profile "${0##*codex-}" -c 'model_provider="deepseek"'
+      -c 'model_providers.deepseek.base_url="https://api.deepseek.com/"')
+    ;;
+  *)
+    printf '%s\n' 'Use codex-openai, codex-deepseek, or codex-deepseek-pro.' >&2
+    exit 2
+    ;;
+esac
+
+if [[ $# != 2 || $1 != -p || ! -t 0 ]]; then
+  printf '%s\n' 'Run from an interactive terminal: wrapper -p PROMPT.' >&2
+  exit 2
+fi
+
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy OPENAI_BASE_URL
+exec codex "${provider[@]}" --sandbox workspace-write --ask-for-approval on-request \
+  -c 'sandbox_workspace_write.network_access=false' -c 'features.hooks=false' -- "$2"

@@ -21,3 +21,4 @@ CMakeUserPresets.json
 
 # Рабочие worktree агентов (создаются harness на время задачи)
 /.claude/worktrees/
+/.claude/chain/__pycache__/
