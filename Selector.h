@@ -8,7 +8,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
-#include <variant>
+#include <cstdint>
 
 namespace tiny_mq {
 
@@ -20,9 +20,7 @@ class InvalidSelectorException : public std::runtime_error {
   explicit InvalidSelectorException(const std::string &msg) : std::runtime_error("Invalid selector: " + msg) {}
 };
 
-/// Runtime value produced during selector evaluation.
-/// monostate represents SQL NULL.
-using SelectorValue = std::variant<std::monostate, bool, int64_t, double, std::string>;
+enum class SelectorTruth { False, True, Unknown };
 
 /// Compiled JMS SQL-92 message selector.
 ///
@@ -35,6 +33,8 @@ class Selector {
   /// An empty expression is valid and matches every message.
   static std::shared_ptr<Selector> parse(const std::string &expression);
 
+  SelectorTruth evaluate(const Message &message) const;
+
   /// Returns true if the message satisfies this selector.
   bool matches(const Message &message) const;
 
@@ -45,6 +45,8 @@ class Selector {
   std::unique_ptr<Impl> _impl;
   explicit Selector(std::unique_ptr<Impl> impl);
 };
+
+using CompiledSelector = Selector;
 
 }  // namespace tiny_mq
 

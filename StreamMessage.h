@@ -34,6 +34,8 @@ class StreamMessage : public Message {
     return _stream.template nextValue<T>();
   }
   property::ValueType nextValueType() const;
+  void writeNull() { _stream.writeNull(); }
+  void readNull() const { _stream.readNull(); }
   bool empty() const;
   void reset();
   bool eof() const;
@@ -41,6 +43,9 @@ class StreamMessage : public Message {
 
   BytesVector dataAsBytes() const override;
   void setDataFromBytes(const BytesVector &bytes) override;
+
+ private:
+  bool bodyNeedsExtendedStorage() const override { return _stream.needsExtendedStorage(); }
 };
 }  // namespace tiny_mq
 #endif  // TINY_MQ__STREAMMESSAGE_H_

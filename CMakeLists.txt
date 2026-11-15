@@ -163,6 +163,7 @@ if (ENABLE_TESTS)
                  tests/SelectorTest.h
                  tests/DurableSubscriberTest.cpp
                  tests/DurableSubscriberTest.h
+                 tests/MessageContractTest.cpp
                  tests/MessageHeadersTest.cpp
                  tests/MessageHeadersTest.h
                  tests/ObjectMessageTest.cpp
@@ -189,6 +190,9 @@ if (ENABLE_TESTS)
                  tests/DlqTest.cpp
                  tests/DlqTest.h
                  )
+  configure_file(tests/MessageContract.tsv MessageContract.tsv COPYONLY)
+  set_source_files_properties(tests/MessageContractTest.cpp PROPERTIES
+      COMPILE_DEFINITIONS "TINY_MQ_MESSAGE_CONTRACT_FIXTURE=\"${CMAKE_CURRENT_BINARY_DIR}/MessageContract.tsv\"")
   set(TEST_LIBS
       GTest::gtest
       GTest::gtest_main

@@ -4,7 +4,7 @@
 Нормативная редакция — [Jakarta Messaging 3.1 Final Release](https://jakarta.ee/specifications/messaging/3.1/),
 включая [текст](https://jakarta.ee/specifications/messaging/3.1/jakarta-messaging-spec-3.1.html)
 и [Javadoc 3.1](https://jakarta.ee/specifications/platform/10/apidocs/jakarta/jms/package-summary.html).
-SDD 70–78 описывают предлагаемый объём. Текущее поведение проверяется по исходникам,
+SDD 70 принята. SDD 71–78 описывают оставшийся объём. Текущее поведение проверяется по исходникам,
 [базовому аудиту](../reviews/2026-11-15-jakarta-baseline.md) и [OpenSpec](../../openspec/README.md).
 
 ## Карта покрытия
@@ -12,7 +12,7 @@ SDD 70–78 описывают предлагаемый объём. Текуще
 | Jakarta Messaging 3.1 | Обязательство tiny-mq | SDD и состояние начальной реализации |
 |---|---|---|
 | 1–2 · поддержка Java SE, API, домены, потоки и request/reply | Classic, simplified и legacy API, обе модели доставки, потоковые гарантии | [71](71-jakarta-destinations.md), [72](72-jakarta-delivery.md), [74](74-jakarta-java-se-provider.md). In-process частично, Java отсутствует. |
-| 3 · тело, заголовки, свойства и selector | Шесть тел, преобразования, конверт на границах, стандартная грамматика, сторонние сообщения | [70](70-jakarta-message-contract.md), [72](72-jakarta-delivery.md), [74](74-jakarta-java-se-provider.md). C++ частично. |
+| 3 · тело, заголовки, свойства и selector | Шесть тел, преобразования, конверт на границах, стандартная грамматика, сторонние сообщения | [70](70-jakarta-message-contract.md), [72](72-jakarta-delivery.md), [74](74-jakarta-java-se-provider.md). Локальный контракт сообщений C++ и Java, включая селекторы C++, принят по SDD 70. |
 | 4 · PTP и pub/sub | Конкурирующая доставка, четыре вида подписок, temporary, browse и requestors | [71](71-jakarta-destinations.md). Очередь и топик есть, расширенные сценарии частично или отсутствуют. |
 | 5 · administered objects | Factory и Destination через JNDI, сериализация, конфигурация | [74](74-jakarta-java-se-provider.md). Java/JNDI отсутствуют. |
 | 6 · connection, session, порядок, ack, tx | Метаданные, auth, threading, close, recover, атомарность, отдельная XA модель | [72](72-jakarta-delivery.md), [73](73-jakarta-broker-transport.md), [74](74-jakarta-java-se-provider.md), [75](75-jakarta-xa-recovery.md). In-process частично. |
@@ -45,7 +45,7 @@ correlation ID и административное переопределени�
 
 | SDD | Статус |
 |---|---|
-| [70](70-jakarta-message-contract.md) | `clean`, [критика, раунд 3](../reviews/70-jakarta-message-contract.critique.md#раунд-3) |
+| [70](70-jakarta-message-contract.md) | ✅ done. Реализован локальный контракт сообщений. `MessageContractTest.CrossLanguageEnvelope`. [Бриф приёмки](../reviews/70-jakarta-message-contract.brief.md) |
 | [71](71-jakarta-destinations.md) | drafted |
 | [72](72-jakarta-delivery.md) | drafted |
 | [73](73-jakarta-broker-transport.md) | drafted |

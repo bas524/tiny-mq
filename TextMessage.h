@@ -13,7 +13,7 @@ class TextMessage : public Message {
 
  public:
   using Ptr = std::shared_ptr<TextMessage>;
-  TextMessage() = default;
+  TextMessage() { jmsHeaders.nullText = true; }
   TextMessage(Poco::UUID uuid_, Message::Reliability reliability_ = Message::NOT_PERSISTENT);
   explicit TextMessage(Poco::UUID uuid_, std::string text_, Message::Reliability reliability_ = Message::NOT_PERSISTENT);
   ~TextMessage() override = default;
@@ -24,6 +24,7 @@ class TextMessage : public Message {
   TextMessage &operator=(TextMessage &&) = default;
 
   const std::string &text() const;
+  bool isTextNull() const { return jmsHeaders.nullText; }
   void setText(const std::string &text);
   void clearData() override;
   Poco::JSON::Object toJSON() const override;

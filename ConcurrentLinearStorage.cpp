@@ -7,6 +7,7 @@
 #include <Poco/Timestamp.h>
 #include <cstring>
 #include "LogTracer.h"
+#include "Message.h"
 
 namespace linear_storage {
 
@@ -236,8 +237,8 @@ void ConcurrentLinearStorage::sweepExpired() {
   // Runs on the worker thread, so it may touch _linearStorage directly without
   // racing the operation dispatch in run().
   //
-  // Stored record layout: [1-byte type][0x02 message payload]. JMSExpiration is an
-  // int64 at a fixed offset inside the 0x02 header block:
+  // Stored record layout: [1-byte type][0x02/0x03 message payload]. JMSExpiration is an
+  // int64 at a fixed offset inside the common header block:
   //   type(1) + magic(1) + number(8) + uuid(16) + reliability(1) + timestamp(8).
   // Read only that fixed prefix per record (not the whole payload), and cap the
   // number of records per tick so a large store never monopolises the worker.
@@ -252,7 +253,7 @@ void ConcurrentLinearStorage::sweepExpired() {
   const int64_t nowMs = Poco::Timestamp().epochMicroseconds() / 1000;
   for (auto& [record, prefix] : batch) {
     if (prefix.size() < kPrefixLen) continue;                          // too short to carry headers
-    if (static_cast<uint8_t>(prefix[kMagicOffset]) != 0x02) continue;  // only 0x02 carries expiration
+    if (!tiny_mq::hasStorageHeaders(static_cast<uint8_t>(prefix[kMagicOffset]))) continue;
     int64_t expiration = 0;
     std::memcpy(&expiration, prefix.data() + kExpirationOffset, sizeof(int64_t));
     if (expiration != 0 && nowMs >= expiration) {

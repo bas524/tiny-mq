@@ -41,7 +41,7 @@ TextMessage makeTestMessage(Session &session) {
 
   // String properties
   msg.setStringProperty("name", "James");
-  msg.setStringProperty("JMSType", "selector-test");
+  msg.jmsHeaders.type = "selector-test";
   msg.setStringProperty("quote", "'In God We Trust'");
 
   // Numeric properties

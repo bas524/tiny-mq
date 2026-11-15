@@ -73,12 +73,13 @@ TEST_F(ExpirationTest, testExpiredMessageSweptFromStorage) {
     storage.setSweepIntervalMicros(50'000);  // 50 ms so the test stays fast
     storage.start();
 
-    // Build a stored record exactly as preparePush() does: [1-byte type][0x02 payload].
-    auto makeStored = [](const std::string &body, int64_t expiration) {
+    auto makeStored = [](const std::string &body, int64_t expiration, bool extended) {
       auto uuid = Poco::UUIDGenerator::defaultGenerator().createRandom();
       TextMessage msg(uuid, body, Message::PERSISTENT);
       msg.jmsHeaders.expiration = expiration;
+      if (extended) msg.jmsHeaders.setCorrelationId(tiny_mq::BytesVector{0, -1});
       auto payload = msg.toBytes();
+      EXPECT_EQ(payload.front(), extended ? 0x03 : 0x02);
       std::vector<char> data;
       data.reserve(1 + payload.size());
       data.push_back(static_cast<char>(msg.type()));
@@ -86,17 +87,27 @@ TEST_F(ExpirationTest, testExpiredMessageSweptFromStorage) {
       return std::make_pair(uuid, data);
     };
 
-    auto expired = makeStored("expired", nowMs() - 1000);  // already in the past
-    auto live = makeStored("live", 0);                     // never expires
+    std::vector<Poco::UUID> liveIds;
+    for (bool extended : {false, true}) {
+      auto expired = makeStored("expired", nowMs() - 1000, extended);
+      auto live = makeStored("live", 0, extended);
+      storage.append(expired.first, expired.second);
+      storage.append(live.first, live.second);
+      liveIds.push_back(live.first);
+    }
 
-    storage.append(expired.first, expired.second);
-    storage.append(live.first, live.second);
-    ASSERT_EQ(storage.scan().size(), 2u) << "both records must be present before the sweep";
-
-    Poco::Thread::sleep(250);  // several sweep intervals
-
-    EXPECT_EQ(storage.scan().size(), 1u)
-        << "the expired record must be swept from storage, the live one kept";
+    Poco::Timestamp start;
+    while (storage.scan().size() > 2 && start.elapsed() < 1'000'000) {
+      Poco::Thread::sleep(15);
+    }
+    auto remaining = storage.scan();
+    ASSERT_EQ(remaining.size(), liveIds.size()) << "the sweep must remove expired v0x02 and v0x03 records";
+    for (const auto& [record, data] : remaining) {
+      Poco::UUID id;
+      id.copyFrom(record.header.uuid.data());
+      EXPECT_NE(std::find(liveIds.begin(), liveIds.end(), id), liveIds.end());
+      EXPECT_FALSE(data.empty());
+    }
 
     storage.stop();
   }

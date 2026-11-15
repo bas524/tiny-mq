@@ -6,12 +6,38 @@
 #include <Poco/JSON/Parser.h>
 #include <Poco/File.h>
 #include <Poco/FileStream.h>
+#include <Poco/UUIDGenerator.h>
 #include <sstream>
+#include <string_view>
 #include <limits>
 #include <cstring>
 #include <cstdint>
 
 namespace tiny_mq {
+
+void Message::Headers::setCorrelationId(CorrelationId value) {
+  correlationId.clear();
+  binaryCorrelationId.reset();
+  explicitEmptyCorrelationId = false;
+  if (auto* text = std::get_if<std::string>(&value)) {
+    explicitEmptyCorrelationId = text->empty();
+    correlationId = std::move(*text);
+  } else if (auto* data = std::get_if<BytesVector>(&value)) {
+    binaryCorrelationId = std::make_shared<const BytesVector>(std::move(*data));
+  }
+}
+
+CorrelationId Message::Headers::getCorrelationId() const {
+  if (binaryCorrelationId) return *binaryCorrelationId;
+  if (!correlationId.empty() || explicitEmptyCorrelationId) return correlationId;
+  return std::monostate{};
+}
+
+void Message::Headers::setType(std::variant<std::monostate, std::string> value) {
+  auto* text = std::get_if<std::string>(&value);
+  explicitEmptyType = text && text->empty();
+  type = text ? std::move(*text) : std::string{};
+}
 
 bool Message::isPersistent() const { return reliability == PERSISTENT; }
 
@@ -34,7 +60,7 @@ void Message::patchCachedDeliveryTime(int64_t deliveryTime) {
                             + sizeof(int64_t);      // expiration  (total = 43)
   constexpr size_t kSize = sizeof(int64_t);
   if (_cachedStorageBytes.size() < kOffset + kSize) return;
-  if (static_cast<uint8_t>(_cachedStorageBytes[1]) != 0x02) return;  // pre-header format: nothing to patch
+  if (!hasStorageHeaders(static_cast<uint8_t>(_cachedStorageBytes[1]))) return;  // pre-header format: nothing to patch
   std::memcpy(_cachedStorageBytes.data() + kOffset, &deliveryTime, kSize);
 }
 
@@ -66,19 +92,20 @@ BytesVector Message::propertiesAsBytes() const {
 
 namespace {
 // Helper: write a length-prefixed string (uint32 LE length + bytes).
-void writeString(BytesVector& out, size_t& off, const std::string& s) {
+void writeString(BytesVector& out, size_t& off, std::string_view s) {
   auto len = static_cast<Poco::UInt32>(s.size());
   memcpy(out.data() + off, &len, sizeof(len)); off += sizeof(len);
   if (len > 0) { memcpy(out.data() + off, s.data(), len); off += len; }
 }
 
 // Helper: read a length-prefixed string. Returns false on truncation.
-bool readString(const BytesVector& in, size_t& off, std::string& out) {
+template <class Buffer>
+bool readString(const BytesVector& in, size_t& off, Buffer& out) {
   if (off + sizeof(Poco::UInt32) > in.size()) return false;
   Poco::UInt32 len = 0;
   memcpy(&len, in.data() + off, sizeof(len)); off += sizeof(len);
   if (off + len > in.size()) return false;
-  out.assign(reinterpret_cast<const char*>(in.data() + off), len);
+  out.assign(in.begin() + off, in.begin() + off + len);
   off += len;
   return true;
 }
@@ -116,6 +143,9 @@ bool readString(const BytesVector& in, size_t& off, std::string& out) {
 //   [n]  bytes    properties JSON
 //   [m]  bytes    payload data
 //
+// 0x03 keeps these offsets. Its flags also encode the binary/empty correlation
+// variants, empty JMSType, and null TextMessage. The correlation slot carries
+// raw bytes when tagged binary, and a destination slot follows the type.
 // Records older than 0x01 use the legacy JSON path in fromBytes().
 BytesVector Message::toBytes() const {
   BytesVector data = dataAsBytes();
@@ -131,15 +161,24 @@ BytesVector Message::toBytes() const {
   auto propsLen = static_cast<Poco::UInt32>(propsJson.size());
   constexpr size_t kFixed   = 1 + sizeof(int64_t) + 16 + 1;
   constexpr size_t kHdrNums = sizeof(int64_t) * 3 + sizeof(int32_t) * 2 + 1;  // 28
-  const size_t kHdrStrs = 4 * sizeof(Poco::UInt32)
+  const auto& binaryId = jmsHeaders.binaryCorrelationId;
+  const auto correlation = binaryId
+      ? std::string_view(binaryId->empty() ? "" : reinterpret_cast<const char*>(binaryId->data()), binaryId->size())
+      : std::string_view(jmsHeaders.correlationId);
+  const uint8_t flags = (jmsHeaders.redelivered ? 1 : 0)
+      | (binaryId ? 2 : 0) | (jmsHeaders.explicitEmptyCorrelationId ? 4 : 0)
+      | (jmsHeaders.explicitEmptyType ? 8 : 0) | (jmsHeaders.nullText ? 16 : 0)
+      | (type() == OBJECT_MESSAGE && emptyOpaqueBodyPresent() ? 32 : 0);
+  const bool extended = flags > 1 || !jmsHeaders.destination.empty() || _properties.needsExtendedStorage()
+      || type() == UNDEFINED || bodyNeedsExtendedStorage();
+  const size_t kHdrStrs = (extended ? 5 : 4) * sizeof(Poco::UInt32)
                           + jmsHeaders.messageId.size()
                           + jmsHeaders.replyTo.size()
-                          + jmsHeaders.correlationId.size()
-                          + jmsHeaders.type.size();
+                          + correlation.size() + jmsHeaders.type.size() + jmsHeaders.destination.size();
   BytesVector result(kFixed + kHdrNums + kHdrStrs + sizeof(Poco::UInt32) + propsLen + data.size());
 
   size_t off = 0;
-  result[off++] = static_cast<int8_t>(0x02);                              // magic
+  result[off++] = extended ? 0x03 : 0x02;
   memcpy(result.data() + off, &_number, sizeof(_number)); off += sizeof(_number);
   char uuidBuf[16]; uuid.copyTo(uuidBuf);
   memcpy(result.data() + off, uuidBuf, 16); off += 16;
@@ -151,13 +190,14 @@ BytesVector Message::toBytes() const {
   memcpy(result.data() + off, &jmsHeaders.deliveryTime, sizeof(int64_t));  off += sizeof(int64_t);
   memcpy(result.data() + off, &jmsHeaders.priority, sizeof(int32_t));      off += sizeof(int32_t);
   memcpy(result.data() + off, &jmsHeaders.deliveryCount, sizeof(int32_t)); off += sizeof(int32_t);
-  result[off++] = static_cast<int8_t>(jmsHeaders.redelivered ? 1 : 0);
+  result[off++] = flags;
 
   // Headers block (strings)
   writeString(result, off, jmsHeaders.messageId);
   writeString(result, off, jmsHeaders.replyTo);
-  writeString(result, off, jmsHeaders.correlationId);
+  writeString(result, off, correlation);
   writeString(result, off, jmsHeaders.type);
+  if (extended) writeString(result, off, jmsHeaders.destination);
 
   // Properties + data
   memcpy(result.data() + off, &propsLen, sizeof(propsLen)); off += sizeof(propsLen);
@@ -171,7 +211,7 @@ void Message::fromBytes(const BytesVector& bytes) {
   if (bytes.empty()) return;
 
   const uint8_t magic = static_cast<uint8_t>(bytes[0]);
-  if (magic == 0x01 || magic == 0x02) {
+  if (magic == 0x01 || hasStorageHeaders(magic)) {
     constexpr size_t kFixed = 1 + sizeof(int64_t) + 16 + 1;
     if (bytes.size() < kFixed) return;
 
@@ -180,7 +220,10 @@ void Message::fromBytes(const BytesVector& bytes) {
     uuid.copyFrom(reinterpret_cast<const char*>(bytes.data() + off)); off += 16;
     reliability = (static_cast<uint8_t>(bytes[off++]) != 0) ? PERSISTENT : NOT_PERSISTENT;
 
-    if (magic == 0x02) {
+    // A cached delivery already carries destination and binary ID. Retain
+    // their buffers when possible, and clear fields absent from this record.
+    bool emptyOpaqueBody = false;
+    if (hasStorageHeaders(magic)) {
       constexpr size_t kHdrNums = sizeof(int64_t) * 3 + sizeof(int32_t) * 2 + 1;
       if (off + kHdrNums > bytes.size()) return;
       memcpy(&jmsHeaders.timestamp, bytes.data() + off, sizeof(int64_t));     off += sizeof(int64_t);
@@ -188,12 +231,31 @@ void Message::fromBytes(const BytesVector& bytes) {
       memcpy(&jmsHeaders.deliveryTime, bytes.data() + off, sizeof(int64_t));  off += sizeof(int64_t);
       memcpy(&jmsHeaders.priority, bytes.data() + off, sizeof(int32_t));      off += sizeof(int32_t);
       memcpy(&jmsHeaders.deliveryCount, bytes.data() + off, sizeof(int32_t)); off += sizeof(int32_t);
-      jmsHeaders.redelivered = (static_cast<uint8_t>(bytes[off++]) != 0);
+      const auto flags = static_cast<uint8_t>(bytes[off++]);
+      const bool extended = magic == 0x03;
+      jmsHeaders.redelivered = extended ? (flags & 1) != 0 : flags != 0;
+      jmsHeaders.explicitEmptyCorrelationId = extended && (flags & 4);
+      jmsHeaders.explicitEmptyType = extended && (flags & 8);
+      jmsHeaders.nullText = extended && (flags & 16);
+      emptyOpaqueBody = extended && (flags & 32);
 
       if (!readString(bytes, off, jmsHeaders.messageId)) return;
       if (!readString(bytes, off, jmsHeaders.replyTo)) return;
-      if (!readString(bytes, off, jmsHeaders.correlationId)) return;
+      if (extended && (flags & 2)) {
+        BytesVector binary;
+        if (!readString(bytes, off, binary)) return;
+        jmsHeaders.binaryCorrelationId = std::make_shared<const BytesVector>(std::move(binary));
+        jmsHeaders.correlationId.clear();
+      } else {
+        jmsHeaders.binaryCorrelationId.reset();
+        if (!readString(bytes, off, jmsHeaders.correlationId)) return;
+      }
       if (!readString(bytes, off, jmsHeaders.type)) return;
+      if (extended) {
+        if (!readString(bytes, off, jmsHeaders.destination)) return;
+      } else {
+        jmsHeaders.destination.clear();
+      }
     } else {
       // 0x01 — leave jmsHeaders at defaults.
       jmsHeaders = Headers{};
@@ -202,24 +264,33 @@ void Message::fromBytes(const BytesVector& bytes) {
     if (off + sizeof(Poco::UInt32) > bytes.size()) return;
     Poco::UInt32 propsLen = 0;
     memcpy(&propsLen, bytes.data() + off, sizeof(propsLen)); off += sizeof(propsLen);
-    if (propsLen > 0 && off + propsLen <= bytes.size()) {
+    if (propsLen > bytes.size() - off) return;
+    _properties.clear();
+    if (propsLen > 0) {
       std::string propsJson(reinterpret_cast<const char*>(bytes.data() + off), propsLen);
       Poco::JSON::Parser parser;
       auto res = parser.parse(propsJson);
       _properties.fromJSON(*res.extract<Poco::JSON::Object::Ptr>());
       off += propsLen;
     }
+    const bool nullText = jmsHeaders.nullText;
     if (off < bytes.size()) {
       setDataFromBytes(BytesVector(bytes.begin() + static_cast<ptrdiff_t>(off), bytes.end()));
+    } else {
+      clearData();
     }
+    jmsHeaders.nullText = nullText;
+    if (emptyOpaqueBody) restoreEmptyOpaqueBody();
   } else {
     // Legacy JSON path: [8-byte propsSize][props JSON blob][data]
     // The JSON blob contains uuid/number/reliability written by old propertiesToJSON().
     if (bytes.size() < sizeof(Poco::UInt64)) return;
     Poco::UInt64 propsSize = 0;
     memcpy(&propsSize, bytes.data(), sizeof(propsSize));
+    if (propsSize > bytes.size() - sizeof(propsSize)) return;
+    jmsHeaders = Headers{};
     BytesVector props(propsSize);
-    if (propsSize > 0 && sizeof(propsSize) + propsSize <= bytes.size()) {
+    if (propsSize > 0) {
       memcpy(props.data(), bytes.data() + sizeof(propsSize), propsSize);
     }
     setPropertiesFromBytes(props);
@@ -228,6 +299,25 @@ void Message::fromBytes(const BytesVector& bytes) {
       setDataFromBytes(BytesVector(bytes.begin() + static_cast<ptrdiff_t>(dataStart), bytes.end()));
     }
   }
+}
+
+void Message::prepareForJakartaSend(std::string destination, Reliability mode, int32_t priority,
+                                    int64_t expiration, int64_t deliveryTime,
+                                    bool disableId, bool disableTimestamp) {
+  uuid = Poco::UUIDGenerator::defaultGenerator().createRandom();
+  reliability = mode;
+  jmsHeaders.messageId = disableId ? std::string{} : "ID:" + uuid.toString();
+  jmsHeaders.timestamp = disableTimestamp ? 0 : Poco::Timestamp().epochMicroseconds() / 1000;
+  jmsHeaders.destination = std::move(destination);
+  jmsHeaders.priority = priority;
+  jmsHeaders.expiration = expiration;
+  jmsHeaders.deliveryTime = deliveryTime;
+  jmsHeaders.deliveryCount = 0;
+  jmsHeaders.redelivered = false;
+}
+
+void Message::setNullProperty(std::string name) {
+  _properties.setProperty(std::move(name), property::String{});
 }
 
 void Message::setBoolProperty(std::string name, property::raw_type::boolean value) {

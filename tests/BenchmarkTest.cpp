@@ -20,6 +20,7 @@
 #include "Session.h"
 #include "Connection.h"
 #include "TextMessage.h"
+#include "Selector.h"
 #include <Poco/File.h>
 #include <Poco/Logger.h>
 #include <Poco/Channel.h>
@@ -362,3 +363,15 @@ BENCHMARK_F(BenchmarkFixture, Priority_Mixed_NonPersistent_RoundTrip)(benchmark:
     }
     state.SetItemsProcessed(state.iterations());
 }
+
+static void MessageSelector(benchmark::State& state) {
+    using namespace tiny_mq;
+    TextMessage message({}, "selector payload");
+    message.setIntProperty("rank", 123);
+    message.setStringProperty("name", "James");
+    auto selector = Selector::parse("rank > 100 AND name LIKE 'J_mes'");
+    for (auto _ : state) {
+        benchmark::DoNotOptimize(selector->matches(message));
+    }
+}
+BENCHMARK(MessageSelector);

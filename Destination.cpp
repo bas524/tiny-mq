@@ -106,7 +106,7 @@ int32_t priorityFromStorageBytes(const std::vector<char>& data) noexcept {
                            + 8;  // deliveryTime  (total = 51)
   constexpr int32_t kDefault = 4;
   if (data.size() < kOffset + sizeof(int32_t)) return kDefault;
-  if (static_cast<uint8_t>(data[1]) != 0x02) return kDefault;  // pre-header format: use default
+  if (!tiny_mq::hasStorageHeaders(static_cast<uint8_t>(data[1]))) return kDefault;  // pre-header format: use default
   int32_t prio = kDefault;
   std::memcpy(&prio, data.data() + kOffset, sizeof(prio));
   return std::clamp(prio, int32_t{0}, int32_t{9});
@@ -119,7 +119,7 @@ int64_t deliveryTimeFromStorageBytes(const std::vector<char>& data) noexcept {
   constexpr size_t kOffset = 1 + 1 + 8 + 16 + 1 + 8 + 8;  // = 43
   constexpr size_t kSize = 8;
   if (data.size() < kOffset + kSize) return 0;
-  if (static_cast<uint8_t>(data[1]) != 0x02) return 0;  // pre-header format: never delayed
+  if (!tiny_mq::hasStorageHeaders(static_cast<uint8_t>(data[1]))) return 0;  // pre-header format: never delayed
   int64_t deliveryTime = 0;
   std::memcpy(&deliveryTime, data.data() + kOffset, kSize);
   // Defense-in-depth (spec 13 review round 2, B4): a raw 8-byte field read
@@ -143,6 +143,7 @@ int64_t deliveryTimeFromStorageBytes(const std::vector<char>& data) noexcept {
 // Factory: create an empty shell message of the given type for replay
 tiny_mq::Message::Ptr makeMessageShell(tiny_mq::Message::Type type) {
   switch (type) {
+    case tiny_mq::Message::UNDEFINED:      return std::make_shared<tiny_mq::Message>();
     case tiny_mq::Message::TEXT_MESSAGE:   return std::make_shared<tiny_mq::TextMessage>();
     case tiny_mq::Message::BYTES_MESSAGE:  return std::make_shared<tiny_mq::BytesMessage>();
     case tiny_mq::Message::MAP_MESSAGE:    return std::make_shared<tiny_mq::MapMessage>();

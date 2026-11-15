@@ -4,44 +4,25 @@
 
 #include "Selector.h"
 #include "Message.h"
-#include "MessageProperty.h"
+
+#include <Poco/UTF8Encoding.h>
+#include <Poco/Unicode.h>
 #include <algorithm>
-#include <cctype>
+#include <bit>
+#include <charconv>
+#include <cmath>
 #include <functional>
-#include <regex>
+#include <optional>
+#include <string_view>
+#include <variant>
 #include <vector>
 
 namespace tiny_mq {
-
-// ============================================================
-// Tokenizer
-// ============================================================
+namespace {
 
 enum class TokenType {
-  IDENT,
-  STRING,
-  INT_LIT,
-  FLOAT_LIT,
-  TRUE_LIT,
-  FALSE_LIT,
-  NULL_LIT,
-  AND,
-  OR,
-  NOT,
-  LIKE,
-  BETWEEN,
-  IN,
-  IS,
-  EQ,   // =
-  NEQ,  // <>
-  LT,   // <
-  LTE,  // <=
-  GT,   // >
-  GTE,  // >=
-  LPAREN,
-  RPAREN,
-  COMMA,
-  EOF_TOKEN
+  End, Identifier, String, Number, True, False, Null, And, Or, Not, Like, Escape,
+  Between, In, Is, Eq, Ne, Lt, Le, Gt, Ge, Left, Right, Comma, Plus, Minus, Multiply, Divide
 };
 
 struct Token {
@@ -49,473 +30,637 @@ struct Token {
   std::string text;
 };
 
+bool digit(char ch) { return ch >= '0' && ch <= '9'; }
+
+int unicodeAt(std::string_view input, size_t& pos) {
+  if (pos == input.size()) return -1;
+  auto first = static_cast<unsigned char>(input[pos]);
+  if (first < 128) {
+    ++pos;
+    return first;
+  }
+  static const Poco::UTF8Encoding encoding;
+  int size = encoding.sequenceLength(reinterpret_cast<const unsigned char*>(input.data() + pos), input.size() - pos);
+  if (size < 1 || static_cast<size_t>(size) > input.size() - pos) return -1;
+  int codepoint = encoding.convert(reinterpret_cast<const unsigned char*>(input.data() + pos));
+  if (codepoint >= 0) pos += size;
+  return codepoint;
+}
+
+bool javaIdentifier(int ch, bool first) {
+  if (ch < 0) return false;
+  if (ch < 128) {
+    if (ch == '_' || ch == '$' || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) return true;
+    return !first && (digit(static_cast<char>(ch)) || ch < 9 || (ch >= 14 && ch <= 27) || ch == 127);
+  }
+  Poco::Unicode::CharacterProperties props{};
+  Poco::Unicode::properties(ch, props);
+  using U = Poco::Unicode;
+  if (props.category == U::UCP_LETTER || props.type == U::UCP_LETTER_NUMBER ||
+      props.type == U::UCP_CURRENCY_SYMBOL || props.type == U::UCP_CONNECTOR_PUNCTUATION) return true;
+  return !first && (props.type == U::UCP_DECIMAL_NUMBER || props.type == U::UCP_SPACING_MARK ||
+                    props.type == U::UCP_NON_SPACING_MARK || props.type == U::UCP_FORMAT || ch <= 159);
+}
+
 class Tokenizer {
  public:
-  explicit Tokenizer(const std::string &input) : _input(input), _pos(0) {}
+  explicit Tokenizer(std::string_view text) : input(text) {}
 
   Token next() {
-    skipWhitespace();
-    if (_pos >= _input.size()) return {TokenType::EOF_TOKEN, ""};
-
-    char c = _input[_pos];
-
-    if (c == '\'') return readString();
-
-    if (std::isdigit(static_cast<unsigned char>(c)) ||
-        (c == '-' && _pos + 1 < _input.size() && std::isdigit(static_cast<unsigned char>(_input[_pos + 1])))) {
-      return readNumber();
-    }
-
-    if (std::isalpha(static_cast<unsigned char>(c)) || c == '_') return readIdent();
-
-    switch (c) {
-      case '=': _pos++; return {TokenType::EQ, "="};
-      case '(': _pos++; return {TokenType::LPAREN, "("};
-      case ')': _pos++; return {TokenType::RPAREN, ")"};
-      case ',': _pos++; return {TokenType::COMMA, ","};
+    while (pos < input.size() && std::string_view(" \t\f\r\n").find(input[pos]) != std::string_view::npos) ++pos;
+    if (pos == input.size()) return {TokenType::End, {}};
+    const size_t begin = pos;
+    char ch = input[pos++];
+    using T = TokenType;
+    switch (ch) {
+      case '(': return {T::Left, "("};
+      case ')': return {T::Right, ")"};
+      case ',': return {T::Comma, ","};
+      case '+': return {T::Plus, "+"};
+      case '-': return {T::Minus, "-"};
+      case '*': return {T::Multiply, "*"};
+      case '/': return {T::Divide, "/"};
+      case '=': return {T::Eq, "="};
       case '<':
-        _pos++;
-        if (_pos < _input.size() && _input[_pos] == '>') { _pos++; return {TokenType::NEQ, "<>"}; }
-        if (_pos < _input.size() && _input[_pos] == '=') { _pos++; return {TokenType::LTE, "<="}; }
-        return {TokenType::LT, "<"};
+        if (accept('=')) return {T::Le, "<="};
+        if (accept('>')) return {T::Ne, "<>"};
+        return {T::Lt, "<"};
       case '>':
-        _pos++;
-        if (_pos < _input.size() && _input[_pos] == '=') { _pos++; return {TokenType::GTE, ">="}; }
-        return {TokenType::GT, ">"};
+        if (accept('=')) return {T::Ge, ">="};
+        return {T::Gt, ">"};
+      case '\'': {
+        std::string value;
+        while (pos < input.size()) {
+          ch = input[pos++];
+          if (ch == '\'' && !accept('\'')) return {T::String, std::move(value)};
+          value.push_back(ch);
+        }
+        throw InvalidSelectorException("unterminated string");
+      }
       default: break;
     }
-    throw InvalidSelectorException(std::string("unexpected character '") + c + "'");
+
+    if (digit(ch) || (ch == '.' && pos < input.size() && digit(input[pos]))) {
+      bool hex = ch == '0' && pos < input.size() && (input[pos] == 'x' || input[pos] == 'X');
+      if (hex) ++pos;
+      while (pos < input.size()) {
+        const char c = input[pos];
+        if (digit(c) || c == '.' || c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+          ++pos;
+        } else if ((c == '+' || c == '-') &&
+                   std::string_view(hex ? "pP" : "eE").find(input[pos - 1]) != std::string_view::npos) {
+          ++pos;
+        } else {
+          break;
+        }
+      }
+      return {T::Number, std::string(input.substr(begin, pos - begin))};
+    }
+
+    pos = begin;
+    if (!javaIdentifier(unicodeAt(input, pos), true)) {
+      throw InvalidSelectorException("unexpected character at byte " + std::to_string(begin));
+    }
+    for (size_t next = pos; javaIdentifier(unicodeAt(input, next), false);) pos = next;
+    std::string word(input.substr(begin, pos - begin));
+    std::string upper = word;
+    for (char& c : upper) if (c >= 'a' && c <= 'z') c -= 'a' - 'A';
+    constexpr std::pair<std::string_view, T> keywords[] = {
+        {"TRUE", T::True}, {"FALSE", T::False}, {"NULL", T::Null}, {"NOT", T::Not},
+        {"AND", T::And}, {"OR", T::Or}, {"BETWEEN", T::Between}, {"LIKE", T::Like},
+        {"IN", T::In}, {"IS", T::Is}, {"ESCAPE", T::Escape}};
+    for (auto [name, type] : keywords) if (upper == name) return {type, std::move(word)};
+    return {T::Identifier, std::move(word)};
   }
 
  private:
-  const std::string &_input;
-  size_t _pos;
-
-  void skipWhitespace() {
-    while (_pos < _input.size() && std::isspace(static_cast<unsigned char>(_input[_pos]))) ++_pos;
+  bool accept(char ch) {
+    if (pos == input.size() || input[pos] != ch) return false;
+    ++pos;
+    return true;
   }
 
-  Token readString() {
-    ++_pos;  // skip opening quote
-    std::string result;
-    while (_pos < _input.size()) {
-      char ch = _input[_pos++];
-      if (ch == '\'') {
-        if (_pos < _input.size() && _input[_pos] == '\'') {
-          result += '\'';
-          ++_pos;
-        } else {
-          break;  // end of string literal
-        }
-      } else {
-        result += ch;
-      }
-    }
-    return {TokenType::STRING, result};
-  }
-
-  Token readNumber() {
-    size_t start = _pos;
-    bool isFloat = false;
-    if (_input[_pos] == '-') ++_pos;
-    while (_pos < _input.size() && std::isdigit(static_cast<unsigned char>(_input[_pos]))) ++_pos;
-    if (_pos < _input.size() && _input[_pos] == '.') {
-      isFloat = true;
-      ++_pos;
-      while (_pos < _input.size() && std::isdigit(static_cast<unsigned char>(_input[_pos]))) ++_pos;
-    }
-    return {isFloat ? TokenType::FLOAT_LIT : TokenType::INT_LIT, _input.substr(start, _pos - start)};
-  }
-
-  Token readIdent() {
-    size_t start = _pos;
-    while (_pos < _input.size() &&
-           (std::isalnum(static_cast<unsigned char>(_input[_pos])) || _input[_pos] == '_' || _input[_pos] == '.')) {
-      ++_pos;
-    }
-    std::string text = _input.substr(start, _pos - start);
-    std::string upper = text;
-    std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char ch) { return std::toupper(ch); });
-
-    if (upper == "AND") return {TokenType::AND, text};
-    if (upper == "OR") return {TokenType::OR, text};
-    if (upper == "NOT") return {TokenType::NOT, text};
-    if (upper == "LIKE") return {TokenType::LIKE, text};
-    if (upper == "BETWEEN") return {TokenType::BETWEEN, text};
-    if (upper == "IN") return {TokenType::IN, text};
-    if (upper == "IS") return {TokenType::IS, text};
-    if (upper == "TRUE") return {TokenType::TRUE_LIT, text};
-    if (upper == "FALSE") return {TokenType::FALSE_LIT, text};
-    if (upper == "NULL") return {TokenType::NULL_LIT, text};
-
-    return {TokenType::IDENT, text};
-  }
+  std::string_view input;
+  size_t pos = 0;
 };
 
-// ============================================================
-// Evaluator: expressions as std::function closures
-// ============================================================
+struct Incompatible {};
+using Value = std::variant<std::monostate, bool, int32_t, int64_t, float, double, std::string_view, Incompatible>;
+using Eval = std::function<Value(const Message&)>;
+using T = TokenType;
 
-using EvalFn = std::function<SelectorValue(const Message &)>;
+bool isNull(const Value& value) { return std::holds_alternative<std::monostate>(value); }
 
-// ---- Property extraction ----
+bool isNumeric(const Value& value) {
+  return value.index() >= 2 && value.index() <= 5;
+}
 
-static SelectorValue extractProperty(const Message &msg, const std::string &name) {
-  if (!msg.hasProperty(name)) return std::monostate{};
-  switch (msg.propertyValueType(name)) {
-    case property::BOOLEAN_TYPE: {
-      const auto &v = msg.property<property::Bool>(name);
-      return v.isNull() ? SelectorValue{std::monostate{}} : SelectorValue{v.value()};
-    }
-    case property::STRING_TYPE: {
-      const auto &v = msg.property<property::String>(name);
-      return v.isNull() ? SelectorValue{std::monostate{}} : SelectorValue{v.value()};
-    }
-    case property::INTEGER_TYPE: {
-      const auto &v = msg.property<property::Int>(name);
-      return v.isNull() ? SelectorValue{std::monostate{}} : SelectorValue{static_cast<int64_t>(v.value())};
-    }
-    case property::LONG_TYPE: {
-      const auto &v = msg.property<property::Long>(name);
-      return v.isNull() ? SelectorValue{std::monostate{}} : SelectorValue{static_cast<int64_t>(v.value())};
-    }
-    case property::SHORT_TYPE: {
-      const auto &v = msg.property<property::Short>(name);
-      return v.isNull() ? SelectorValue{std::monostate{}} : SelectorValue{static_cast<int64_t>(v.value())};
-    }
-    case property::BYTE_TYPE: {
-      const auto &v = msg.property<property::Byte>(name);
-      return v.isNull() ? SelectorValue{std::monostate{}} : SelectorValue{static_cast<int64_t>(v.value())};
-    }
-    case property::DOUBLE_TYPE: {
-      const auto &v = msg.property<property::Double>(name);
-      return v.isNull() ? SelectorValue{std::monostate{}} : SelectorValue{static_cast<double>(v.value())};
-    }
-    case property::FLOAT_TYPE: {
-      const auto &v = msg.property<property::Float>(name);
-      return v.isNull() ? SelectorValue{std::monostate{}} : SelectorValue{static_cast<double>(v.value())};
-    }
-    case property::CHAR_TYPE: {
-      const auto &v = msg.property<property::Char>(name);
-      return v.isNull() ? SelectorValue{std::monostate{}} : SelectorValue{std::string(1, v.value())};
-    }
-    default: return std::monostate{};
+template<class R>
+R numeric(const Value& value) {
+  switch (value.index()) {
+    case 2: return static_cast<R>(std::get<int32_t>(value));
+    case 3: return static_cast<R>(std::get<int64_t>(value));
+    case 4: return static_cast<R>(std::get<float>(value));
+    default: return static_cast<R>(std::get<double>(value));
   }
 }
 
-// ---- Value comparison helpers ----
-
-static double toDouble(const SelectorValue &v) {
-  if (std::holds_alternative<int64_t>(v)) return static_cast<double>(std::get<int64_t>(v));
-  return std::get<double>(v);
+template<class Operation>
+Value promote(const Value& left, const Value& right, Operation operation) {
+  switch (std::max(left.index(), right.index())) {
+    case 2: return operation(numeric<int32_t>(left), numeric<int32_t>(right));
+    case 3: return operation(numeric<int64_t>(left), numeric<int64_t>(right));
+    case 4: return operation(numeric<float>(left), numeric<float>(right));
+    default: return operation(numeric<double>(left), numeric<double>(right));
+  }
 }
 
-static bool isNumeric(const SelectorValue &v) {
-  return std::holds_alternative<int64_t>(v) || std::holds_alternative<double>(v);
+template<class V>
+bool compare(V left, V right, T op) {
+  switch (op) {
+    case T::Eq: return left == right;
+    case T::Ne: return left != right;
+    case T::Lt: return left < right;
+    case T::Le: return left <= right;
+    case T::Gt: return left > right;
+    case T::Ge: return left >= right;
+    default: return false;
+  }
 }
 
-static bool selEQ(const SelectorValue &a, const SelectorValue &b) {
-  if (std::holds_alternative<std::monostate>(a) || std::holds_alternative<std::monostate>(b)) return false;
-  if (isNumeric(a) && isNumeric(b)) return toDouble(a) == toDouble(b);
-  if (a.index() != b.index()) return false;
-  return a == b;
-}
-
-static bool selLT(const SelectorValue &a, const SelectorValue &b) {
-  if (!isNumeric(a) || !isNumeric(b)) return false;
-  return toDouble(a) < toDouble(b);
-}
-
-static bool selGT(const SelectorValue &a, const SelectorValue &b) { return selLT(b, a); }
-static bool selLTE(const SelectorValue &a, const SelectorValue &b) { return selEQ(a, b) || selLT(a, b); }
-static bool selGTE(const SelectorValue &a, const SelectorValue &b) { return selEQ(a, b) || selGT(a, b); }
-
-// ---- LIKE pattern → std::regex ----
-
-static std::string likeToRegex(const std::string &pattern) {
-  std::string result;
-  result.reserve(pattern.size() * 2 + 2);
-  result += '^';
-  for (char ch : pattern) {
-    switch (ch) {
-      case '%': result += ".*"; break;
-      case '_': result += '.'; break;
-      case '.': case '^': case '$': case '*': case '+':
-      case '?': case '(': case ')': case '[': case ']':
-      case '{': case '}': case '|': case '\\':
-        result += '\\';
-        result += ch;
-        break;
-      default: result += ch; break;
+Value compareValues(const Value& left, const Value& right, T op) {
+  if (isNull(left) || isNull(right)) return {};
+  if (isNumeric(left) && isNumeric(right)) {
+    return promote(left, right, [op](auto a, auto b) { return compare(a, b, op); });
+  }
+  if (op == T::Eq || op == T::Ne) {
+    if (const auto* a = std::get_if<std::string_view>(&left)) {
+      if (const auto* b = std::get_if<std::string_view>(&right)) return compare(*a, *b, op);
+    }
+    if (const auto* a = std::get_if<bool>(&left)) {
+      if (const auto* b = std::get_if<bool>(&right)) return compare(*a, *b, op);
     }
   }
-  result += '$';
+  return false;
+}
+
+template<class V>
+Value arithmetic(V a, V b, T op) {
+  if constexpr (std::is_integral_v<V>) {
+    if (op == T::Divide) {
+      if (b == 0) return {};
+      if (a == std::numeric_limits<V>::min() && b == -1) return a;
+      return a / b;
+    }
+    // Java integer arithmetic wraps, while signed overflow in C++ is UB.
+    using U = std::make_unsigned_t<V>;
+    const auto x = static_cast<U>(a), y = static_cast<U>(b);
+    if (op == T::Multiply) return std::bit_cast<V>(x * y);
+    if (op == T::Minus) return std::bit_cast<V>(x - y);
+    return std::bit_cast<V>(x + y);
+  } else {
+    if (op == T::Divide) return a / b;
+    if (op == T::Multiply) return a * b;
+    if (op == T::Minus) return a - b;
+    return a + b;
+  }
+}
+
+Value calculate(const Value& a, const Value& b, T op) {
+  if (isNull(a) || isNull(b)) return {};
+  if (!isNumeric(a) || !isNumeric(b)) return Incompatible{};
+  return promote(a, b, [op](auto x, auto y) { return arithmetic(x, y, op); });
+}
+
+SelectorTruth truth(const Value& value) {
+  if (auto* result = std::get_if<bool>(&value)) return *result ? SelectorTruth::True : SelectorTruth::False;
+  return SelectorTruth::Unknown;
+}
+
+Value negate(const Value& value) {
+  if (const auto* b = std::get_if<bool>(&value)) return !*b;
+  return {};
+}
+
+Value logical(const Value& left, const Value& right, bool shortCircuitValue) {
+  if (const auto* lhs = std::get_if<bool>(&left); lhs && *lhs == shortCircuitValue) return shortCircuitValue;
+  if (const auto* rhs = std::get_if<bool>(&right); rhs && *rhs == shortCircuitValue) return shortCircuitValue;
+  if (std::holds_alternative<bool>(left) && std::holds_alternative<bool>(right)) return !shortCircuitValue;
+  return {};
+}
+
+Value propertyValue(const Message& message, const std::string& name) {
+  const auto* property = message.findProperty(name);
+  if (!property) return {};
+  auto extract = [&]<class Stored, class Result>() -> std::optional<Value> {
+    if (const auto* value = Poco::AnyCast<Stored>(property)) {
+      if (value->isNull()) return Value{};
+      return Value(static_cast<Result>(value->value()));
+    }
+    return std::nullopt;
+  };
+  if (auto v = extract.template operator()<property::Int, int32_t>()) return *v;
+  if (auto v = extract.template operator()<property::String, std::string_view>()) return *v;
+  if (auto v = extract.template operator()<property::Long, int64_t>()) return *v;
+  if (auto v = extract.template operator()<property::Bool, bool>()) return *v;
+  if (auto v = extract.template operator()<property::Byte, int32_t>()) return *v;
+  if (auto v = extract.template operator()<property::Short, int32_t>()) return *v;
+  if (auto v = extract.template operator()<property::Double, double>()) return *v;
+  if (auto v = extract.template operator()<property::Float, float>()) return *v;
+  return Incompatible{};
+}
+
+using Accessor = Value (*)(const Message&);
+
+Value nullableString(const std::string& text, bool explicitEmpty = false) {
+  if (text.empty() && !explicitEmpty) return {};
+  return std::string_view(text);
+}
+
+Accessor header(std::string_view name) {
+  if (name == "JMSDeliveryMode") return [](const Message& m) -> Value {
+    return std::string_view(m.isPersistent() ? "PERSISTENT" : "NON_PERSISTENT");
+  };
+  if (name == "JMSPriority") return [](const Message& m) -> Value { return m.jmsHeaders.priority; };
+  if (name == "JMSTimestamp") return [](const Message& m) -> Value { return m.jmsHeaders.timestamp; };
+  if (name == "JMSMessageID") return [](const Message& m) { return nullableString(m.jmsHeaders.messageId); };
+  if (name == "JMSType") return [](const Message& m) { return nullableString(m.jmsHeaders.type, m.jmsHeaders.explicitEmptyType); };
+  if (name == "JMSCorrelationID") return [](const Message& m) -> Value {
+    if (m.jmsHeaders.binaryCorrelationId) return {};
+    return nullableString(m.jmsHeaders.correlationId, m.jmsHeaders.explicitEmptyCorrelationId);
+  };
+  return nullptr;
+}
+
+constexpr int anyCharacter = -2;
+constexpr int anySequence = -3;
+
+std::vector<int> compilePattern(const std::string& pattern, int escape) {
+  std::vector<int> result;
+  for (size_t pos = 0; pos < pattern.size();) {
+    int ch = unicodeAt(pattern, pos);
+    if (ch < 0) throw InvalidSelectorException("invalid UTF-8 in LIKE pattern");
+    if (ch == escape) {
+      ch = unicodeAt(pattern, pos);
+      if (ch < 0 || (ch != escape && ch != '%' && ch != '_')) {
+        throw InvalidSelectorException("invalid LIKE escape sequence");
+      }
+      result.push_back(ch);
+    } else if (ch == '%') {
+      if (result.empty() || result.back() != anySequence) result.push_back(anySequence);
+    } else {
+      result.push_back(ch == '_' ? anyCharacter : ch);
+    }
+  }
   return result;
 }
 
-// ============================================================
-// Recursive-descent parser
-// ============================================================
+bool matchPattern(std::string_view value, const std::vector<int>& pattern) {
+  size_t pos = 0, part = 0, wildcard = std::string_view::npos, retry = 0;
+  while (pos < value.size()) {
+    size_t next = pos;
+    const auto ch = unicodeAt(value, next);
+    if (ch < 0) return false;
+    if (part < pattern.size() && (pattern[part] == ch || pattern[part] == anyCharacter)) {
+      ++part;
+      pos = next;
+    } else if (part < pattern.size() && pattern[part] == anySequence) {
+      wildcard = part++;
+      retry = pos;
+    } else if (wildcard != std::string_view::npos) {
+      unicodeAt(value, retry);
+      pos = retry;
+      part = wildcard + 1;
+    } else {
+      return false;
+    }
+  }
+  return part == pattern.size() || (part + 1 == pattern.size() && pattern.back() == anySequence);
+}
+
+Value parseNumber(std::string text, bool negative) {
+  const bool hex = text.starts_with("0x") || text.starts_with("0X");
+  const bool binary = text.starts_with("0b") || text.starts_with("0B");
+  const bool approximate = !binary && (hex ? text.find_first_of(".pP") != std::string::npos
+      : text.find_first_of(".eEfFdD") != std::string::npos);
+  auto decimalOrHexDigit = [](char c) {
+    return digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+  };
+  // Validate separator placement before removing separators for the library parser.
+  for (size_t pos = text.find('_'); pos != std::string::npos;) {
+    const size_t next = text.find_first_not_of('_', pos);
+    const auto valid = hex && text.find_first_of("pP") > pos ? +decimalOrHexDigit : digit;
+    if (pos == 0 || next == std::string::npos || !valid(text[pos - 1]) || !valid(text[next])) {
+      throw InvalidSelectorException("invalid separator in numeric literal");
+    }
+    pos = text.find('_', next);
+  }
+  text.erase(std::remove(text.begin(), text.end(), '_'), text.end());
+
+  if (approximate) {
+    const bool useFloat = text.back() == 'f' || text.back() == 'F';
+    if (useFloat || text.back() == 'd' || text.back() == 'D') text.pop_back();
+    if (hex && text.find_first_of("pP") == std::string::npos) {
+      throw InvalidSelectorException("hexadecimal floating-point literal requires an exponent");
+    }
+    auto decimal = [&]<class R>() -> Value {
+      R number{};
+      auto start = text.data() + (hex ? 2 : 0);
+      const auto end = text.data() + text.size();
+      const auto parsed = std::from_chars(start, end, number, hex ? std::chars_format::hex : std::chars_format::general);
+      if (parsed.ec != std::errc{} || parsed.ptr != end) throw InvalidSelectorException("invalid approximate numeric literal");
+      return negative ? -number : number;
+    };
+    return useFloat ? decimal.operator()<float>() : decimal.operator()<double>();
+  }
+
+  const bool useLong = text.back() == 'l' || text.back() == 'L';
+  if (useLong) text.pop_back();
+  const bool octal = text.size() > 1 && text.front() == '0' && !hex && !binary;
+  uint64_t number = 0;
+  const auto end = text.data() + text.size();
+  const auto result = std::from_chars(text.data() + (hex || binary ? 2 : 0), end, number,
+                                     hex ? 16 : binary ? 2 : octal ? 8 : 10);
+  if (result.ec != std::errc{} || result.ptr != end) throw InvalidSelectorException("invalid integer literal");
+  if (hex || binary || octal) {
+    if (!useLong && number <= UINT32_MAX) {
+      auto bits = static_cast<uint32_t>(number);
+      return std::bit_cast<int32_t>(negative ? 0u - bits : bits);
+    }
+    return std::bit_cast<int64_t>(negative ? uint64_t{0} - number : number);
+  }
+  const auto max = static_cast<uint64_t>(INT64_MAX);
+  if (number > max + negative) throw InvalidSelectorException("integer literal exceeds Java long");
+  if (!useLong && number <= static_cast<uint64_t>(INT32_MAX) + negative) {
+    auto bits = static_cast<uint32_t>(number);
+    return std::bit_cast<int32_t>(negative ? 0u - bits : bits);
+  }
+  return std::bit_cast<int64_t>(negative ? uint64_t{0} - number : number);
+}
 
 class Parser {
  public:
-  explicit Parser(const std::string &input) : _tok(input) { advance(); }
+  explicit Parser(const std::string& text) : tokenizer(text), current(tokenizer.next()) {}
 
-  EvalFn parseExpression() {
-    EvalFn expr = parseOr();
-    if (_current.type != TokenType::EOF_TOKEN) {
-      throw InvalidSelectorException("unexpected token '" + _current.text + "'");
-    }
-    return expr;
+  Eval compile() {
+    if (current.type == T::End) return [](const Message&) -> Value { return true; };
+    auto expression = parseOr();
+    requireConditional(expression.kind);
+    consume(T::End);
+    return std::move(expression.evaluate);
   }
 
  private:
-  Tokenizer _tok;
-  Token _current{TokenType::EOF_TOKEN, ""};
+  enum class ExpressionKind { Identifier, Numeric, String, Conditional };
 
-  void advance() { _current = _tok.next(); }
+  struct Expression {
+    Eval evaluate;
+    ExpressionKind kind;
+  };
 
-  bool check(TokenType t) const { return _current.type == t; }
+  Tokenizer tokenizer;
+  Token current;
+  size_t tokens = 0;
 
-  Token consume(TokenType t, const std::string &what) {
-    if (_current.type != t) throw InvalidSelectorException("expected " + what + ", got '" + _current.text + "'");
-    Token tok = _current;
+  bool accept(T type) {
+    if (current.type != type) return false;
     advance();
-    return tok;
+    return true;
   }
 
-  // ---- Grammar ----
-  // expression  := or_expr
-  // or_expr     := and_expr (OR and_expr)*
-  // and_expr    := not_expr (AND not_expr)*
-  // not_expr    := NOT not_expr | comparison
-  // comparison  := primary (IS [NOT] NULL |
-  //                         [NOT] BETWEEN primary AND primary |
-  //                         [NOT] IN '(' primary (',' primary)* ')' |
-  //                         [NOT] LIKE STRING |
-  //                         (= | <> | < | <= | > | >=) primary)?
-  // primary     := '(' expression ')' | NULL | TRUE | FALSE | STRING | INT | FLOAT | IDENT
+  Token consume(T type) {
+    if (current.type != type) throw InvalidSelectorException("unexpected token '" + current.text + "'");
+    Token result = std::move(current);
+    advance();
+    return result;
+  }
 
-  EvalFn parseOr() {
-    auto left = parseAnd();
-    while (check(TokenType::OR)) {
-      advance();
-      auto right = parseAnd();
-      left = [l = left, r = right](const Message &msg) -> SelectorValue {
-        auto lv = l(msg);
-        if (std::holds_alternative<bool>(lv) && std::get<bool>(lv)) return true;
-        auto rv = r(msg);
-        if (std::holds_alternative<bool>(rv) && std::get<bool>(rv)) return true;
-        if (std::holds_alternative<bool>(lv) && std::holds_alternative<bool>(rv)) return false;
-        return std::monostate{};
-      };
+  void advance() {
+    if (++tokens > 512) throw InvalidSelectorException("selector exceeds 512 tokens");
+    current = tokenizer.next();
+  }
+
+  static void requireConditional(ExpressionKind kind) {
+    if (kind != ExpressionKind::Identifier && kind != ExpressionKind::Conditional) {
+      throw InvalidSelectorException("expected a conditional expression");
+    }
+  }
+
+  static void requireArithmetic(ExpressionKind kind) {
+    if (kind != ExpressionKind::Identifier && kind != ExpressionKind::Numeric) {
+      throw InvalidSelectorException("expected an arithmetic expression");
+    }
+  }
+
+  Expression parseOr() { return parseLogical(&Parser::parseAnd, T::Or, true); }
+  Expression parseAnd() { return parseLogical(&Parser::parseNot, T::And, false); }
+
+  Expression parseLogical(Expression (Parser::*operand)(), T op, bool shortCircuitValue) {
+    auto left = (this->*operand)();
+    while (accept(op)) {
+      auto right = (this->*operand)();
+      requireConditional(left.kind);
+      requireConditional(right.kind);
+      left = {[l = std::move(left.evaluate), r = std::move(right.evaluate), shortCircuitValue](const Message& m) -> Value {
+        auto value = l(m);
+        if (auto* b = std::get_if<bool>(&value); b && *b == shortCircuitValue) return shortCircuitValue;
+        return logical(value, r(m), shortCircuitValue);
+      }, ExpressionKind::Conditional};
     }
     return left;
   }
 
-  EvalFn parseAnd() {
-    auto left = parseNot();
-    while (check(TokenType::AND)) {
-      advance();
-      auto right = parseNot();
-      left = [l = left, r = right](const Message &msg) -> SelectorValue {
-        auto lv = l(msg);
-        if (std::holds_alternative<bool>(lv) && !std::get<bool>(lv)) return false;
-        auto rv = r(msg);
-        if (std::holds_alternative<bool>(rv) && !std::get<bool>(rv)) return false;
-        if (std::holds_alternative<bool>(lv) && std::holds_alternative<bool>(rv)) return true;
-        return std::monostate{};
-      };
-    }
-    return left;
+  Expression parseNot() {
+    if (!accept(T::Not)) return parsePredicate();
+    auto expr = parseNot();
+    requireConditional(expr.kind);
+    return {[eval = std::move(expr.evaluate)](const Message& m) { return negate(eval(m)); },
+            ExpressionKind::Conditional};
   }
 
-  EvalFn parseNot() {
-    if (check(TokenType::NOT)) {
-      advance();
-      auto expr = parseNot();
-      return [e = expr](const Message &msg) -> SelectorValue {
-        auto v = e(msg);
-        if (std::holds_alternative<bool>(v)) return !std::get<bool>(v);
-        return std::monostate{};
-      };
-    }
-    return parseComparison();
-  }
-
-  EvalFn parseComparison() {
-    auto left = parsePrimary();
-
-    // IS [NOT] NULL
-    if (check(TokenType::IS)) {
-      advance();
-      bool negated = false;
-      if (check(TokenType::NOT)) { advance(); negated = true; }
-      consume(TokenType::NULL_LIT, "NULL");
-      return [l = left, negated](const Message &msg) -> SelectorValue {
-        auto v = l(msg);
-        bool isNull = std::holds_alternative<std::monostate>(v);
-        return negated ? !isNull : isNull;
-      };
+  Expression parsePredicate() {
+    auto left = parseSum();
+    if (accept(T::Is)) {
+      requireIdentifier(left);
+      const bool negated = accept(T::Not);
+      consume(T::Null);
+      return {[eval = std::move(left.evaluate), negated](const Message& m) -> Value {
+        return isNull(eval(m)) != negated;
+      }, ExpressionKind::Conditional};
     }
 
-    // Optional NOT before BETWEEN / IN / LIKE
-    bool negated = false;
-    if (check(TokenType::NOT)) {
-      advance();
-      negated = true;
+    const bool negated = accept(T::Not);
+    if (accept(T::Between)) {
+      auto low = parseSum();
+      consume(T::And);
+      auto high = parseSum();
+      requireArithmetic(left.kind);
+      requireArithmetic(low.kind);
+      requireArithmetic(high.kind);
+      return {[eval = std::move(left.evaluate), lo = std::move(low.evaluate),
+               hi = std::move(high.evaluate), negated](const Message& m) -> Value {
+        auto value = eval(m);
+        auto lower = compareValues(value, lo(m), negated ? T::Lt : T::Ge);
+        auto upper = compareValues(value, hi(m), negated ? T::Gt : T::Le);
+        return logical(lower, upper, negated);
+      }, ExpressionKind::Conditional};
     }
 
-    if (check(TokenType::BETWEEN)) {
-      advance();
-      auto low = parsePrimary();
-      consume(TokenType::AND, "AND");
-      auto high = parsePrimary();
-      return [l = left, lo = low, hi = high, negated](const Message &msg) -> SelectorValue {
-        auto lv = l(msg);
-        auto lov = lo(msg);
-        auto hiv = hi(msg);
-        bool result = selGTE(lv, lov) && selLTE(lv, hiv);
-        return negated ? !result : result;
-      };
-    }
+    if (accept(T::In)) return parseIn(std::move(left), negated);
+    if (accept(T::Like)) return parseLike(std::move(left), negated);
+    if (negated) throw InvalidSelectorException("expected BETWEEN, IN, or LIKE after NOT");
 
-    if (check(TokenType::IN)) {
-      advance();
-      consume(TokenType::LPAREN, "(");
-      std::vector<EvalFn> items;
-      items.push_back(parsePrimary());
-      while (check(TokenType::COMMA)) {
+    switch (current.type) {
+      case T::Eq: case T::Ne: case T::Lt: case T::Le: case T::Gt: case T::Ge: {
+        const auto op = current.type;
         advance();
-        items.push_back(parsePrimary());
+        auto right = parseSum();
+        return {[l = std::move(left.evaluate), r = std::move(right.evaluate), op](const Message& m) {
+          return compareValues(l(m), r(m), op);
+        }, ExpressionKind::Conditional};
       }
-      consume(TokenType::RPAREN, ")");
-      return [l = left, items = std::move(items), negated](const Message &msg) -> SelectorValue {
-        auto lv = l(msg);
-        if (std::holds_alternative<std::monostate>(lv)) return std::monostate{};
-        for (const auto &item : items) {
-          if (selEQ(lv, item(msg))) return !negated;
-        }
-        return negated;
-      };
+      default: return left;
+    }
+  }
+
+  static void requireIdentifier(const Expression& expression) {
+    if (expression.kind != ExpressionKind::Identifier) {
+      throw InvalidSelectorException("expected a header or property identifier");
+    }
+  }
+
+  Expression parseIn(Expression left, bool negated) {
+    requireIdentifier(left);
+    consume(T::Left);
+    // Keep the existing C++ numeric IN form as an extension with homogeneous literal operands.
+    if (current.type != T::String) {
+      std::vector<Value> values;
+      do {
+        bool negative = accept(T::Minus);
+        if (!negative) accept(T::Plus);
+        values.push_back(parseNumber(consume(T::Number).text, negative));
+      } while (accept(T::Comma));
+      consume(T::Right);
+      return {[l = std::move(left.evaluate), values = std::move(values), negated](const Message& m) -> Value {
+        auto value = l(m);
+        if (isNull(value)) return {};
+        if (!isNumeric(value)) return false;
+        auto matches = [&](const Value& candidate) {
+          return truth(compareValues(value, candidate, T::Eq)) == SelectorTruth::True;
+        };
+        return std::any_of(values.begin(), values.end(), matches) != negated;
+      }, ExpressionKind::Conditional};
     }
 
-    if (check(TokenType::LIKE)) {
+    std::vector<std::string> values;
+    do {
+      values.push_back(consume(T::String).text);
+    } while (accept(T::Comma));
+    consume(T::Right);
+    return {[l = std::move(left.evaluate), values = std::move(values), negated](const Message& m) -> Value {
+      auto value = l(m);
+      if (isNull(value)) return {};
+      if (auto* text = std::get_if<std::string_view>(&value)) {
+        return (std::find(values.begin(), values.end(), *text) != values.end()) != negated;
+      }
+      return false;
+    }, ExpressionKind::Conditional};
+  }
+
+  Expression parseLike(Expression left, bool negated) {
+    requireIdentifier(left);
+    const auto pattern = consume(T::String).text;
+    int escape = -1;
+    if (accept(T::Escape)) {
+      auto text = consume(T::String).text;
+      size_t pos = 0;
+      escape = unicodeAt(text, pos);
+      if (escape < 0 || pos != text.size()) throw InvalidSelectorException("ESCAPE requires one character");
+    }
+    return {[l = std::move(left.evaluate), pattern = compilePattern(pattern, escape), negated](const Message& m) -> Value {
+      auto value = l(m);
+      if (isNull(value)) return {};
+      if (auto* text = std::get_if<std::string_view>(&value)) return matchPattern(*text, pattern) != negated;
+      return false;
+    }, ExpressionKind::Conditional};
+  }
+
+  Expression parseSum() { return parseArithmetic(&Parser::parseProduct, T::Plus, T::Minus); }
+  Expression parseProduct() { return parseArithmetic(&Parser::parseUnary, T::Multiply, T::Divide); }
+
+  Expression parseArithmetic(Expression (Parser::*operand)(), T first, T second) {
+    auto left = (this->*operand)();
+    while (current.type == first || current.type == second) {
+      const auto op = current.type;
       advance();
-      Token patTok = consume(TokenType::STRING, "pattern string");
-      std::string regex = likeToRegex(patTok.text);
-      return [l = left, regex = std::move(regex), negated](const Message &msg) -> SelectorValue {
-        auto lv = l(msg);
-        if (!std::holds_alternative<std::string>(lv)) return std::monostate{};
-        bool result = std::regex_match(std::get<std::string>(lv), std::regex(regex));
-        return negated ? !result : result;
-      };
+      auto right = (this->*operand)();
+      requireArithmetic(left.kind);
+      requireArithmetic(right.kind);
+      left = {[l = std::move(left.evaluate), r = std::move(right.evaluate), op](const Message& m) {
+        return calculate(l(m), r(m), op);
+      }, ExpressionKind::Numeric};
     }
-
-    if (negated) {
-      throw InvalidSelectorException("NOT must be followed by BETWEEN, IN, or LIKE");
-    }
-
-    // Relational operators
-    if (check(TokenType::EQ) || check(TokenType::NEQ) || check(TokenType::LT) || check(TokenType::LTE) ||
-        check(TokenType::GT) || check(TokenType::GTE)) {
-      TokenType op = _current.type;
-      advance();
-      auto right = parsePrimary();
-      return [l = left, r = right, op](const Message &msg) -> SelectorValue {
-        auto lv = l(msg);
-        auto rv = r(msg);
-        switch (op) {
-          case TokenType::EQ:  return selEQ(lv, rv);
-          case TokenType::NEQ: return !selEQ(lv, rv);
-          case TokenType::LT:  return selLT(lv, rv);
-          case TokenType::LTE: return selLTE(lv, rv);
-          case TokenType::GT:  return selGT(lv, rv);
-          case TokenType::GTE: return selGTE(lv, rv);
-          default:             return std::monostate{};
-        }
-      };
-    }
-
     return left;
   }
 
-  EvalFn parsePrimary() {
-    if (check(TokenType::LPAREN)) {
-      advance();
-      EvalFn expr = parseOr();
-      consume(TokenType::RPAREN, ")");
+  Expression parseUnary() {
+    const auto op = current.type;
+    if (op != T::Plus && op != T::Minus) return parsePrimary();
+    advance();
+    if (current.type == T::Number) return number(op == T::Minus);
+    auto expr = parseUnary();
+    requireArithmetic(expr.kind);
+    return {[eval = std::move(expr.evaluate), op](const Message& m) -> Value {
+      auto value = eval(m);
+      if (op == T::Minus) return calculate(int32_t{0}, value, op);
+      if (isNull(value) || isNumeric(value)) return value;
+      return Incompatible{};
+    }, ExpressionKind::Numeric};
+  }
+
+  Expression number(bool negative) {
+    auto value = parseNumber(consume(T::Number).text, negative);
+    return {[value](const Message&) { return value; }, ExpressionKind::Numeric};
+  }
+
+  Expression parsePrimary() {
+    if (accept(T::Left)) {
+      auto expr = parseOr();
+      consume(T::Right);
       return expr;
     }
-
-    if (check(TokenType::NULL_LIT)) {
-      advance();
-      return [](const Message &) -> SelectorValue { return std::monostate{}; };
+    if (accept(T::True)) return {[](const Message&) -> Value { return true; }, ExpressionKind::Conditional};
+    if (accept(T::False)) return {[](const Message&) -> Value { return false; }, ExpressionKind::Conditional};
+    if (current.type == T::Number) return number(false);
+    if (current.type == T::String) {
+      return {[text = consume(T::String).text](const Message&) -> Value { return std::string_view(text); },
+              ExpressionKind::String};
     }
-
-    if (check(TokenType::TRUE_LIT)) {
-      advance();
-      return [](const Message &) -> SelectorValue { return true; };
-    }
-
-    if (check(TokenType::FALSE_LIT)) {
-      advance();
-      return [](const Message &) -> SelectorValue { return false; };
-    }
-
-    if (check(TokenType::STRING)) {
-      std::string val = _current.text;
-      advance();
-      return [val](const Message &) -> SelectorValue { return val; };
-    }
-
-    if (check(TokenType::INT_LIT)) {
-      int64_t val = std::stoll(_current.text);
-      advance();
-      return [val](const Message &) -> SelectorValue { return val; };
-    }
-
-    if (check(TokenType::FLOAT_LIT)) {
-      double val = std::stod(_current.text);
-      advance();
-      return [val](const Message &) -> SelectorValue { return val; };
-    }
-
-    if (check(TokenType::IDENT)) {
-      std::string name = _current.text;
-      advance();
-      return [name](const Message &msg) -> SelectorValue { return extractProperty(msg, name); };
-    }
-
-    throw InvalidSelectorException("unexpected token '" + _current.text + "' in expression");
+    auto identifier = consume(T::Identifier).text;
+    if (auto accessor = header(identifier)) return {accessor, ExpressionKind::Identifier};
+    return {[name = std::move(identifier)](const Message& m) { return propertyValue(m, name); }, ExpressionKind::Identifier};
   }
 };
 
-// ============================================================
-// Selector implementation
-// ============================================================
+}  // namespace
 
 struct Selector::Impl {
-  EvalFn evalFn;
+  Eval evaluate;
 };
 
 Selector::Selector(std::unique_ptr<Impl> impl) : _impl(std::move(impl)) {}
 Selector::~Selector() = default;
 
-std::shared_ptr<Selector> Selector::parse(const std::string &expression) {
-  auto impl = std::make_unique<Impl>();
-  if (expression.empty()) {
-    impl->evalFn = [](const Message &) -> SelectorValue { return true; };
-  } else {
-    Parser parser(expression);
-    impl->evalFn = parser.parseExpression();
-  }
-  return std::shared_ptr<Selector>(new Selector(std::move(impl)));
+std::shared_ptr<Selector> Selector::parse(const std::string& expression) {
+  return std::shared_ptr<Selector>(new Selector(std::make_unique<Impl>(Impl{Parser(expression).compile()})));
 }
 
-bool Selector::matches(const Message &message) const {
-  auto v = _impl->evalFn(message);
-  return std::holds_alternative<bool>(v) && std::get<bool>(v);
+SelectorTruth Selector::evaluate(const Message& message) const {
+  return truth(_impl->evaluate(message));
+}
+
+bool Selector::matches(const Message& message) const {
+  return evaluate(message) == SelectorTruth::True;
 }
 
 }  // namespace tiny_mq

@@ -18,13 +18,14 @@ ObjectMessage::ObjectMessage(Poco::UUID uuid_, Reliability reliability_) {
 }
 
 ObjectMessage::ObjectMessage(Poco::UUID uuid_, BytesVector body_, std::string className_, Reliability reliability_)
-    : _body(std::move(body_)), _className(std::move(className_)) {
+    : _body(std::move(body_)), _className(std::move(className_)), _bodyPresent(true) {
   uuid = std::move(uuid_);
   reliability = reliability_;
 }
 
 void ObjectMessage::setBody(BytesVector serialized, std::string className) {
   _body = std::move(serialized);
+  _bodyPresent = true;
   _className = std::move(className);
 }
 
@@ -34,6 +35,7 @@ const std::string &ObjectMessage::className() const { return _className; }
 void ObjectMessage::clearData() {
   _body.clear();
   _className.clear();
+  _bodyPresent = false;
 }
 
 Poco::JSON::Object ObjectMessage::toJSON() const {
@@ -64,8 +66,7 @@ BytesVector ObjectMessage::dataAsBytes() const {
 }
 
 void ObjectMessage::setDataFromBytes(const BytesVector &bytes) {
-  _className.clear();
-  _body.clear();
+  clearData();
   if (bytes.size() < sizeof(Poco::UInt32)) return;
   size_t off = 0;
   Poco::UInt32 nameLen = 0;
@@ -74,6 +75,7 @@ void ObjectMessage::setDataFromBytes(const BytesVector &bytes) {
   _className.assign(reinterpret_cast<const char *>(bytes.data() + off), nameLen); off += nameLen;
   if (off < bytes.size()) {
     _body.assign(bytes.begin() + static_cast<ptrdiff_t>(off), bytes.end());
+    _bodyPresent = true;
   }
 }
 

@@ -79,6 +79,7 @@ python3 .claude/chain/openspec.py archive  <NN-slug>  # слияние дель�
 ## Возможности (по объектной модели, не по доработкам)
 
 - [connection](specs/connection/spec.md)
+- [jakarta-message-contract](specs/jakarta-message-contract/spec.md)
 - [message-redelivery](specs/message-redelivery/spec.md)
 
 ## Поставка версиями

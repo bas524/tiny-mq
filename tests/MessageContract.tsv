@@ -1,0 +1,20 @@
+# Shared typed fixture. Each runner checks expected values independently.
+destination	uri	queue://orders
+replyTo	uri	queue://replies
+correlation	string	corr-xyz
+messageType	string	OrderEvent
+messageIdPrefix	string	ID:
+expiration	long	4102444800123
+deliveryTime	long	1700000000500
+priority	int	7
+deliveryMode	int	2
+firstDeliveryCount	int	1
+repeatDeliveryCount	int	2
+groupID	string	orders
+groupSeq	int	-7
+missing	name	missingProperty
+nullProperty	name	explicitNull
+binaryCorrelation	bytes	00ff80
+text	string	payload
+# Produced by 9f7983c, Message::toBytes, with a fixed UUID and tagged properties.
+storageV02	bytes	02000000000000000000112233445566778899aabbccddeeff017b68e5cf8b0100003faaf4cf8b010000f469e5cf8b0100000700000003000000010c00000049443a637573746f6d2d34320f00000071756575653a2f2f7265706c69657308000000636f72722d78797a0a0000004f726465724576656e74500000007b2262223a7b2274797065223a2242595445222c2276616c7565223a2d31327d2c22626967223a7b2274797065223a224c4f4e47222c2276616c7565223a393030373139393235343734303939337d7d7061796c6f6164
