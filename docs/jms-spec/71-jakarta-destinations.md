@@ -2,7 +2,7 @@
 
 Класс K1. Предложение к обсуждению и критике; критерии ниже описывают будущую реализацию.
 
-Version: 0.5
+Version: 0.6
 Review Date: 2026-11-16
 Examples: `DestinationContractTest.SelectiveQueueClaim` в критериях приёмки.
 Machine Readability: Markdown, ID требований, Scenario, Test и таблица Entity inventory.
@@ -118,6 +118,8 @@ SDD 71 поставляет локальное C++ ядро. [SDD 74](74-jakarta
 | E30 | storage-field | `_storageId` | Идентификатор записи доставки внутри брокера |
 | E31 | method | `ConcurrentLinearStorage::appendDelivery` | Синхронная запись доставки через общий механизм хранилища |
 | E32 | method | `ConcurrentLinearStorage::removeDelivery` | Синхронное подтверждение доставки под той же блокировкой |
+| E33 | type | `DeliveryState::Waiter` | Внутреннее ожидание с селектором и адресным пробуждением |
+| E34 | type | `ScheduledMessageProbe` | Тестовый объект для проверки освобождения отложенной копии |
 
 ## Acceptance Criteria
 
@@ -239,7 +241,10 @@ ID: `REQ-71-7`
 Набор `DestinationContractTest` в `tests/`. Каждый тест в коде и логе указывает свой ID требования.
 C++ сценарии выполняются GoogleTest. Для Java и интеграционных сценариев сохраняется тот же
 устойчивый ID `Suite.Case` в коде теста под `tests/` и в отчёте runner. Матрица сценария
-приводит в отчёте каждый вход и исход отдельной записью, включая негативные ветви.
+приводит в отчёте каждый вход и исход отдельной записью, включая негативные ветви. Исторический читатель для
+`DurableIdentityMatrix` запускается на отдельной копии данных из новой сборки.
+Эталон читателя — публичный main до SDD 71 с дополнительным тестовым входом,
+который открывает прежнюю подписку через C++ API.
 
 - `DestinationContractTest.SelectiveQueueClaim` — REQ-71-1.
 - `DestinationContractTest.SubscriptionFanout` — REQ-71-2.
