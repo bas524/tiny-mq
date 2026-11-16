@@ -20,7 +20,7 @@ env:
 jobs:
   broker:
     name: Broker hot paths
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
@@ -116,6 +116,7 @@ jobs:
           {
             printf 'Baseline %s\n' "$BASE_SHA"
             printf 'Candidate %s\n' "$(git rev-parse HEAD)"
+            printf 'Runner image %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
             if [ -f "$RUNNER_TEMP/perf-legacy-base" ]; then
               echo 'The pre-SDD 71 baseline receives persistent messages without removing their stored records.'
             fi
