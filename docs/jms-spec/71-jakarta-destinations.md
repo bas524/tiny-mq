@@ -2,7 +2,7 @@
 
 Класс K1. Предложение к обсуждению и критике; критерии ниже описывают будущую реализацию.
 
-Version: 0.3
+Version: 0.4
 Review Date: 2026-11-16
 Examples: `DestinationContractTest.SelectiveQueueClaim` в критериях приёмки.
 Machine Readability: Markdown, ID требований, Scenario, Test и таблица Entity inventory.
@@ -86,10 +86,10 @@ SDD 71 поставляет локальное C++ ядро. [SDD 74](74-jakarta
 
 | ID | Kind | Name | Note |
 |---|---|---|---|
-| E1 | type | `DestinationIdentity` | SDD 71 |
+| E1 | type | `Destination` | Ссылка и тип назначения |
 | E2 | type | `SubscriptionIdentity` | SDD 71 |
 | E3 | type | `SubscriptionKind` | SDD 71 |
-| E4 | type | `DeliveryClaim` | SDD 71 |
+| E4 | method | `DeliveryState::claim` | Атомарное извлечение подходящей записи |
 | E5 | type | `QueueBrowser` | SDD 71 |
 | E6 | type | `TemporaryDestination` | SDD 71 |
 | E7 | method | `Session::unsubscribe` | SDD 71 |
@@ -105,6 +105,17 @@ SDD 71 поставляет локальное C++ ядро. [SDD 74](74-jakarta
 | E17 | method | `Session::createTemporaryQueue` | Временная очередь соединения |
 | E18 | method | `Session::createTemporaryTopic` | Временный топик соединения |
 | E19 | test-suite | `NfrGateTest` | Измерение горячих путей |
+| E20 | method | `Session::createConsumer` с noLocal | Unshared nondurable |
+| E21 | method | `Session::createDurableConsumer` с noLocal | Стандартная unshared durable |
+| E22 | method | `TemporaryDestination::remove` | Явное удаление владельцем |
+| E23 | method | `QueueBrowser::enumerate` | Фиксация снимка |
+| E24 | type | `DeliveryState` | Готовые записи, ожидающие получатели и pending claims |
+| E25 | type | `DestinationMutex` | Внутренняя синхронизация назначения |
+| E26 | type | `Destination::Subscription` | Состояние доставки копий подписки |
+| E27 | type | `Exchange::SubscriptionDefinition` | Настройки постоянной подписки |
+| E28 | type | `Exchange::RegisteredSubscription` | Запись реестра и состояние подписки |
+| E29 | storage-field | `generation` | Поколение durable-записи при замене |
+| E30 | storage-field | `_storageId` | Идентификатор записи доставки внутри брокера |
 
 ## Acceptance Criteria
 
