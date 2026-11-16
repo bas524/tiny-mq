@@ -75,12 +75,12 @@ flowchart LR
 ## 3. От установки ObjectMessage до повторной доставки
 
 1. `setObject()` сериализует объект сразу. Последующая мутация исходного объекта
-   не меняет эти байты. [TinyObjectMessage.java](../../java/src/main/java/tinymq/jms/TinyObjectMessage.java#L27)
+   не меняет эти байты. [TinyObjectMessage.java](../../clients/java/src/main/java/tinymq/jms/TinyObjectMessage.java#L27)
 2. `snapshotForSend()` создаёт отдельный конверт с подготовленными заголовками,
-   свойствами и телом. [JavaMessageAdapter.java](../../java/src/main/java/tinymq/jms/JavaMessageAdapter.java#L21)
+   свойствами и телом. [JavaMessageAdapter.java](../../clients/java/src/main/java/tinymq/jms/JavaMessageAdapter.java#L21)
 3. При каждой доставке `forDelivery()` восстанавливает экземпляр из конверта и
    получает признак и счётчик доставки отдельными аргументами.
-   [JavaMessageAdapter.java](../../java/src/main/java/tinymq/jms/JavaMessageAdapter.java#L45)
+   [JavaMessageAdapter.java](../../clients/java/src/main/java/tinymq/jms/JavaMessageAdapter.java#L45)
 
 Точки проверки — `REQ-70-1` и `REQ-70-2`. [Java-прогон](../../handoffs/current/70/logs/conformance-r3/java.log)
 

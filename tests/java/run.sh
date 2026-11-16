@@ -14,5 +14,5 @@ classes=$(mktemp -d)
 trap 'rm -rf "$classes"' EXIT
 "$java" -version
 "$javac" --release 11 -classpath "$api" -d "$classes" \
-    "$project"/java/src/main/java/tinymq/jms/*.java "$project"/tests/java/MessageContractTest.java
+    "$project"/clients/java/src/main/java/tinymq/jms/*.java "$project"/tests/java/MessageContractTest.java
 "$java" -ea -cp "$classes:$api" MessageContractTest "$project/tests/MessageContract.tsv"

@@ -69,55 +69,8 @@ set(EXTERNAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external")
 add_subdirectory(external)
 include_directories(external/concurrent_queue)
 include_directories(external/btree/include)
-add_executable(tiny_mq
-               main.cpp
-               Exchange.cpp
-               Exchange.h
-               DestinationType.h
-               Destination.cpp
-               Destination.h
-               Producer.cpp
-               Producer.h
-               Consumer.cpp
-               Consumer.h
-               Message.cpp
-               Message.h
-               LogTracer.cpp
-               LogTracer.h
-               DestinationHash.cpp
-               DestinationHash.h
-               MessageProperty.h
-               MessageProperty.cpp
-               TextMessage.cpp
-               TextMessage.h
-               BytesMessage.cpp
-               BytesMessage.h
-               PocoAnyVisitor.h
-               MapMessage.cpp
-               MapMessage.h
-               StreamMessage.cpp
-               StreamMessage.h
-               ObjectMessage.cpp
-               ObjectMessage.h
-               Session.cpp
-               Session.h
-               Connection.cpp
-               Connection.h
-               ConnectionFactory.cpp
-               ConnectionFactory.h
-               HashHelper.h
-               LinearStorage.cpp
-               LinearStorage.h
-               ConcurrentLinearStorage.cpp
-               ConcurrentLinearStorage.h
-               TransactionBuffer.cpp
-               TransactionBuffer.h
-               DeliveryScheduler.cpp
-               DeliveryScheduler.h
-               Selector.cpp
-               Selector.h
-               RedeliveryPolicy.h
-               )
+add_executable(tiny_mq)
+add_subdirectory(server)
 
 set(POCO_LIBS
     Poco::Foundation
@@ -208,6 +161,6 @@ else ()
 endif ()
 
 add_custom_command(TARGET tiny_mq POST_BUILD
-                   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/configurations/tiny_mq.properties ${CMAKE_CURRENT_BINARY_DIR}/tiny_mq.properties
+                   COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/server/configurations/tiny_mq.properties ${CMAKE_CURRENT_BINARY_DIR}/tiny_mq.properties
                    COMMENT "Copy tiny_mq.properties to ${CMAKE_CURRENT_BINARY_DIR}"
                    )
