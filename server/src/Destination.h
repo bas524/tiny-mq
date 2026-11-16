@@ -1,59 +1,83 @@
 #ifndef TINY_MQ__DESTINATION_H_
 #define TINY_MQ__DESTINATION_H_
 
-#include <memory>
+#include <array>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <list>
+#include <map>
+#include <vector>
 #include <Poco/Path.h>
-#include <Poco/Logger.h>
-#include "Producer.h"
 #include "Consumer.h"
-#include "Selector.h"
-#include "DestinationType.h"
-#include "HashHelper.h"
-#include "ConcurrentQueueHeader.h"
-#include "ConcurrentLinearStorage.h"
-#include "TransactionBuffer.h"
 #include "DeliveryScheduler.h"
+#include "DestinationType.h"
+#include "Producer.h"
 #include "RedeliveryPolicy.h"
+#include "SubscriptionRegistry.h"
 
 namespace tiny_mq {
+class Connection;
+class Exchange;
+class QueueBrowser;
 class Session;
-class Destination {
+class TemporaryDestination;
+class TransactionBuffer;
 
-  // Per-subscription state for a named durable topic subscriber.
-  struct DurableSubState {
-    std::string name;
-    Poco::Path path;
-    std::shared_ptr<linear_storage::ConcurrentLinearStorage> storage;
-    Poco::UUID activeConsumerUuid;  // null UUID = subscriber is currently offline
-    std::shared_ptr<Selector> selector;  // nullptr = match all
+// Cheap uncontended locking for the ready set and the publication target list.
+class DestinationMutex {
+ public:
+  bool try_lock() noexcept {
+    uint8_t unlocked = 0;
+    return _state.compare_exchange_strong(unlocked, 1, std::memory_order_acquire, std::memory_order_relaxed);
+  }
+
+  void lock() noexcept {
+    if (try_lock()) return;
+    while (_state.exchange(2, std::memory_order_acquire) != 0) _state.wait(2, std::memory_order_relaxed);
+  }
+
+  void unlock() noexcept {
+    if (_state.exchange(0, std::memory_order_release) == 2) _state.notify_one();
+  }
+
+ private:
+  std::atomic<uint8_t> _state{0};  // unlocked, locked, locked with contention
+};
+
+// The ready set belongs to an individual queue or topic subscription.
+class DeliveryState {
+ public:
+  void enqueue(Message::Ptr message);
+  Message::Ptr claim(const Selector* selector, int64_t& timeout);
+  std::vector<Message::Ptr> snapshot(const Selector* selector);
+  void close();
+  bool isClosed() const { return _closed.load(std::memory_order_acquire); }
+
+  // Only used by durable subscriptions. Consumers hold these claims for their
+  // session even after they detach from the subscription.
+  std::atomic_size_t pending{0};
+  std::mutex storageMutex;
+  bool retired{false};  // guarded by storageMutex
+
+ private:
+  struct Waiter {
+    explicit Waiter(const Selector* filter) : selector(filter) {}
+    const Selector* selector;
+    std::condition_variable_any condition;
+    bool signalled{false};
   };
 
-  destination::Type _type;
-  std::string _name;
-  Poco::Path _path;
-  std::atomic_int64_t _messageCounter{0};
-  phmap::parallel_node_hash_map<Poco::UUID, Consumer::Ptr> _consumers;
-  phmap::parallel_node_hash_map<Poco::UUID, Producer::Ptr> _producers;
-  std::shared_ptr<QueueT> _queue;
-  Consumer::Ptr _defaultConsumer;
-  std::reference_wrapper<Poco::Logger> _logger;
-  std::string _uri;
-  size_t _hash;
-  std::shared_ptr<linear_storage::ConcurrentLinearStorage> _storage;
-  std::shared_ptr<TransactionBuffer> _transactionBuffer;
-  // JMS 2.0 § 7.8 delivery delay (spec 13): one scheduler per destination — see
-  // DeliveryScheduler for the isolation rationale. Lazily starts its worker
-  // thread only once a delayed message is actually scheduled.
-  std::unique_ptr<DeliveryScheduler> _scheduler;
+  Message::Ptr take(const Selector* selector);
 
-  // Durable subscription registry (topic-family only)
-  phmap::parallel_node_hash_map<std::string, DurableSubState> _durableSubs;
-  // Reverse lookup: consumer UUID -> subscription name (durable consumers only)
-  phmap::parallel_node_hash_map<Poco::UUID, std::string> _consumerToSubName;
-  // Spec 24: redelivery/DLQ policy. Applies to both destination families; unit
-  // of the redelivery limit/DLQ is the consumer's own queue (Consumer::redeliver).
-  RedeliveryPolicy _redeliveryPolicy;
+  DestinationMutex _mutex;
+  std::array<std::deque<Message::Ptr>, QueueT::kBands> _bands;
+  unsigned _nonEmpty{0};
+  std::atomic_bool _closed{false};
+  std::vector<std::shared_ptr<Waiter>> _waiters;
+};
 
+class Destination : public std::enable_shared_from_this<Destination> {
  public:
   using Ptr = std::shared_ptr<Destination>;
   virtual ~Destination();
@@ -66,93 +90,93 @@ class Destination {
   const std::string &uri() const;
   size_t hash() const;
 
-  // Spec 24: set/get the redelivery/DLQ policy. Applies to both destination
-  // families. Throws Poco::InvalidArgumentException (policy left unchanged)
-  // if policy.deadLetterQueue is non-null and either equals this destination
-  // or is not queue-family. Call before consumers start, or from the
-  // destination-affinity thread — concurrent policy change during an
-  // in-flight recover()/rollback() is unsupported/untested.
+  // Configure before starting delivery, as with the original redelivery API.
   void setRedeliveryPolicy(RedeliveryPolicy policy);
   RedeliveryPolicy redeliveryPolicy() const;
 
  private:
-  Destination(destination::Type type, std::string name, Poco::Path path);
-  Producer::Ptr createProducer(Session &session);
-  void deleteProducer(const Poco::UUID &id);
-  Consumer::Ptr createConsumer(Session &session, std::shared_ptr<Selector> selector = nullptr);
-  void deleteConsumer(const Poco::UUID &id);
-  Consumer::Ptr createDefaultConsumer(Session &session);
+  using Storage = linear_storage::ConcurrentLinearStorage;
 
-  // Create or resume a named durable subscription (topic-family only).
-  // A durable subscription is identified by (clientID, subscriptionName) per
-  // JMS 2.0 § 6.3, so the same name under different clientIDs is independent.
-  // Throws Poco::RuntimeException if called on a queue, or if the subscription
-  // already has an active consumer attached.
-  Consumer::Ptr createDurableConsumer(Session &session, const std::string &clientID,
-                                      const std::string &subscriptionName,
-                                      std::shared_ptr<Selector> selector = nullptr);
+  struct Subscription {
+    std::shared_ptr<DeliveryState> deliveries = std::make_shared<DeliveryState>();
+    std::shared_ptr<Selector> selector;
+    std::shared_ptr<Storage> storage;
+    Poco::Path path;
+    Poco::UUID connectionId;
+    std::string clientId;
+    bool noLocal{false};
+    bool legacy{false};
+    size_t active{0};  // guarded by the destination mutex
+    std::weak_ptr<Consumer> legacyConsumer;
+    std::optional<SubscriptionIdentity> sharedIdentity;
 
-  // Permanently remove a named durable subscription.  The active consumer (if
-  // any) is disconnected first and all buffered messages are discarded.
-  void deleteSubscription(const std::string &clientID, const std::string &subscriptionName);
+  };
 
-  // Composite registry key for a durable subscription. Empty clientID keeps the
-  // legacy (name-only) key/layout so pre-clientID subscriptions stay addressable.
-  static std::string durableKey(const std::string &clientID, const std::string &subscriptionName);
+  Destination(Exchange& exchange, destination::Type type, std::string name, Poco::Path path,
+              Poco::UUID owner = {});
+  void checkBroker(const Connection& connection) const;
+  void checkOwner(const Poco::UUID& owner) const;
+  void checkLive() const;
 
-  void save(const Producer &producer, const Message &message);
+  Consumer::Ptr createConsumer(Session& session, std::shared_ptr<Selector> selector = {}, bool noLocal = false);
+  Consumer::Ptr createDurableConsumer(Session& session, const std::string& clientId,
+                                      const std::string& name, std::shared_ptr<Selector> selector);
+  void deleteSubscription(const std::string& clientId, const std::string& name);
+  Consumer::Ptr attach(Session& session, const std::shared_ptr<Subscription>& subscription, bool requireActive = false);
+  void detach(Consumer& consumer);
+  void retire(const std::shared_ptr<Subscription>& subscription, bool removeFiles);
+  void shutdown();
+  void deleteTemporary(const Poco::UUID& owner);
 
-  // Deliver already-committed messages directly to consumer queues (no re-persistence).
-  // Takes ownership of the message ptr — moves it into the queue for queue-family
-  // destinations, copies for topic-family (one copy per subscriber). Routes through
-  // the delivery-delay scheduler when the message's deliveryTime is still pending.
-  void deliverCommitted(Message::Ptr message);
-
-  // Enqueue msg onto *queue now if its deliveryTime has elapsed (or is unset —
-  // the common case), otherwise arm the per-destination DeliveryScheduler so it
-  // becomes visible exactly when due (JMS 2.0 § 7.8, spec 13).
-  void enqueueOrSchedule(std::shared_ptr<QueueT> queue, Message::Ptr msg);
-
-  // Patch the persisted deliveryTime for a buffered-but-not-yet-committed
-  // transactional message — the delay clock starts at commit, not send.
-  void patchPendingDeliveryTime(const Poco::UUID &messageId, int64_t deliveryTime);
-
-  // Replay non-deleted records from a storage instance into a queue, arming the
-  // delivery scheduler for any record whose delay has not yet elapsed.
-  static void replayFromStorage(std::shared_ptr<QueueT> queue,
-                                linear_storage::ConcurrentLinearStorage &storage,
-                                DeliveryScheduler &scheduler);
-
-  // Replay non-deleted messages from the destination's own storage (restart path).
-  void replayStoredMessages(std::shared_ptr<QueueT> queue) const;
-
-  // Serialise message to [type-byte][toBytes()] and append to an offline durable
-  // sub's storage.  Selector matching must be performed by the caller.
-  static void persistToOfflineSub(DurableSubState &sub, const Message &message);
-
-  // Spec 24: dead-letter a message that exceeded its redelivery policy's
-  // maxRedeliveries. If _redeliveryPolicy.deadLetterQueue is set, a copy
-  // (preserving body/headers, final deliveryCount/redelivered, with
-  // JMSXDeadLetterReason=reason and deliveryTime reset to 0) is appended to
-  // its storage — persistent iff message is persistent. If unset, the
-  // message is dropped with a warning log. Must not throw (ADR-0006): the
-  // caller (Consumer::redeliver, reachable from ~Consumer()) requires this;
-  // any failure while writing the DLQ copy is caught and logged as an error.
-  // Does NOT touch the origin record — the caller removes it from its own
-  // storage.
+  void save(const Producer& producer, const Message& message);
+  void deliverCommitted(const Producer& producer, Message::Ptr message);
+  void publish(const Producer& producer, const Message& message);
+  void deliver(const Subscription& subscription, Message::Ptr message);
+  static void persist(Storage& storage, Message& message);
+  Poco::UUID storageKey(int64_t sequence) const;
+  static void replay(const std::shared_ptr<DeliveryState>& queue, Storage& storage, DeliveryScheduler& scheduler);
+  void enqueueOrSchedule(const std::shared_ptr<DeliveryState>& queue, Message::Ptr message);
   void deadLetter(Message::Ptr message, std::string reason) noexcept;
 
-  // Transaction buffer access
-  TransactionBuffer::Ptr getTransactionBuffer() const;
+  Exchange& _exchange;
+  destination::Type _type;
+  std::string _name;
+  Poco::Path _path;
+  Poco::UUID _owner;
+  std::string _uri;
+  size_t _hash;
+  std::reference_wrapper<Poco::Logger> _logger;
+  std::atomic_int64_t _messageCounter{0};
+  std::array<char, 16> _storageEpoch{};
+  std::atomic_bool _deleted{false};
 
-  // Transaction operations
-  void commitTransaction(const std::string& transactionId);
-  void rollbackTransaction(const std::string& transactionId);
+  std::shared_ptr<DeliveryState> _queue;
+  std::shared_ptr<Storage> _storage;
+  std::unique_ptr<TransactionBuffer> _transactionBuffer;
+  DeliveryScheduler _scheduler;
+  DestinationMutex _mutex;
+  std::list<std::shared_ptr<Subscription>> _subscriptions;
+  size_t _activeConsumers{0};
+  std::mutex _legacyMutex;
+  std::map<std::pair<std::string, std::string>, std::shared_ptr<Subscription>> _legacy;
+  RedeliveryPolicy _redeliveryPolicy;
 
   friend class Exchange;
   friend class Producer;
   friend class Consumer;
   friend class Session;
+  friend class QueueBrowser;
+  friend class TemporaryDestination;
+};
+
+class TemporaryDestination final : public Destination {
+ public:
+  using Ptr = std::shared_ptr<TemporaryDestination>;
+  void remove(Connection& connection);
+
+ private:
+  using Destination::Destination;
+  friend class Exchange;
 };
 }  // namespace tiny_mq
 #endif  // TINY_MQ__DESTINATION_H_

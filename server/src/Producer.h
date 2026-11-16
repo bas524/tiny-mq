@@ -5,11 +5,11 @@
 #ifndef TINY_MQ__PRODUCER_H_
 #define TINY_MQ__PRODUCER_H_
 
+#include <deque>
 #include <memory>
 #include <optional>
 #include <Poco/Logger.h>
 #include "Message.h"
-#include "BlockingConcurrentQueueHeader.h"
 
 namespace tiny_mq {
 class Destination;
@@ -27,11 +27,11 @@ struct SendOptions {
 
 class Producer {
   Poco::UUID _uuid;
-  std::reference_wrapper<Destination> _destination;
-  std::unique_ptr<QueueT::producer_token_t> _token;
+  std::shared_ptr<Destination> _destination;
   std::reference_wrapper<Poco::Logger> _logger;
-  std::reference_wrapper<Session> _session;
-  std::shared_ptr<QueueT> _transactQueue;
+  Session* _session;
+  std::unique_ptr<std::deque<Message::Ptr>> _transactQueue;
+  bool _closed{false};
   bool _disableMessageID{false};
   bool _disableMessageTimestamp{false};
   // Set only via setDefault(). When unset, plain send() preserves the message's
@@ -58,11 +58,8 @@ class Producer {
   bool isDisableMessageTimestamp() const;
 
  private:
-  explicit Producer(Destination &destination,
-                    Session &session,
-                    const Poco::UUID &uuid,
-                    std::unique_ptr<QueueT::producer_token_t> token);
-  const QueueT::producer_token_t &token() const;
+  Producer(Destination& destination, Session& session);
+  void ensureOpen() const;
   // Apply per-send options to the message (deliveryMode/priority/expiration/deliveryTime).
   // For a transactional send, the delay clock starts at commit, not send (JMS 2.0 §7.8,
   // spec 13): deliveryTime is left 0 and the requested delay is stashed on the message
@@ -70,10 +67,9 @@ class Producer {
   static void applyOptions(Message &message, const SendOptions &opts, bool transactional);
   // Fill provider headers (messageId/timestamp) and hand off to the destination.
   void dispatch(const Message &message);
+  void prepareCommit(int64_t now);
   void commit(const std::string& transactionId);
   void rollback(const std::string& transactionId);
-  QueueT &transactQueue() const;
-  Destination &destination() const;
 
   friend class Destination;
   friend class Consumer;

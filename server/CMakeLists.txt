@@ -5,6 +5,9 @@ target_sources(tiny_mq PRIVATE
   src/DestinationType.h
   src/Destination.cpp
   src/Destination.h
+  src/QueueBrowser.cpp
+  src/QueueBrowser.h
+  src/SubscriptionRegistry.h
   src/Producer.cpp
   src/Producer.h
   src/Consumer.cpp

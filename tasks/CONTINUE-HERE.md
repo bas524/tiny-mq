@@ -1,14 +1,14 @@
 # Следующий шаг tiny-mq
 
-Класс K2. Обновлено 2026-11-15.
+Класс K2. Обновлено 2026-11-16.
 
 1. Проверить редакцию [INT-01](../requirements/intents/INT-01-jakarta-messaging.md) и профиль выпуска.
 2. [SDD 70](../docs/jms-spec/70-jakarta-message-contract.md) принята на R1.
    Действующий контракт сообщений описан в [OpenSpec](../openspec/specs/jakarta-message-contract/spec.md).
-3. Следующий шаг по [зависимостям INT-01](../requirements/intents/INT-01-jakarta-messaging.md#декомпозиция) —
-   подготовить [SDD 71](../docs/jms-spec/71-jakarta-destinations.md).
-   До реализации сверить требования к конкурирующим получателям с [потоковой моделью сессии](../arch/0005-session-threading-model.md).
-4. При подготовке 72 воспроизвести расхождение send/commit timing из
+3. [SDD 71](../docs/jms-spec/71-jakarta-destinations.md) принята на R1.
+   Атомарная выборка и владение закреплены в [ADR-0009](../arch/0009-destination-claim-and-ownership.md).
+4. Следующий шаг — [SDD 72](../docs/jms-spec/72-jakarta-delivery.md).
+   При подготовке воспроизвести расхождение send/commit timing из
    [аудита](../docs/reviews/2026-11-15-jakarta-baseline.md#проверенные-расхождения).
 5. Для [SDD 78](../docs/jms-spec/78-jakarta-high-availability.md) и
    [SDD 77](../docs/jms-spec/77-jakarta-conformance-release.md) определить испытательные нагрузки,

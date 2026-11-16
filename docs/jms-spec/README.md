@@ -4,20 +4,20 @@
 Нормативная редакция — [Jakarta Messaging 3.1 Final Release](https://jakarta.ee/specifications/messaging/3.1/),
 включая [текст](https://jakarta.ee/specifications/messaging/3.1/jakarta-messaging-spec-3.1.html)
 и [Javadoc 3.1](https://jakarta.ee/specifications/platform/10/apidocs/jakarta/jms/package-summary.html).
-SDD 70 принята. SDD 71–78 описывают оставшийся объём. Текущее поведение проверяется по исходникам,
+SDD 70 и 71 приняты. SDD 72–78 описывают оставшийся объём. Текущее поведение проверяется по исходникам,
 [базовому аудиту](../reviews/2026-11-15-jakarta-baseline.md) и [OpenSpec](../../openspec/README.md).
 
 ## Карта покрытия
 
 | Jakarta Messaging 3.1 | Обязательство tiny-mq | SDD и состояние начальной реализации |
 |---|---|---|
-| 1–2 · поддержка Java SE, API, домены, потоки и request/reply | Classic, simplified и legacy API, обе модели доставки, потоковые гарантии | [71](71-jakarta-destinations.md), [72](72-jakarta-delivery.md), [74](74-jakarta-java-se-provider.md). In-process частично, Java отсутствует. |
+| 1–2 · поддержка Java SE, API, домены, потоки и request/reply | Classic, simplified и legacy API, обе модели доставки, потоковые гарантии | [71](71-jakarta-destinations.md), [72](72-jakarta-delivery.md), [74](74-jakarta-java-se-provider.md). Локальный C++ request/reply проверен по SDD 71. Java-провайдер запланирован в SDD 74. |
 | 3 · тело, заголовки, свойства и selector | Шесть тел, преобразования, конверт на границах, стандартная грамматика, сторонние сообщения | [70](70-jakarta-message-contract.md), [72](72-jakarta-delivery.md), [74](74-jakarta-java-se-provider.md). Локальный контракт сообщений C++ и Java, включая селекторы C++, принят по SDD 70. |
-| 4 · PTP и pub/sub | Конкурирующая доставка, четыре вида подписок, temporary, browse и requestors | [71](71-jakarta-destinations.md). Очередь и топик есть, расширенные сценарии частично или отсутствуют. |
+| 4 · PTP и pub/sub | Конкурирующая доставка, четыре вида подписок, temporary, browse и requestors | [71](71-jakarta-destinations.md). В локальном C++ реализованы конкурирующая выборка, четыре вида подписок, временные назначения, просмотр и request/reply. |
 | 5 · administered objects | Factory и Destination через JNDI, сериализация, конфигурация | [74](74-jakarta-java-se-provider.md). Java/JNDI отсутствуют. |
 | 6 · connection, session, порядок, ack, tx | Метаданные, auth, threading, close, recover, атомарность, отдельная XA модель | [72](72-jakarta-delivery.md), [73](73-jakarta-broker-transport.md), [74](74-jakarta-java-se-provider.md), [75](75-jakarta-xa-recovery.md). In-process частично. |
 | 7 · send | Sync/async, приоритет, TTL, delivery delay, fluent API и заголовки | [70](70-jakarta-message-contract.md), [72](72-jakarta-delivery.md), [74](74-jakarta-java-se-provider.md). Sync C++ есть; async отсутствует; транзакционная задержка расходится с §7.9. |
-| 8 · receive | Selector, delivery gate, timeout, nonblocking, receiveBody, listener, close | [71](71-jakarta-destinations.md), [72](72-jakarta-delivery.md), [74](74-jakarta-java-se-provider.md). Базовый C++ receive есть. |
+| 8 · receive | Selector, delivery gate, timeout, nonblocking, receiveBody, listener, close | [71](71-jakarta-destinations.md), [72](72-jakarta-delivery.md), [74](74-jakarta-java-se-provider.md). В C++ проверена выборка по селекторам при конкуренции. Режимы доставки и Java API описаны в SDD 72 и 74. |
 | 9–10 · надёжность, наследование и ошибки | Профили delivery guarantees, запрет чужих domain методов, checked/runtime ошибки | [72](72-jakarta-delivery.md), [74](74-jakarta-java-se-provider.md), [77](77-jakarta-conformance-release.md). Отдельные C++ гарантии, Java отсутствует. |
 | 11 · application server, XA | Опциональные для standalone возможности включены в полный профиль tiny-mq | [75](75-jakarta-xa-recovery.md), [76](76-jakarta-ee-integration.md). Отсутствуют. |
 | 12 · Jakarta EE | Ограничения web/EJB, JTA и контейнерный JMSContext | [76](76-jakarta-ee-integration.md), [77](77-jakarta-conformance-release.md). Отсутствуют. |
@@ -46,7 +46,7 @@ correlation ID и административное переопределени�
 | SDD | Статус |
 |---|---|
 | [70](70-jakarta-message-contract.md) | ✅ done. Реализован локальный контракт сообщений. `MessageContractTest.CrossLanguageEnvelope`. [Бриф приёмки](../reviews/70-jakarta-message-contract.brief.md) |
-| [71](71-jakarta-destinations.md) | drafted |
+| [71](71-jakarta-destinations.md) | ✅ done (очереди, подписки, browse и временные назначения. `DestinationContractTest`). [Бриф приёмки](../reviews/71-jakarta-destinations.brief.md) |
 | [72](72-jakarta-delivery.md) | drafted |
 | [73](73-jakarta-broker-transport.md) | drafted |
 | [74](74-jakarta-java-se-provider.md) | drafted |

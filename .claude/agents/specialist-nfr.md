@@ -10,8 +10,8 @@ model: deepseek-v4-pro
 ## Процедура
 
 1. Определи, тронут ли **горячий путь**: `Destination.*, DeliveryScheduler.*, Producer.*, Consumer.*, Session.*, Message.*, MessageProperty.*, Selector.*, LinearStorage.*, ConcurrentLinearStorage.*, TransactionBuffer.*; сетевой data plane после появления`. Если нет — `status: approved` с пометкой N/A.
-2. Запусти навык **`nfr-gate`**: сборка в конфигурации поставки, замеры `./cmake-build-releasewithdebuginfo/tiny_mq --gbench --benchmark_min_time=1.2s --benchmark_repetitions=9`, сравнение
-   с эталоном `benchmarks/baseline.md; основная ветка main в соседней рабочей копии` по `медиане CPU time/op по 9 повторам, ABBA на одной машине`.
+2. Запусти навык **`nfr-gate`**. Сравни релизные сборки основы и кандидата
+   по медиане CPU time/op за девять повторов ABBA на одном раннере.
 3. Если замера на затронутый путь нет, **потребуй добавить** его: иначе изменение
    не наблюдаемо, и вердикт — `rejected`.
 4. **Вердикт:**
@@ -22,6 +22,7 @@ model: deepseek-v4-pro
 ## Твой прогон, а не чужие числа (Стандарт 15)
 
 Числа для вердикта берутся из **твоего** прогона, сохранённого в `handoffs/current/<spec>/logs/`.
+Для GitHub Actions свидетельство включает исходные замеры job и твой независимый пересчёт.
 Цифра, переписанная из отчёта агента-автора, проверкой не является. Оценка по диффу — тоже не проверка:
 вывод «горячий путь не задет» расходится с замером чаще, чем кажется. Мерь.
 

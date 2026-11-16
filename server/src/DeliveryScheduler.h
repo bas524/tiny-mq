@@ -10,10 +10,13 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <variant>
 #include <Poco/Logger.h>
 #include "Message.h"
 
 namespace tiny_mq {
+
+class DeliveryState;
 
 // Holds messages whose jmsHeaders.deliveryTime is still in the future, keeping them
 // out of the visible QueueT until due. One instance per Destination (not a single
@@ -43,11 +46,13 @@ class DeliveryScheduler {
   // Enqueue msg onto *queue, immediately if its deliveryTime has already elapsed
   // (or is unset — the common case), otherwise arm/refresh the timer so it becomes
   // visible exactly when due.
+  void enqueueOrSchedule(std::shared_ptr<DeliveryState> queue, Message::Ptr msg);
   void enqueueOrSchedule(std::shared_ptr<QueueT> queue, Message::Ptr msg);
 
   // Idempotent explicit teardown: stop the worker thread and join it. Safe to call
   // more than once (e.g. once explicitly, once from the destructor safety net).
   void stop();
+  void cancel(const DeliveryState& queue);
 
   // Upper bound (ms) on how long a single wait_until sleep in run() is
   // allowed to be, regardless of how far out the next deadline claims to be.
@@ -68,10 +73,13 @@ class DeliveryScheduler {
   static int64_t cappedWaitDeltaMs(int64_t deadlineMs, int64_t nowMsValue);
 
  private:
+  using Target = std::variant<std::shared_ptr<DeliveryState>, std::shared_ptr<QueueT>>;
   struct Entry {
-    std::shared_ptr<QueueT> queue;
+    Target queue;
     Message::Ptr msg;
+    void deliver();
   };
+  void schedule(Entry entry);
 
   void run();
 

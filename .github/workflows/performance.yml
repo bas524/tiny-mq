@@ -1,0 +1,137 @@
+name: Performance
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  VCPKG_TAG: '2026.06.24'
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/.vcpkg-binary-cache
+
+jobs:
+  broker:
+    name: Broker hot paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select the comparison
+        id: comparison
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          git diff --name-only "$BASE_SHA" HEAD -- \
+            server/ external/ CMakeLists.txt CMakePresets.json vcpkg.json \
+            'tests/BenchmarkTest.*' tests/nfr71.py .github/workflows/performance.yml > "$RUNNER_TEMP/perf-changes"
+          if [ ! -s "$RUNNER_TEMP/perf-changes" ]; then
+            echo 'No broker performance inputs changed.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git worktree add --detach "$RUNNER_TEMP/perf-base" "$BASE_SHA"
+          echo 'run=true' >> "$GITHUB_OUTPUT"
+
+      - name: Prepare the existing release toolchain
+        if: steps.comparison.outputs.run == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            build-essential cmake ninja-build pkg-config curl zip unzip tar git python3 \
+            autoconf automake libtool uuid-dev
+
+      - uses: actions/checkout@v4
+        if: steps.comparison.outputs.run == 'true'
+        with:
+          repository: microsoft/vcpkg
+          ref: ${{ env.VCPKG_TAG }}
+          path: vcpkg
+          persist-credentials: false
+
+      - uses: actions/cache@v4
+        if: steps.comparison.outputs.run == 'true'
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_TAG }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-${{ env.VCPKG_TAG }}-
+
+      - name: Build the baseline and candidate
+        if: steps.comparison.outputs.run == 'true'
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+        run: |
+          mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+          # The pre-SDD 71 baseline measured CPU on the benchmark thread alone.
+          # Use the same process CPU registration on both sides without changing baseline behavior.
+          python3 - "$RUNNER_TEMP/perf-base/tests/BenchmarkTest.cpp" "$RUNNER_TEMP/perf-legacy-base" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          source = path.read_text()
+          signature = "BenchmarkFixture, AutoAck_Persistent_RoundTrip"
+          legacy = f"BENCHMARK_F({signature})"
+          registration = f"BENCHMARK_REGISTER_F({signature})->MeasureProcessCPUTime();"
+          if legacy in source:
+              pattern = rf"^{re.escape(legacy)}(.*?^\}})"
+              def register(match):
+                  return f"BENCHMARK_DEFINE_F({signature}){match[1]}\n{registration}"
+              source, count = re.subn(pattern, register, source, flags=re.M | re.S)
+              if count != 1:
+                  sys.exit("Expected exactly one legacy persistent benchmark")
+              path.write_text(source)
+              Path(sys.argv[2]).touch()
+          elif registration not in source:
+              sys.exit("The baseline persistent benchmark must measure process CPU")
+          PY
+          (
+            cd "$RUNNER_TEMP/perf-base"
+            cmake --preset release -DENABLE_TESTS=ON
+            cmake --build --preset release --parallel
+          )
+          cmake --preset release -DENABLE_TESTS=ON
+          cmake --build --preset release --parallel
+
+      - name: Measure and check the CPU budget
+        if: steps.comparison.outputs.run == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -o pipefail
+          out="$RUNNER_TEMP/perf-results"
+          mkdir -p "$out"
+          {
+            printf 'Baseline %s\n' "$BASE_SHA"
+            printf 'Candidate %s\n' "$(git rev-parse HEAD)"
+            printf 'Runner image %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+            if [ -f "$RUNNER_TEMP/perf-legacy-base" ]; then
+              echo 'The pre-SDD 71 baseline receives persistent messages without removing their stored records.'
+            fi
+            lscpu
+          } > "$out/environment.txt"
+          python3 -B tests/nfr71.py \
+            --baseline "$RUNNER_TEMP/perf-base/cmake-build-releasewithdebuginfo/tiny_mq" \
+            --candidate "$GITHUB_WORKSPACE/cmake-build-releasewithdebuginfo/tiny_mq" \
+            --out "$out" --repetitions 9 | tee "$out/summary.log"
+
+      - name: Save the raw samples
+        if: always() && steps.comparison.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: broker-performance
+          path: ${{ runner.temp }}/perf-results/
+          if-no-files-found: ignore
+          retention-days: 14

@@ -51,13 +51,14 @@ class Message {
  private:
   int64_t _number{0};
   Properties _properties;
-  // In-memory cache set by Consumer::preparePush so recv() can skip storage round-trips.
-  // Holds [1-byte type prefix][toBytes() payload]; cleared after recv() reads it.
+  // [1-byte type prefix][toBytes() payload] while staging a persistent delivery.
+  // The ready set holds fully materialized messages, so recv() needs no storage read.
   std::vector<char> _cachedStorageBytes;
   // Cached storage location so acknowledgeOn/commit can remove without a UUID lookup.
   // Set to max when the record location is unknown (e.g. restart path or not-yet-committed).
   Poco::UInt32 _storageTomId{std::numeric_limits<Poco::UInt32>::max()};
   Poco::UInt64 _storageOffset{0};
+  Poco::UUID _storageId;  // identity of this stored delivery, independent of JMSMessageID
   // Transient (never serialized): for a transactional send, the delay in ms
   // requested via SendOptions::deliveryDelay. Resolved to an absolute
   // jmsHeaders.deliveryTime at commit time (spec 13 — the clock starts at
@@ -238,27 +239,8 @@ class Message {
 
   int64_t number() const;
 
-  // Patch the deliveryTime field of an already-serialized _cachedStorageBytes
-  // cache in place (no re-serialization). Used by Producer::commit to resolve
-  // a transactional send's delay clock (JMS 2.0 §7.8, spec 13): the clock
-  // starts at commit, not send, but Consumer::preparePush already cached the
-  // pre-commit bytes (with deliveryTime == 0) at send time. Without this, the
-  // fast recv() path (Consumer::recv, which reads the cache instead of
-  // storage) would hand the application a message whose JMSDeliveryTime is 0
-  // even though it really was delayed and delivered on schedule. No-op if
-  // there is no cache, or the cache predates the 0x02 wire format (see
-  // toBytes()/fromBytes() for the offset table this mirrors).
+  // Keep the serialized staging bytes aligned with their decoded headers.
   void patchCachedDeliveryTime(int64_t deliveryTime);
-
-  // Rebuild _cachedStorageBytes from the message's *current* state (type byte +
-  // toBytes()), unconditionally. Unlike patchCachedDeliveryTime — which patches
-  // an existing cache in place and is a no-op when there isn't one — this always
-  // (re)populates the cache. Needed by Session::recover() (spec 23): by the time
-  // recover() mutates jmsHeaders.redelivered/deliveryCount, Consumer::recv()
-  // has already consumed and cleared the original cache from first delivery, so
-  // a patch-style no-op would silently lose the update — the next recv() would
-  // fall back to the (stale, on-disk) bytes instead (ADR-0008). No-op for
-  // non-persistent messages, which carry no cache at all.
   void refreshCachedStorageBytes();
 
   template <typename MessageType>
@@ -337,6 +319,7 @@ class PriorityQueueT {
 
   // Lightweight no-op token types — preserved for API compatibility.
   struct producer_token_t {
+    producer_token_t() = default;
     explicit producer_token_t(PriorityQueueT&) noexcept {}
     producer_token_t(const producer_token_t&) = default;
     producer_token_t& operator=(const producer_token_t&) = default;

@@ -6,6 +6,7 @@
 #define TINY_MQ__SESSION_H_
 
 #include "Exchange.h"
+#include "QueueBrowser.h"
 #include "TextMessage.h"
 #include "MapMessage.h"
 #include "StreamMessage.h"
@@ -72,6 +73,19 @@ class Session {
   Consumer::Ptr createDurableConsumer(const Destination::Ptr &destination, const std::string &subscriptionName, const std::string &selectorExpr);
   Consumer::Ptr createDurableConsumer(Destination &destination, const std::string &subscriptionName);
   Consumer::Ptr createDurableConsumer(Destination &destination, const std::string &subscriptionName, const std::string &selectorExpr);
+  // Four-argument overloads use the broker-wide Jakarta subscription registry.
+  Consumer::Ptr createConsumer(const Destination::Ptr& destination, const std::string& selector, bool noLocal);
+  Consumer::Ptr createDurableConsumer(const Destination::Ptr& topic, const std::string& name,
+                                      const std::string& selector, bool noLocal);
+  Consumer::Ptr createSharedConsumer(const Destination::Ptr& topic, const std::string& name,
+                                     const std::string& selector = {});
+  Consumer::Ptr createSharedDurableConsumer(const Destination::Ptr& topic, const std::string& name,
+                                            const std::string& selector = {});
+  void unsubscribe(const std::string& name);
+  QueueBrowser createQueueBrowser(const Destination::Ptr& queue, const std::string& selector = {});
+  TemporaryDestination::Ptr createTemporaryQueue();
+  TemporaryDestination::Ptr createTemporaryTopic();
+
   void unsubscribe(Destination &destination, const std::string &subscriptionName);
   void unsubscribe(const Destination::Ptr &destination, const std::string &subscriptionName);
   TextMessage createTextMessage(std::string text = "", Message::Reliability reliability = Message::NOT_PERSISTENT);
@@ -120,6 +134,8 @@ class Session {
   // Spec 24 (E15): sessionClosing=true only from ~Session() — see the public
   // rollback() comment above. The public rollback() delegates here with false.
   void rollback(bool sessionClosing);
+  Consumer::Ptr remember(Consumer::Ptr consumer);
+  void pruneClosedConsumers();
 
   AcknowledgeMode _mode;
   std::reference_wrapper<Poco::Logger> _logger;
@@ -127,7 +143,6 @@ class Session {
   std::string _suffix;
   mutable Poco::UUIDGenerator _uuidGenerator;
   const std::string _id;
-  phmap::parallel_node_hash_map<size_t, Destination::Ptr> _destinations;
   phmap::parallel_node_hash_map<Poco::UUID, Producer::Ptr> _producers;
   phmap::parallel_node_hash_map<Poco::UUID, Consumer::Ptr> _consumers;
 };
