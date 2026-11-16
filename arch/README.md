@@ -31,7 +31,7 @@ Java Message Service (JMS 2.0), плюс нативную C++ клиентску
 | [0006](0006-destructors-must-not-throw.md) | Деструкторы не выпускают исключений | accepted |
 | [0007](0007-delivery-scheduler-per-destination-lazy-thread.md) | Delivery delay — таймер на Destination, ленивый старт потока | accepted |
 | [0008](0008-header-and-cached-bytes-invariant.md) | Заголовки сообщения и `_cachedStorageBytes` меняются только вместе | accepted |
-| [0009](0009-destination-claim-and-ownership.md) | Атомарный claim и владение очередью подписки | proposed |
+| [0009](0009-destination-claim-and-ownership.md) | Атомарный claim и владение очередью подписки | accepted |
 
 ## Шаблон нового ADR
 
