@@ -765,10 +765,14 @@ TEST_F(DestinationContractTest, TemporaryReplyLifecycle) {
 
     row("REQ-71-6", "foreign consume, browse and delete rejected, cross-broker send rejected");
     EXPECT_THROW(reply.createConsumer(resolved), IllegalStateException);
-    if (queue) EXPECT_THROW(reply.createQueueBrowser(resolved), IllegalStateException);
+    if (queue) {
+      EXPECT_THROW(reply.createQueueBrowser(resolved), IllegalStateException);
+    }
     EXPECT_THROW(address->remove(replier), IllegalStateException);
     EXPECT_THROW(wrong.createProducer(resolved), std::invalid_argument);
-    if (!queue) EXPECT_THROW(ask.createSharedDurableConsumer(address, "durable"), std::invalid_argument);
+    if (!queue) {
+      EXPECT_THROW(ask.createSharedDurableConsumer(address, "durable"), std::invalid_argument);
+    }
 
     std::weak_ptr<int> scheduled;
     int64_t deadline;
@@ -792,7 +796,9 @@ TEST_F(DestinationContractTest, TemporaryReplyLifecycle) {
       ask.deleteConsumer(consumer->id());
       address->remove(owner);
     }
-    if (browser) EXPECT_THROW(browser->enumerate(), IllegalStateException);
+    if (browser) {
+      EXPECT_THROW(browser->enumerate(), IllegalStateException);
+    }
     EXPECT_THROW(consumer->recv(0), IllegalStateException);
     auto& replacementSession = closeOwner ? reply : ask;
     auto replacement = queue ? replacementSession.createTemporaryQueue() : replacementSession.createTemporaryTopic();

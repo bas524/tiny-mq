@@ -74,11 +74,14 @@ def compare(args, name, repetitions, minimum, warmup, directory):
     )
     delta = 100 * (after / before - 1)
     stable = max(cv_baseline, cv_candidate) <= 5.0
-    label = "within budget" if stable and delta <= 5.0 else "regression" if stable else "noisy"
+    within_budget = after * 20 <= before * 21
+    label = "noisy"
+    if stable:
+        label = "within budget" if within_budget else "regression"
     print(f"{name}: CPU median {before:.1f} -> {after:.1f} ns/op ({delta:+.2f}%), "
           f"real median {statistics.median(baseline_real):.1f} -> {statistics.median(candidate_real):.1f} ns/op, "
           f"CPU CV {cv_baseline:.2f}% / {cv_candidate:.2f}% ({label})", flush=True)
-    return stable, delta
+    return stable, within_budget
 
 
 def main():
@@ -96,19 +99,17 @@ def main():
     args.out.mkdir(parents=True, exist_ok=True)
     print("[REQ-71-7] NfrGateTest.DestinationHotPathBudget", flush=True)
     print("ABBA: median CPU and real ns per operation, CPU coefficient of variation", flush=True)
-    print("Persistent queue: process CPU includes the storage worker. "
-          "Baseline receives without removing the stored record. "
-          "Candidate synchronously marks it deleted before receive returns.", flush=True)
+    print("Persistent queue: process CPU includes the storage worker.", flush=True)
     reps, minimum, warmup = (2, "0.10s", 0) if args.smoke else (args.repetitions, "1.2s", 2)
     passed = True
     for name in HOT_PATHS:
         directory = args.out / name.replace("/", "-")
-        stable, delta = compare(args, name, reps, minimum, warmup, directory)
+        stable, within_budget = compare(args, name, reps, minimum, warmup, directory)
         if not stable and not args.smoke:
             print(f"{name}: repeating once because CPU CV exceeded 5%", flush=True)
-            stable, delta = compare(args, name, reps, minimum, warmup,
-                                    directory.with_name(directory.name + "-repeat"))
-        passed &= stable and delta <= 5.0
+            stable, within_budget = compare(args, name, reps, minimum, warmup,
+                                            directory.with_name(directory.name + "-repeat"))
+        passed &= stable and within_budget
 
     profiles = run(args.candidate, PROFILES, reps, minimum, warmup, args.out / "new-profiles.json")
     for name, values in profiles.items():

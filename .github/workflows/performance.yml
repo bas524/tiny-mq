@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: performance-${{ github.ref }}
-  cancel-in-progress: true
+  group: performance-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   VCPKG_TAG: '2026.06.24'
@@ -34,8 +34,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           git diff --name-only "$BASE_SHA" HEAD -- \
-            server/ CMakeLists.txt CMakePresets.json vcpkg.json \
-            tests/BenchmarkTest.cpp tests/nfr71.py .github/workflows/performance.yml > "$RUNNER_TEMP/perf-changes"
+            server/ external/ CMakeLists.txt CMakePresets.json vcpkg.json \
+            'tests/BenchmarkTest.*' tests/nfr71.py .github/workflows/performance.yml > "$RUNNER_TEMP/perf-changes"
           if [ ! -s "$RUNNER_TEMP/perf-changes" ]; then
             echo 'No broker performance inputs changed.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
@@ -75,7 +75,7 @@ jobs:
           "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
           # The pre-SDD 71 baseline measured CPU on the benchmark thread alone.
           # Use the same process CPU registration on both sides without changing baseline behavior.
-          python3 - "$RUNNER_TEMP/perf-base/tests/BenchmarkTest.cpp" <<'PY'
+          python3 - "$RUNNER_TEMP/perf-base/tests/BenchmarkTest.cpp" "$RUNNER_TEMP/perf-legacy-base" <<'PY'
           import re
           import sys
           from pathlib import Path
@@ -93,6 +93,7 @@ jobs:
               if count != 1:
                   sys.exit("Expected exactly one legacy persistent benchmark")
               path.write_text(source)
+              Path(sys.argv[2]).touch()
           elif registration not in source:
               sys.exit("The baseline persistent benchmark must measure process CPU")
           PY
@@ -115,6 +116,9 @@ jobs:
           {
             printf 'Baseline %s\n' "$BASE_SHA"
             printf 'Candidate %s\n' "$(git rev-parse HEAD)"
+            if [ -f "$RUNNER_TEMP/perf-legacy-base" ]; then
+              echo 'The pre-SDD 71 baseline receives persistent messages without removing their stored records.'
+            fi
             lscpu
           } > "$out/environment.txt"
           python3 -B tests/nfr71.py \
