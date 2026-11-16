@@ -87,7 +87,7 @@ jobs:
           # чистить перед прогоном: часть тестов не изолирована по стораджу и
           # падает на остатках предыдущего запуска (долги F6/F7, START-HERE.md).
           rm -rf tiny-mq bench-mq
-          # Бинарь без аргументов падает в SIGSEGV (main.cpp:207 разыменовывает
+          # Бинарь без аргументов падает в SIGSEGV (server/src/main.cpp:207 разыменовывает
           # argv[1] при argc==1) — фильтр обязателен, пустой запуск недопустим.
           #
           # Watchdog: полный набор идёт ~25 с; зависший тест (PR #7, macOS:
@@ -296,7 +296,7 @@ jobs:
           PKG="tiny-mq-${VERSION}-${{ matrix.asset }}"
           mkdir -p "dist/${PKG}/bin" "dist/${PKG}/etc" "dist/${PKG}/share"
           install -m 0755 cmake-build-releasewithdebuginfo/tiny_mq "dist/${PKG}/bin/tiny_mq"
-          install -m 0644 configurations/tiny_mq.properties "dist/${PKG}/etc/tiny_mq.properties"
+          install -m 0644 server/configurations/tiny_mq.properties "dist/${PKG}/etc/tiny_mq.properties"
           install -m 0644 README.md LICENSE "dist/${PKG}/share/"
           # Документация функциональности по закрытым спекам.
           cp -r docs/features "dist/${PKG}/share/docs" 2>/dev/null || true
