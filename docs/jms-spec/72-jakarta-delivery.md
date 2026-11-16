@@ -2,7 +2,7 @@
 
 Класс K1. Предложение к обсуждению и критике; критерии ниже описывают будущую реализацию.
 
-Version: 0.3
+Version: 0.4
 Review Date: 2026-11-16
 Examples: `DeliveryContractTest.SendClockMatrix` в критериях приёмки.
 Machine Readability: Markdown, ID требований, Scenario, Test и таблица Entity inventory.
@@ -86,18 +86,30 @@ durable-подписки, и не воскрешает подтверждённ�
 | E2 | type | `DeliveryAttempt` | SDD 72 |
 | E3 | type | `SessionDispatch` | SDD 72 |
 | E4 | type | `LocalTransactionJournal` | SDD 72 |
-| E5 | type | `SendCompletion` | SDD 72 |
+| E5 | type | `SendCompletion` | C++ результат async send: снимок заголовков или ошибка |
 | E6 | storage-field | `nextRedeliveryAt` | SDD 72 |
 | E7 | test-suite | DeliveryContractTest | Исполняемые поведенческие критерии |
-| E8 | concept | MessageListener | Callback получения C++, сериализованный по сессии |
-| E9 | concept | CompletionListener | Callback результата send, C++ контракт SendCompletion |
+| E8 | type | `Consumer::MessageListener` | Callback получения C++, сериализованный по сессии |
+| E9 | type | `Producer::CompletionListener` | Callback результата send, C++ контракт SendCompletion |
 | E10 | type | RedeliveryPolicy | Расширение tiny-mq, backoff и DLQ |
-| E11 | concept | ReceiveBodyDisposition | Проверка тела до выбора исхода доставки, используемая адаптером |
+| E11 | type | `ReceiveBodyDisposition` | Проверка тела до выбора исхода доставки, используемая адаптером |
 | E12 | concept | SessionSendOrder | Порядок принятия отправок сессией через разных producer |
 | E13 | test-suite | NfrGateTest | Сравнение горячих путей на GitHub Actions |
 | E14 | concept | DeliveryLifecycle | Барьеры start/stop/close и пробуждение ожиданий |
 | E15 | concept | DurableDeliveryKey | Устойчивый ключ копии и поколения для ack/replay/DLQ |
 | E16 | concept | DurableTransactionDecision | Записанное решение commit и идемпотентный replay |
+| E17 | method | `Consumer::receive()` | REQ-72-2, бессрочный receive |
+| E18 | method | `Consumer::receive(int64_t)` | REQ-72-2, тайм-аут в миллисекундах, 0 бессрочно |
+| E19 | method | `Consumer::receiveNoWait()` | REQ-72-2, немедленный результат |
+| E20 | method | `Consumer::recv(int64_t)` | Сохраняемый API с микросекундами, REQ-72-2 |
+| E21 | method | `Consumer::close()` | REQ-72-2 и REQ-72-3 |
+| E22 | method | `Session::close()` | REQ-72-2–4 |
+| E23 | method | `Consumer::setMessageListener` | Регистрация или снятие callback, REQ-72-3 |
+| E24 | method | `Producer::sendAsync` | Со стандартными или явными SendOptions, REQ-72-4 |
+| E25 | method | `Producer::close()` | REQ-72-4 |
+| E26 | method | `Consumer::receiveChecked` | Результат проверки тела, REQ-72-5 |
+| E27 | type | `ReceiveBodyResult` | Исход проверки и сообщение при успехе, REQ-72-5 |
+| E28 | method | `Session::acknowledge()` | Доступ адаптера к квитированию сессии, REQ-72-5 |
 
 ## Acceptance Criteria
 
@@ -154,8 +166,9 @@ ID: `REQ-72-2`
 
 ### Requirement: Listener и граница сессии
 
-Сессия исполняет один callback MessageListener за раз для всех её consumer. При остановленной
-connection новые callbacks не стартуют. Внешний stop и close consumer, session и connection
+Consumer::setMessageListener регистрирует callback с аргументом Message::Ptr или снимает
+его пустым callback. Сессия исполняет один callback MessageListener за раз для всех её
+consumer. При остановленной connection новые callbacks не стартуют. Внешний stop и close consumer, session и connection
 ждут соответствующие активные callbacks. Сервис connection и session доступен выполняющемуся
 listener до его выхода. Listener может закрыть свой consumer: текущий callback завершается
 и его ack обрабатывается по обычному правилу. Вызов stop или close собственной connection
@@ -180,7 +193,9 @@ ID: `REQ-72-3`
 
 ### Requirement: Завершение асинхронной отправки
 
-C++ async send проверяет аргументы и состояние до принятия. Ошибка до принятия возвращается
+Producer::sendAsync принимает сообщение и CompletionListener, с обычными настройками либо
+явными SendOptions. CompletionListener принимает SendCompletion. C++ async send проверяет
+аргументы и состояние до принятия. Ошибка до принятия возвращается
 вызывающему потоку без callback. Для принятой операции ровно один callback получает success
 и снимок заголовков либо ошибку операции. Success означает достижение той же границы
 надёжности, что у sync send. Для транзакции это принятие отправки в текущую транзакцию,
@@ -226,8 +241,10 @@ deliveryTime. Backoff сдвигает готовность только соо�
 Recover в транзакционной сессии даёт IllegalStateException.
 Индивидуальное квитирование сохраняется как расширение C++.
 
-Для будущего Java receiveBody ядро предоставляет результат проверки тела до решения
-о квитировании. При несовместимом теле AUTO/DUPS_OK сохраняют прежнюю позицию
+Для будущего Java receiveBody Consumer::receiveChecked принимает предикат для Message
+и тайм-аут с единицами и значениями recv. ReceiveBodyResult различает отсутствие записи,
+совместимое тело с сообщением и несовместимое тело по ReceiveBodyDisposition до решения
+о квитировании. Session::acknowledge квитирует выданные записи сессии в режиме CLIENT. При несовместимом теле AUTO/DUPS_OK сохраняют прежнюю позицию
 в ready и прежнее значение счётчика, CLIENT/TRANSACTED учитывают неуспешную проверку
 как полученную запись. Повтор для CLIENT появляется после recover, для TRANSACTED
 после rollback. Java типизация и MessageFormatRuntimeException относятся к SDD 74.
@@ -411,4 +428,4 @@ R2 в изолированной рабочей копии. Коммит, push, 
 
 ## Owner
 
-Alexander B
+- Alexander B
