@@ -9,7 +9,8 @@
 #include "ConnectionMetaData.h"
 #include "Session.h"
 #include <Poco/Logger.h>
-#include <Poco/Mutex.h>
+#include <condition_variable>
+#include <mutex>
 #include <functional>
 #include <memory>
 #include <string>
@@ -33,8 +34,7 @@ class Connection {
   // Sessions are owned by the connection and live until close()/destruction.
   Session &createSession(Session::AcknowledgeMode mode = Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
 
-  // JMS delivery gate. Stored here for the in-process core; network push
-  // delivery honours it on the server side (see tasks M2-5).
+  // Delivery gate shared by the synchronous receive and listener paths.
   void start();
   void stop();
   bool isStarted() const;
@@ -66,13 +66,27 @@ class Connection {
   std::reference_wrapper<Poco::Logger> _logger;
   const Poco::UUID _identity;
   std::string _clientID;
-  bool _started{false};
+  void watch(const std::shared_ptr<DeliveryState>& queue);
+  void wakeDelivery();
+  bool enterListener();
+  void leaveListener();
+  bool inOwnCallback() const;
+
+  std::atomic_bool _started{false};
+  bool _closing{false};
+  size_t _activeListeners = 0;
+  size_t _activeStops = 0;
+  bool _restartRequested = false;
   bool _closed{false};
   ExceptionListener _exceptionListener;
   std::vector<std::unique_ptr<Session>> _sessions;
-  mutable Poco::FastMutex _mutex;
+  mutable std::mutex _mutex;
+  std::condition_variable _changed;
+  std::vector<std::weak_ptr<DeliveryState>> _watchedQueues;
 
   friend class Destination;
+  friend class Consumer;
+  friend class SessionDispatch;
   friend class Exchange;
   friend class QueueBrowser;
   friend class Session;

@@ -41,6 +41,7 @@ static int64_t nowMs() { return Poco::Timestamp().epochMicroseconds() / 1000; }
 // returns the next live message instead.
 TEST_F(ExpirationTest, testExpiredMessageDroppedOnRecv) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -120,6 +121,7 @@ TEST_F(ExpirationTest, testExpiredMessageSweptFromStorage) {
 // tests above.
 TEST_F(ExpirationTest, testExpiredPersistentMessageDroppedOnRecv) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);

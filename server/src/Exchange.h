@@ -4,6 +4,7 @@
 #include <map>
 #include <mutex>
 #include "Destination.h"
+#include "LocalTransactionJournal.h"
 #include "SubscriptionRegistry.h"
 
 namespace tiny_mq {
@@ -52,12 +53,14 @@ class Exchange {
   std::map<size_t, Destination::Ptr> _destinations;
   Poco::Path _path;
   Poco::Path _registryPath;
+  LocalTransactionJournal _journal;
   std::reference_wrapper<Poco::Logger> _logger;
   std::mutex _mutex;
   Registry _durable;
   Registry _shared;
 
   friend class Connection;
+  friend class Consumer;
   friend class Destination;
   friend class Session;
   friend class TemporaryDestination;

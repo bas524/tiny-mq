@@ -25,6 +25,8 @@
 #include <Poco/Logger.h>
 #include <Poco/Channel.h>
 #include <barrier>
+#include <filesystem>
+#include <semaphore>
 #include <thread>
 
 namespace {
@@ -73,6 +75,7 @@ void BenchmarkFixture::TearDown(::benchmark::State& /*state*/) {
 BENCHMARK_F(BenchmarkFixture, AutoAck_NonPersistent_RoundTrip)(benchmark::State& state) {
     using namespace tiny_mq;
     Connection session_conn(*exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     auto dest = session.createDestination(destination::Queue, "bm_auto_np");
     auto producer = session.createProducer(dest);
@@ -94,6 +97,7 @@ BENCHMARK_F(BenchmarkFixture, AutoAck_NonPersistent_RoundTrip)(benchmark::State&
 BENCHMARK_DEFINE_F(BenchmarkFixture, AutoAck_Persistent_RoundTrip)(benchmark::State& state) {
     using namespace tiny_mq;
     Connection session_conn(*exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     auto dest = session.createDestination(destination::Queue, "bm_auto_p");
     auto producer = session.createProducer(dest);
@@ -113,9 +117,10 @@ BENCHMARK_REGISTER_F(BenchmarkFixture, AutoAck_Persistent_RoundTrip)->MeasurePro
 // 3. CLIENT_ACKNOWLEDGE + PERSISTENT
 //    Explicit acknowledgeOn() triggers storage delete.
 // ---------------------------------------------------------------------------
-BENCHMARK_F(BenchmarkFixture, ClientAck_Persistent_RoundTrip)(benchmark::State& state) {
+BENCHMARK_DEFINE_F(BenchmarkFixture, ClientAck_Persistent_RoundTrip)(benchmark::State& state) {
     using namespace tiny_mq;
     Connection session_conn(*exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
     auto dest = session.createDestination(destination::Queue, "bm_client_p");
     auto producer = session.createProducer(dest);
@@ -130,6 +135,7 @@ BENCHMARK_F(BenchmarkFixture, ClientAck_Persistent_RoundTrip)(benchmark::State& 
     }
     state.SetItemsProcessed(state.iterations());
 }
+BENCHMARK_REGISTER_F(BenchmarkFixture, ClientAck_Persistent_RoundTrip)->MeasureProcessCPUTime();
 
 // ---------------------------------------------------------------------------
 // 3b. CLIENT_ACKNOWLEDGE batch — NOT_PERSISTENT
@@ -147,6 +153,7 @@ BENCHMARK_DEFINE_F(BenchmarkFixture, ClientAck_Batch_NonPersistent)(benchmark::S
     using namespace tiny_mq;
     const int64_t batch = state.range(0);
     Connection session_conn(*exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
     auto dest = session.createDestination(destination::Queue, "bm_clientbatch_np");
     auto producer = session.createProducer(dest);
@@ -184,6 +191,7 @@ BENCHMARK_REGISTER_F(BenchmarkFixture, ClientAck_Batch_NonPersistent)
 BENCHMARK_F(BenchmarkFixture, Transacted_NonPersistent_RoundTrip)(benchmark::State& state) {
     using namespace tiny_mq;
     Connection session_conn(*exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     auto dest = session.createDestination(destination::Queue, "bm_tx_np");
     auto producer = session.createProducer(dest);
@@ -204,9 +212,10 @@ BENCHMARK_F(BenchmarkFixture, Transacted_NonPersistent_RoundTrip)(benchmark::Sta
 // 5. SESSION_TRANSACTED + PERSISTENT
 //    Commit flushes to storage; most expensive single-message path.
 // ---------------------------------------------------------------------------
-BENCHMARK_F(BenchmarkFixture, Transacted_Persistent_RoundTrip)(benchmark::State& state) {
+BENCHMARK_DEFINE_F(BenchmarkFixture, Transacted_Persistent_RoundTrip)(benchmark::State& state) {
     using namespace tiny_mq;
     Connection session_conn(*exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     auto dest = session.createDestination(destination::Queue, "bm_tx_p");
     auto producer = session.createProducer(dest);
@@ -222,6 +231,7 @@ BENCHMARK_F(BenchmarkFixture, Transacted_Persistent_RoundTrip)(benchmark::State&
     }
     state.SetItemsProcessed(state.iterations());
 }
+BENCHMARK_REGISTER_F(BenchmarkFixture, Transacted_Persistent_RoundTrip)->MeasureProcessCPUTime();
 
 // ---------------------------------------------------------------------------
 // 6. SESSION_TRANSACTED batch — NOT_PERSISTENT
@@ -232,6 +242,7 @@ BENCHMARK_DEFINE_F(BenchmarkFixture, Transacted_Batch_NonPersistent)(benchmark::
     using namespace tiny_mq;
     const int64_t batch = state.range(0);
     Connection session_conn(*exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     auto dest = session.createDestination(destination::Queue, "bm_txbatch_np");
     auto producer = session.createProducer(dest);
@@ -267,6 +278,7 @@ BENCHMARK_DEFINE_F(BenchmarkFixture, Transacted_Batch_Persistent)(benchmark::Sta
     using namespace tiny_mq;
     const int64_t batch = state.range(0);
     Connection session_conn(*exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     auto dest = session.createDestination(destination::Queue, "bm_txbatch_p");
     auto producer = session.createProducer(dest);
@@ -292,7 +304,7 @@ BENCHMARK_DEFINE_F(BenchmarkFixture, Transacted_Batch_Persistent)(benchmark::Sta
     state.SetItemsProcessed(state.iterations() * batch);
 }
 BENCHMARK_REGISTER_F(BenchmarkFixture, Transacted_Batch_Persistent)
-    ->Arg(10)->Arg(100)->Arg(1000);
+    ->Arg(10)->Arg(100)->Arg(1000)->MeasureProcessCPUTime();
 
 // ---------------------------------------------------------------------------
 // 8. Topic + AUTO_ACKNOWLEDGE + NOT_PERSISTENT
@@ -301,6 +313,7 @@ BENCHMARK_REGISTER_F(BenchmarkFixture, Transacted_Batch_Persistent)
 BENCHMARK_F(BenchmarkFixture, Topic_AutoAck_NonPersistent_RoundTrip)(benchmark::State& state) {
     using namespace tiny_mq;
     Connection session_conn(*exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     auto topic = session.createDestination(destination::Topic, "bm_topic_np");
     auto subscriber = session.createConsumer(topic);
@@ -325,6 +338,7 @@ BENCHMARK_F(BenchmarkFixture, Topic_AutoAck_NonPersistent_RoundTrip)(benchmark::
 BENCHMARK_F(BenchmarkFixture, Priority_Uniform_NonPersistent_RoundTrip)(benchmark::State& state) {
     using namespace tiny_mq;
     Connection session_conn(*exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     auto dest = session.createDestination(destination::Queue, "bm_prio_uniform_np");
     auto producer = session.createProducer(dest);
@@ -350,6 +364,7 @@ BENCHMARK_F(BenchmarkFixture, Priority_Uniform_NonPersistent_RoundTrip)(benchmar
 BENCHMARK_F(BenchmarkFixture, Priority_Mixed_NonPersistent_RoundTrip)(benchmark::State& state) {
     using namespace tiny_mq;
     Connection session_conn(*exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     auto dest = session.createDestination(destination::Queue, "bm_prio_mixed_np");
     auto producer = session.createProducer(dest);
@@ -384,6 +399,7 @@ BENCHMARK(MessageSelector);
 BENCHMARK_DEFINE_F(BenchmarkFixture, Destination_ConcurrentClaim)(benchmark::State& state) {
     using namespace tiny_mq;
     Connection conn(*exchange);
+    conn.start();
     auto& send = conn.createSession();
     auto queue = send.createDestination(destination::Queue, "competing-claims");
     auto writer = send.createProducer(queue);
@@ -422,6 +438,7 @@ BENCHMARK_REGISTER_F(BenchmarkFixture, Destination_ConcurrentClaim)->MeasureProc
 BENCHMARK_DEFINE_F(BenchmarkFixture, Destination_Fanout)(benchmark::State& state) {
     using namespace tiny_mq;
     Connection conn(*exchange);
+    conn.start();
     auto& session = conn.createSession();
     auto topic = session.createDestination(destination::Topic, "fanout");
     auto writer = session.createProducer(topic);
@@ -440,3 +457,85 @@ BENCHMARK_DEFINE_F(BenchmarkFixture, Destination_Fanout)(benchmark::State& state
     state.counters["deliveries_per_iteration"] = static_cast<double>(count);
 }
 BENCHMARK_REGISTER_F(BenchmarkFixture, Destination_Fanout)->Arg(1)->Arg(2)->Arg(4);
+
+// REQ-72-9 diagnostic profiles for paths introduced in SDD 72.
+namespace tiny_mq {
+void prepareDeliveryReplayBenchmark(const std::string& directory);
+}
+
+BENCHMARK_DEFINE_F(BenchmarkFixture, Delivery_Listener)(benchmark::State& state) {
+    using namespace tiny_mq;
+    std::binary_semaphore delivered(0);
+    Connection connection(*exchange);
+    connection.start();
+    auto& listenerSession = connection.createSession();
+    auto& sendSession = connection.createSession();
+    auto queue = sendSession.createDestination(destination::Queue, "bm_delivery_listener");
+    auto consumer = listenerSession.createConsumer(queue);
+    auto producer = sendSession.createProducer(queue);
+    auto message = sendSession.createTextMessage(kPayload);
+    consumer->setMessageListener([&](Message::Ptr) { delivered.release(); });
+    for (auto _ : state) {
+        producer->send(message);
+        delivered.acquire();
+    }
+    consumer->close();
+}
+BENCHMARK_REGISTER_F(BenchmarkFixture, Delivery_Listener)->MeasureProcessCPUTime();
+
+BENCHMARK_DEFINE_F(BenchmarkFixture, Delivery_AsyncSend)(benchmark::State& state) {
+    using namespace tiny_mq;
+    std::binary_semaphore completed(0);
+    Connection connection(*exchange);
+    connection.start();
+    auto& session = connection.createSession();
+    auto queue = session.createDestination(destination::Queue, "bm_delivery_async");
+    auto consumer = session.createConsumer(queue);
+    auto producer = session.createProducer(queue);
+    auto message = session.createTextMessage(kPayload);
+    for (auto _ : state) {
+        producer->sendAsync(message, [&](const SendCompletion&) { completed.release(); });
+        completed.acquire();
+        benchmark::DoNotOptimize(consumer->receiveNoWait());
+    }
+    producer->close();
+}
+BENCHMARK_REGISTER_F(BenchmarkFixture, Delivery_AsyncSend)->MeasureProcessCPUTime();
+
+BENCHMARK_DEFINE_F(BenchmarkFixture, Delivery_DeadLetter)(benchmark::State& state) {
+    using namespace tiny_mq;
+    Connection connection(*exchange);
+    connection.start();
+    auto& origin = connection.createSession(Session::CLIENT_ACKNOWLEDGE);
+    auto& inspector = connection.createSession();
+    auto queue = origin.createDestination(destination::Queue, "bm_delivery_dlq_source");
+    auto dead = origin.createDestination(destination::Queue, "bm_delivery_dlq");
+    queue->setRedeliveryPolicy({0, 0, 0, dead});
+    auto consumer = origin.createConsumer(queue);
+    auto result = inspector.createConsumer(dead);
+    auto producer = origin.createProducer(queue);
+    auto message = origin.createTextMessage(kPayload, Message::PERSISTENT);
+    for (auto _ : state) {
+        producer->send(message);
+        benchmark::DoNotOptimize(consumer->receiveNoWait());
+        origin.recover();
+        benchmark::DoNotOptimize(result->receiveNoWait());
+    }
+}
+BENCHMARK_REGISTER_F(BenchmarkFixture, Delivery_DeadLetter)->MeasureProcessCPUTime();
+
+BENCHMARK_DEFINE_F(BenchmarkFixture, Delivery_JournalReplay)(benchmark::State& state) {
+    namespace fs = std::filesystem;
+    const fs::path seed = fs::path(kBenchDir) / "replay-seed";
+    const fs::path target = fs::path(kBenchDir) / "replay-target";
+    tiny_mq::prepareDeliveryReplayBenchmark(seed.string());
+    for (auto _ : state) {
+        state.PauseTiming();
+        fs::remove_all(target);
+        fs::copy(seed, target, fs::copy_options::recursive);
+        state.ResumeTiming();
+        tiny_mq::Exchange recovered(Poco::Path(target.string()));
+        benchmark::DoNotOptimize(recovered);
+    }
+}
+BENCHMARK_REGISTER_F(BenchmarkFixture, Delivery_JournalReplay)->MeasureProcessCPUTime();

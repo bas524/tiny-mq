@@ -46,6 +46,9 @@ TEST_F(DestinationContractTest, SelectiveQueueClaim) {
   {
     Exchange exchange(path);
     Connection writer(exchange), left(exchange), right(exchange);
+    writer.start();
+    left.start();
+    right.start();
     auto& send = writer.createSession();
     auto& a = left.createSession(Session::CLIENT_ACKNOWLEDGE);
     auto& b = right.createSession(Session::CLIENT_ACKNOWLEDGE);
@@ -118,6 +121,7 @@ TEST_F(DestinationContractTest, SelectiveQueueClaim) {
 
     row("REQ-71-1", "transacted claim still held after consumer close, rollback reopens it");
     Connection transaction(exchange);
+    transaction.start();
     auto& tx = transaction.createSession(Session::SESSION_TRANSACTED);
     auto txConsumer = tx.createConsumer(queue, "rank = 1");
     emit("rollback", 1, Message::NOT_PERSISTENT);
@@ -141,6 +145,7 @@ TEST_F(DestinationContractTest, SelectiveQueueClaim) {
     row("REQ-71-1", "restart replays only unconfirmed persistent messages");
     Exchange exchange(path);
     Connection connection(exchange);
+    connection.start();
     auto& session = connection.createSession();
     auto receiver = session.createConsumer(session.createDestination(destination::Queue, "claims"));
     expectText(receiver, "recover");
@@ -152,6 +157,8 @@ TEST_F(DestinationContractTest, SubscriptionFanout) {
   {
     Exchange exchange(path);
     Connection sender(exchange), subscribers(exchange);
+    sender.start();
+    subscribers.start();
     auto& tx = sender.createSession(Session::SESSION_TRANSACTED);
     auto& plain = sender.createSession();
     auto& a = subscribers.createSession(Session::CLIENT_ACKNOWLEDGE);
@@ -228,6 +235,7 @@ TEST_F(DestinationContractTest, SubscriptionFanout) {
     row("REQ-71-2", "offline durable receives persistent copies across restart and commits before reconnect");
     Exchange exchange(path);
     Connection connection(exchange);
+    connection.start();
     auto& tx = connection.createSession(Session::SESSION_TRANSACTED);
     auto& session = connection.createSession();
     auto topic = tx.createDestination(destination::Topic, "fanout");
@@ -247,6 +255,8 @@ TEST_F(DestinationContractTest, SubscriptionFanout) {
   {
     Exchange exchange(path);
     Connection sender(exchange), subscribers(exchange);
+    sender.start();
+    subscribers.start();
     auto& send = sender.createSession();
     auto& a = subscribers.createSession();
     auto& b = subscribers.createSession();
@@ -307,7 +317,9 @@ TEST_F(DestinationContractTest, DurableIdentityMatrix) {
   {
     Exchange exchange(path);
     Connection identified(exchange), anonymous(exchange);
+    anonymous.start();
     identified.setClientID("client/with\x1f" "separator");
+    identified.start();
     auto& session = identified.createSession(Session::CLIENT_ACKNOWLEDGE);
     auto& noId = anonymous.createSession();
     auto one = session.createDestination(destination::Topic, "first");
@@ -481,6 +493,7 @@ TEST_F(DestinationContractTest, DurableIdentityMatrix) {
     Exchange exchange(preSwapRoot.string());
     Connection identified(exchange);
     identified.setClientID("client/with\x1f" "separator");
+    identified.start();
     auto& session = identified.createSession();
     auto one = session.createDestination(destination::Topic, "first");
     auto offline = session.createTextMessage("before reattach", Message::PERSISTENT);
@@ -495,7 +508,9 @@ TEST_F(DestinationContractTest, DurableIdentityMatrix) {
     row("REQ-71-3", "post-swap restart: new definition stays active, orphaned backlog is unreachable and legacy reopens");
     Exchange exchange(path);
     Connection identified(exchange), anonymous(exchange);
+    anonymous.start();
     identified.setClientID("client/with\x1f" "separator");
+    identified.start();
     auto& session = identified.createSession();
     auto& noId = anonymous.createSession();
     auto two = session.createDestination(destination::Topic, "second");
@@ -527,7 +542,9 @@ TEST_F(DestinationContractTest, DurableIdentityMatrix) {
 TEST_F(DestinationContractTest, NoLocalMatrix) {
   Exchange exchange(path);
   Connection local(exchange), remote(exchange);
+  remote.start();
   local.setClientID("local");
+  local.start();
   auto& publisher = local.createSession();
   auto& subscriber = local.createSession();
   auto& other = remote.createSession(Session::SESSION_TRANSACTED);
@@ -547,6 +564,7 @@ TEST_F(DestinationContractTest, NoLocalMatrix) {
   {
     Connection alias(exchange);
     alias.setClientID("local");
+    alias.start();
     auto& sender = alias.createSession();
     sender.createProducer(topic)->send(sender.createTextMessage("equal ID", Message::PERSISTENT));
     expectText(privateSub, "equal ID");
@@ -564,6 +582,7 @@ TEST_F(DestinationContractTest, NoLocalMatrix) {
   row("REQ-71-4", "offline durable filters another connection with same client ID");
   Connection reused(exchange);
   reused.setClientID("local");
+  reused.start();
   auto& reconnect = reused.createSession();
   reconnect.createProducer(topic)->send(reconnect.createTextMessage("same ID", Message::PERSISTENT));
   tx->send(other.createTextMessage("offline foreign", Message::PERSISTENT));
@@ -577,6 +596,9 @@ TEST_F(DestinationContractTest, NoLocalMatrix) {
 TEST_F(DestinationContractTest, BrowseWithoutClaim) {
   Exchange exchange(path);
   Connection writer(exchange), reader(exchange), inspector(exchange);
+  writer.start();
+  reader.start();
+  inspector.start();
   auto& send = writer.createSession();
   auto& receive = reader.createSession(Session::CLIENT_ACKNOWLEDGE);
   auto& browse = inspector.createSession(Session::CLIENT_ACKNOWLEDGE);
@@ -724,7 +746,9 @@ class ScheduledMessageProbe : public TextMessage {
 TEST_F(DestinationContractTest, TemporaryReplyLifecycle) {
   Exchange exchange(path), unrelated(Poco::Path(path).append("other").makeDirectory());
   Connection replier(exchange), wrongBroker(unrelated);
+  wrongBroker.start();
   replier.setClientID("same client ID");
+  replier.start();
   auto& reply = replier.createSession();
   auto& wrong = wrongBroker.createSession();
   auto requests = reply.createDestination(destination::Queue, "requests");
@@ -738,6 +762,7 @@ TEST_F(DestinationContractTest, TemporaryReplyLifecycle) {
     row("REQ-71-6", label.c_str());
     Connection owner(exchange);
     owner.setClientID("same client ID");
+    owner.start();
     auto& ask = owner.createSession();
     auto outbound = ask.createProducer(requests);
     auto address = queue ? ask.createTemporaryQueue() : ask.createTemporaryTopic();

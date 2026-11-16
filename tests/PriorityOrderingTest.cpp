@@ -44,6 +44,7 @@ void PriorityOrderingTest::TearDown() {
 // second N/2 are ALL p=0.  Within each band the original send order is kept.
 TEST_F(PriorityOrderingTest, testInterleavedPriority) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -85,6 +86,7 @@ TEST_F(PriorityOrderingTest, testInterleavedPriority) {
 // must exactly match send order — priority bands must not perturb FIFO.
 TEST_F(PriorityOrderingTest, testUniformPriorityIsFIFO) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -118,6 +120,7 @@ TEST_F(PriorityOrderingTest, testUniformPriorityIsFIFO) {
 // only a queue that keeps each band internally FIFO passes this one).
 TEST_F(PriorityOrderingTest, testAdjacentPriorityInterleavePreservesBandFIFO) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -178,6 +181,7 @@ TEST_F(PriorityOrderingTest, testRestartPreservesBanding) {
   {
     tiny_mq::Exchange ex(dir);
     Connection conn(ex);
+    conn.start();
     Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, destName);
     Producer::Ptr producer = session.createProducer(queue);
@@ -195,6 +199,7 @@ TEST_F(PriorityOrderingTest, testRestartPreservesBanding) {
   {
     tiny_mq::Exchange ex(dir);
     Connection conn(ex);
+    conn.start();
     Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, destName);
     Producer::Ptr producer = session.createProducer(queue);
@@ -228,6 +233,7 @@ TEST_F(PriorityOrderingTest, testRestartPreservesBanding) {
 // path (Destination::deliverCommitted).
 TEST_F(PriorityOrderingTest, testTransactionalPriorityOrdering) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);

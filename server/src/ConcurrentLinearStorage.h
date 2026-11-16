@@ -14,6 +14,8 @@
 #include <external/concurrent_queue/BlockingConcurrentQueueHeader.h>
 #include <mutex>
 
+namespace tiny_mq { class LocalTransactionJournal; }
+
 namespace linear_storage {
 enum class OperationId {
   GET_RECORD_BY_TOM_OFFSET = 0,
@@ -42,6 +44,7 @@ struct Operation {
 };
 
 class ConcurrentLinearStorage: Poco::Runnable {
+  friend class tiny_mq::LocalTransactionJournal;
   Storage _linearStorage;
   std::mutex _storageMutex;
   mutable std::mutex _lifecycleMutex;

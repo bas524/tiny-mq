@@ -134,6 +134,7 @@ TEST(StorageWorkerResilienceTest, NoWorkerThreadSurvivesExchangeDestruction) {
   auto exchange = std::make_unique<tiny_mq::Exchange>(basePath);
   {
     Connection conn(*exchange);
+    conn.start();
     Session& session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, "lp03shutdown");
     Producer::Ptr producer = session.createProducer(destination);

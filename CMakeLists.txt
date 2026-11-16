@@ -71,6 +71,11 @@ include_directories(external/concurrent_queue)
 include_directories(external/btree/include)
 add_executable(tiny_mq)
 add_subdirectory(server)
+target_sources(tiny_mq PRIVATE
+    server/src/DeliveryClock.cpp
+    server/src/LocalTransactionJournal.cpp
+    server/src/SessionDispatch.cpp
+)
 
 set(POCO_LIBS
     Poco::Util
@@ -113,6 +118,7 @@ if (ENABLE_TESTS)
                  tests/BenchmarkTest.h
                  tests/SelectorTest.cpp
                  tests/SelectorTest.h
+                 tests/DeliveryContractTest.cpp
                  tests/DestinationContractTest.cpp
                  tests/DurableSubscriberTest.cpp
                  tests/DurableSubscriberTest.h

@@ -8,6 +8,7 @@
 
 #include "DlqTest.h"
 #include "Connection.h"
+#include "DeliveryClock.h"
 #include "ConnectionMetaData.h"
 #include "Destination.h"
 #include "Exchange.h"
@@ -49,6 +50,7 @@ void DlqTest::TearDown() {
 // marks redelivered; a second rollback increments again.
 TEST_F(DlqTest, RollbackIncrementsDeliveryCount) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   ASSERT_NE(queue, nullptr);
@@ -82,6 +84,7 @@ TEST_F(DlqTest, RollbackIncrementsDeliveryCount) {
 // T2: CLIENT_ACKNOWLEDGE, persistent — recover() increments deliveryCount.
 TEST_F(DlqTest, RecoverIncrementsDeliveryCount) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -113,6 +116,7 @@ TEST_F(DlqTest, RecoverIncrementsDeliveryCount) {
 // 1 per cycle.
 TEST_F(DlqTest, CountMonotonicAcrossRecoverAndRollbackPaths) {
   Connection connection(*_exchange);
+  connection.start();
   Session &sessionRecover = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Session &sessionRollback = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = sessionRecover.createDestination(tiny_mq::destination::Queue, CurrentTestName);
@@ -151,6 +155,7 @@ TEST_F(DlqTest, CountMonotonicAcrossRecoverAndRollbackPaths) {
 // message in the DLQ with the exceeded-limit reason and correct headers.
 TEST_F(DlqTest, LandsInDlqAfterMaxRedeliveries) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Destination::Ptr dlq = session.createDestination(tiny_mq::destination::Queue, std::string(CurrentTestName) + ".DLQ");
@@ -185,13 +190,14 @@ TEST_F(DlqTest, LandsInDlqAfterMaxRedeliveries) {
   EXPECT_EQ("maxRedeliveries exceeded", dead->property<tiny_mq::property::String>("JMSXDeadLetterReason").value());
   EXPECT_EQ(3, dead->jmsHeaders.deliveryCount);
   EXPECT_TRUE(dead->jmsHeaders.redelivered);
-  EXPECT_EQ(0, dead->jmsHeaders.deliveryTime);
+  EXPECT_EQ(m.jmsHeaders.deliveryTime, dead->jmsHeaders.deliveryTime);
 }
 
 // T5: the DLQ copy preserves correlationId/replyTo/type/priority and custom
 // application properties.
 TEST_F(DlqTest, DlqPreservesHeadersAndProperties) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Destination::Ptr dlq = session.createDestination(tiny_mq::destination::Queue, std::string(CurrentTestName) + ".DLQ");
@@ -237,6 +243,7 @@ TEST_F(DlqTest, DlqCopySurvivesRestart) {
   const std::string dlqName = std::string(CurrentTestName) + ".DLQ";
   {
     Connection connection(*_exchange);
+    connection.start();
     Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, queueName);
     Destination::Ptr dlq = session.createDestination(tiny_mq::destination::Queue, dlqName);
@@ -265,6 +272,7 @@ TEST_F(DlqTest, DlqCopySurvivesRestart) {
   _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
 
   Connection connection2(*_exchange);
+  connection2.start();
   Session &session2 = connection2.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue2 = session2.createDestination(tiny_mq::destination::Queue, queueName);
   Destination::Ptr dlq2 = session2.createDestination(tiny_mq::destination::Queue, dlqName);
@@ -281,6 +289,7 @@ TEST_F(DlqTest, DlqCopySurvivesRestart) {
 // it must still receive it (the DLQ's queue exists from destination creation).
 TEST_F(DlqTest, DlqConsumerCreatedAfterDeadLettering) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Destination::Ptr dlq = session.createDestination(tiny_mq::destination::Queue, std::string(CurrentTestName) + ".DLQ");
@@ -317,6 +326,7 @@ TEST_F(DlqTest, NullDlqDropsMessage) {
   const std::string queueName = CurrentTestName;
   {
     Connection connection(*_exchange);
+    connection.start();
     Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, queueName);
 
@@ -344,6 +354,7 @@ TEST_F(DlqTest, NullDlqDropsMessage) {
   _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
 
   Connection connection2(*_exchange);
+  connection2.start();
   Session &session2 = connection2.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue2 = session2.createDestination(tiny_mq::destination::Queue, queueName);
   Consumer::Ptr consumer2 = session2.createConsumer(queue2);
@@ -353,6 +364,7 @@ TEST_F(DlqTest, NullDlqDropsMessage) {
 // T9: maxRedeliveries=-1 — unlimited redeliveries, counter keeps growing.
 TEST_F(DlqTest, UnlimitedRedeliveriesWhenNegative) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -378,10 +390,10 @@ TEST_F(DlqTest, UnlimitedRedeliveriesWhenNegative) {
   EXPECT_EQ(10, last->jmsHeaders.deliveryCount);
 }
 
-// T10: default policy (no setRedeliveryPolicy call) — maxRedeliveries=6,
-// drops after the 7th rollback.
-TEST_F(DlqTest, DefaultPolicyDropsAfterSixRedeliveries) {
+// REQ-72-7: the default policy allows more than six retries.
+TEST_F(DlqTest, DefaultPolicyAllowsMoreThanSixRedeliveries) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -396,13 +408,17 @@ TEST_F(DlqTest, DefaultPolicyDropsAfterSixRedeliveries) {
     ASSERT_NE(r, nullptr) << "iteration " << i;
     session.rollback();
   }
-  EXPECT_EQ(consumer->recv(50000), nullptr) << "default policy must drop after 6 redeliveries (7th rollback)";
+  auto retry = consumer->receiveNoWait();
+  ASSERT_TRUE(retry);
+  EXPECT_EQ(8, retry->jmsHeaders.jmsDeliveryCount());
+  session.commit();
 }
 
 // T11: backoffMs=200 — a rolled-back message is not visible again before the
 // exponential backoff delay elapses.
 TEST_F(DlqTest, BackoffDelaysRedelivery) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -427,20 +443,23 @@ TEST_F(DlqTest, BackoffDelaysRedelivery) {
   Message::Ptr r1 = consumer->recv(1000000);
   ASSERT_NE(r1, nullptr);
   EXPECT_TRUE(r1->jmsHeaders.redelivered);
-  EXPECT_GE(r1->jmsHeaders.deliveryTime, tRollback0 + 200);
+  EXPECT_GE(nowMs(), tRollback0 + 200);
+  EXPECT_EQ(m.jmsHeaders.deliveryTime, r1->jmsHeaders.deliveryTime);
 
   const int64_t tRollback1 = nowMs();
   session.rollback();
   EXPECT_EQ(consumer->recv(50000), nullptr) << "must not be visible before the 400ms (2nd) backoff elapses";
   Message::Ptr r2 = consumer->recv(1000000);
   ASSERT_NE(r2, nullptr);
-  EXPECT_GE(r2->jmsHeaders.deliveryTime, tRollback1 + 400);
+  EXPECT_GE(nowMs(), tRollback1 + 400);
+  EXPECT_EQ(m.jmsHeaders.deliveryTime, r2->jmsHeaders.deliveryTime);
 }
 
 // T12: backoffMs=200, maxBackoffMs=300 — the third redelivery would be 800ms
 // uncapped but must be capped to 300ms.
 TEST_F(DlqTest, BackoffCappedByMaxBackoff) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -473,11 +492,10 @@ TEST_F(DlqTest, BackoffCappedByMaxBackoff) {
   EXPECT_LE(elapsed, 600) << "backoff must be capped at maxBackoffMs (300ms), not the uncapped 800ms";
 }
 
-// T13: persistent message, backoffMs=100 — ADR-0008: the message received
-// after redelivery must carry the updated deliveryTime/deliveryCount, not
-// stale values from the pre-redelivery cache.
-TEST_F(DlqTest, BackoffUpdatesCachedBytesForPersistent) {
+// Persistent retry carries the incremented count and unchanged delivery time.
+TEST_F(DlqTest, PersistentBackoffPreservesDeliveryTime) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -499,7 +517,7 @@ TEST_F(DlqTest, BackoffUpdatesCachedBytesForPersistent) {
   Message::Ptr r1 = consumer->recv(1000000);
   ASSERT_NE(r1, nullptr);
   EXPECT_EQ(1, r1->jmsHeaders.deliveryCount);
-  EXPECT_NE(0, r1->jmsHeaders.deliveryTime);
+  EXPECT_EQ(m.jmsHeaders.deliveryTime, r1->jmsHeaders.deliveryTime);
   EXPECT_TRUE(r1->jmsHeaders.redelivered);
 }
 
@@ -508,6 +526,7 @@ TEST_F(DlqTest, BackoffUpdatesCachedBytesForPersistent) {
 // redeliver() path).
 TEST_F(DlqTest, RedeliveryOrderPreservedWithoutBackoff) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -541,6 +560,7 @@ TEST_F(DlqTest, RedeliveryOrderPreservedWithoutBackoff) {
 // state is independent (Semantics 6).
 TEST_F(DlqTest, TopicSubscriberDeadLetteredIndependently) {
   Connection connection(*_exchange);
+  connection.start();
   Session &sessionA = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Session &sessionB = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr topic = sessionA.createDestination(tiny_mq::destination::Topic, CurrentTestName);
@@ -594,6 +614,7 @@ TEST_F(DlqTest, TopicSubscriberDeadLetteredIndependently) {
 // topic; a queue DLQ on a topic destination is accepted.
 TEST_F(DlqTest, SetPolicyRejectsSelfOrTopicAsDlq) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, std::string(CurrentTestName) + ".queue");
   Destination::Ptr topic = session.createDestination(tiny_mq::destination::Topic, std::string(CurrentTestName) + ".topic");
@@ -620,6 +641,7 @@ TEST_F(DlqTest, DeadLetteringOnSessionCloseRollback) {
   const std::string dlqName = std::string(CurrentTestName) + ".DLQ";
   {
     Connection connection(*_exchange);
+    connection.start();
     Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, queueName);
     Destination::Ptr dlq = session.createDestination(tiny_mq::destination::Queue, dlqName);
@@ -643,6 +665,7 @@ TEST_F(DlqTest, DeadLetteringOnSessionCloseRollback) {
   }
 
   Connection connection2(*_exchange);
+  connection2.start();
   Session &session2 = connection2.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue2 = session2.createDestination(tiny_mq::destination::Queue, queueName);
   Destination::Ptr dlq2 = session2.createDestination(tiny_mq::destination::Queue, dlqName);
@@ -660,6 +683,7 @@ TEST_F(DlqTest, DeadLetteringOnSessionCloseRollback) {
 // returns nullptr per spec 44's expiration rule.
 TEST_F(DlqTest, DlqCopyKeepsExpiration) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Destination::Ptr dlq = session.createDestination(tiny_mq::destination::Queue, std::string(CurrentTestName) + ".DLQ");
@@ -691,98 +715,75 @@ TEST_F(DlqTest, DlqCopyKeepsExpiration) {
   EXPECT_EQ(originalExpiration, dead->jmsHeaders.expiration);
 }
 
-// T20: maxRedeliveries=2, backoffMs=5000, persistent — after a restart, the
-// deliveryCount/redelivered/backoff state resets: a fresh recv() from the
-// origin sees the message as if it had never been redelivered.
-TEST_F(DlqTest, RestartResetsCounterAndLimit) {
+// REQ-72-7: restart preserves a scheduled backoff and its count.
+TEST_F(DlqTest, RestartPreservesCounterAndBackoff) {
+  struct ResetClock { ~ResetClock() { tiny_mq::DeliveryClock::setTestTime(-1); } } reset;
+  constexpr int64_t sentAt = 5000;
+  tiny_mq::DeliveryClock::setTestTime(sentAt);
   const std::string queueName = CurrentTestName;
-  const std::string dlqName = std::string(CurrentTestName) + ".DLQ";
   {
     Connection connection(*_exchange);
-    Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
-    Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, queueName);
-    Destination::Ptr dlq = session.createDestination(tiny_mq::destination::Queue, dlqName);
-
-    RedeliveryPolicy policy;
-    policy.maxRedeliveries = 2;
-    policy.backoffMs = 5000;
-    policy.deadLetterQueue = dlq;
-    queue->setRedeliveryPolicy(policy);
-
-    Producer::Ptr producer = session.createProducer(queue);
-    Consumer::Ptr consumer = session.createConsumer(queue);
-
-    TextMessage m = session.createTextMessage("restart-reset", Message::PERSISTENT);
-    producer->send(m);
+    connection.start();
+    auto& session = connection.createSession(Session::SESSION_TRANSACTED);
+    auto queue = session.createDestination(tiny_mq::destination::Queue, queueName);
+    queue->setRedeliveryPolicy({2, 5000, 60000, {}});
+    auto producer = session.createProducer(queue);
+    auto consumer = session.createConsumer(queue);
+    producer->send(session.createTextMessage("retry after restart", Message::PERSISTENT));
     session.commit();
-
-    // 1st rollback: deliveryCount 0 -> 1, next redelivery deferred ~5000ms.
-    Message::Ptr r0 = consumer->recv();
-    ASSERT_NE(r0, nullptr);
+    ASSERT_TRUE(consumer->receiveNoWait());
     session.rollback();
-    EXPECT_EQ(1, r0->jmsHeaders.deliveryCount);
-
-    // Wait out the ~5000ms backoff for the 2nd rollback.
-    Message::Ptr r1 = consumer->recv(7000000);
-    ASSERT_NE(r1, nullptr) << "must reappear once the 1st backoff elapses";
+    tiny_mq::DeliveryClock::setTestTime(sentAt + 5000);
+    auto firstRetry = consumer->receive(1000);
+    ASSERT_TRUE(firstRetry);
+    EXPECT_EQ(1, firstRetry->jmsHeaders.deliveryCount);
     session.rollback();
-    EXPECT_EQ(2, r1->jmsHeaders.deliveryCount);
-    // The resulting ~10000ms backoff is deliberately left pending — the
-    // restart below happens before it elapses.
   }
-
   _exchange.reset();
   _exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir());
-
-  Connection connection2(*_exchange);
-  Session &session2 = connection2.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
-  Destination::Ptr queue2 = session2.createDestination(tiny_mq::destination::Queue, queueName);
-  Consumer::Ptr consumer2 = session2.createConsumer(queue2);
-
-  TextMessage::Ptr replayed = Message::As<TextMessage>(consumer2->recv(100000));
-  ASSERT_NE(replayed, nullptr) << "message must be immediately visible after restart, not deferred by the pending backoff";
-  EXPECT_EQ(0, replayed->jmsHeaders.deliveryCount) << "deliveryCount does not survive restart by design";
-  EXPECT_FALSE(replayed->jmsHeaders.redelivered);
-  EXPECT_EQ(0, replayed->jmsHeaders.deliveryTime);
+  Connection connection(*_exchange);
+  connection.start();
+  auto& session = connection.createSession();
+  auto consumer = session.createConsumer(session.createDestination(tiny_mq::destination::Queue, queueName));
+  EXPECT_FALSE(consumer->receiveNoWait());
+  tiny_mq::DeliveryClock::setTestTime(sentAt + 15000);
+  auto replayed = consumer->receive(1000);
+  ASSERT_TRUE(replayed);
+  EXPECT_EQ(2, replayed->jmsHeaders.deliveryCount);
+  EXPECT_TRUE(replayed->jmsHeaders.redelivered);
+  EXPECT_EQ(sentAt, replayed->jmsHeaders.deliveryTime);
 }
 
-// T21: SESSION_TRANSACTED, backoffMs=5000, maxRedeliveries=6 — a session-close
-// rollback (sessionClosing=true) requeues without applying backoff, unlike an
-// explicit application rollback().
-TEST_F(DlqTest, SessionCloseRequeuesWithoutBackoff) {
+// Closing an uncommitted transaction returns its input under the retry policy.
+TEST_F(DlqTest, SessionCloseRequeuesWithBackoff) {
+  struct ResetClock { ~ResetClock() { tiny_mq::DeliveryClock::setTestTime(-1); } } reset;
+  constexpr int64_t sentAt = 5000;
+  tiny_mq::DeliveryClock::setTestTime(sentAt);
   const std::string queueName = CurrentTestName;
   {
     Connection connection(*_exchange);
-    Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
-    Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, queueName);
-
-    RedeliveryPolicy policy;
-    policy.backoffMs = 5000;
-    policy.maxRedeliveries = 6;
-    queue->setRedeliveryPolicy(policy);
-
-    Producer::Ptr producer = session.createProducer(queue);
-    Consumer::Ptr consumer = session.createConsumer(queue);
-
-    TextMessage m = session.createTextMessage("close-no-backoff", Message::PERSISTENT);
-    producer->send(m);
+    connection.start();
+    auto& session = connection.createSession(Session::SESSION_TRANSACTED);
+    auto queue = session.createDestination(tiny_mq::destination::Queue, queueName);
+    queue->setRedeliveryPolicy({6, 5000, 60000, {}});
+    auto producer = session.createProducer(queue);
+    auto consumer = session.createConsumer(queue);
+    producer->send(session.createTextMessage("close with backoff", Message::PERSISTENT));
     session.commit();
-
-    Message::Ptr r0 = consumer->recv();
-    ASSERT_NE(r0, nullptr);
-    // No commit — closing below rolls this back with sessionClosing=true.
+    ASSERT_TRUE(consumer->receiveNoWait());
+    session.close();
   }
-
-  Connection connection2(*_exchange);
-  Session &session2 = connection2.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
-  Destination::Ptr queue2 = session2.createDestination(tiny_mq::destination::Queue, queueName);
-  Consumer::Ptr consumer2 = session2.createConsumer(queue2);
-
-  TextMessage::Ptr r = Message::As<TextMessage>(consumer2->recv(100000));
-  ASSERT_NE(r, nullptr) << "session-close rollback must requeue immediately, without backoff";
-  EXPECT_TRUE(r->jmsHeaders.redelivered);
-  EXPECT_EQ(1, r->jmsHeaders.deliveryCount);
-  EXPECT_EQ(0, r->jmsHeaders.deliveryTime);
+  Connection connection(*_exchange);
+  connection.start();
+  auto& session = connection.createSession();
+  auto consumer = session.createConsumer(session.createDestination(tiny_mq::destination::Queue, queueName));
+  EXPECT_FALSE(consumer->receiveNoWait());
+  tiny_mq::DeliveryClock::setTestTime(sentAt + 5000);
+  auto retry = consumer->receive(1000);
+  ASSERT_TRUE(retry);
+  EXPECT_EQ(1, retry->jmsHeaders.deliveryCount);
+  EXPECT_TRUE(retry->jmsHeaders.redelivered);
+  EXPECT_EQ(sentAt, retry->jmsHeaders.deliveryTime);
 }
 
 // T22: durable subscriber, maxRedeliveries=0, DLQ set — dead-lettering a
@@ -796,6 +797,7 @@ TEST_F(DlqTest, DurableSubscriberDeadLetterRemovesFromDurableStorage) {
   {
     Connection connection(*_exchange);
     connection.setClientID("dlq-test-client-22");
+    connection.start();
     Session &session = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
     Destination::Ptr topic = session.createDestination(tiny_mq::destination::Topic, topicName);
     Destination::Ptr dlq = session.createDestination(tiny_mq::destination::Queue, dlqName);
@@ -822,6 +824,7 @@ TEST_F(DlqTest, DurableSubscriberDeadLetterRemovesFromDurableStorage) {
 
   Connection connection2(*_exchange);
   connection2.setClientID("dlq-test-client-22");
+  connection2.start();
   Session &session2 = connection2.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr topic2 = session2.createDestination(tiny_mq::destination::Topic, topicName);
   Destination::Ptr dlq2 = session2.createDestination(tiny_mq::destination::Queue, dlqName);
@@ -840,6 +843,7 @@ TEST_F(DlqTest, DurableSubscriberDeadLetterRemovesFromDurableStorage) {
 // JMSX property names.
 TEST_F(DlqTest, JmsxPropertyNamesListed) {
   Connection connection(*_exchange);
+  connection.start();
   ConnectionMetaData metadata = connection.metadata();
   const auto &names = metadata.jmsxPropertyNames;
   EXPECT_NE(std::find(names.begin(), names.end(), "JMSXDeliveryCount"), names.end());

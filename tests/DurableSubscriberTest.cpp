@@ -36,6 +36,7 @@ static TextMessage::Ptr tryRecv(Consumer &c, int64_t usec = 50000) {
 // a regular topic subscriber.
 TEST_F(DurableSubscriberTest, testOnlineReceive) {
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr topic = session.createDestination(tiny_mq::destination::Topic, CurrentTestName);
     ASSERT_NE(topic, nullptr);
@@ -64,6 +65,7 @@ TEST_F(DurableSubscriberTest, testOfflineBufferingAndReconnect) {
     {
         // Session 1: create the durable subscription then go offline
         Connection session1_conn(*_exchange);
+        session1_conn.start();
         Session &session1 = session1_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = session1.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Consumer::Ptr sub = session1.createDurableConsumer(topic, subName);
@@ -74,6 +76,7 @@ TEST_F(DurableSubscriberTest, testOfflineBufferingAndReconnect) {
     {
         // Session 2: publish two persistent messages while subscriber is offline
         Connection session2_conn(*_exchange);
+        session2_conn.start();
         Session &session2 = session2_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = session2.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Producer::Ptr producer = session2.createProducer(topic);
@@ -86,6 +89,7 @@ TEST_F(DurableSubscriberTest, testOfflineBufferingAndReconnect) {
     {
         // Session 3: reconnect with the same subscription name, buffered messages arrive
         Connection session3_conn(*_exchange);
+        session3_conn.start();
         Session &session3 = session3_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = session3.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Consumer::Ptr sub = session3.createDurableConsumer(topic, subName);
@@ -109,6 +113,7 @@ TEST_F(DurableSubscriberTest, testNonPersistentNotBuffered) {
 
     {
         Connection session1_conn(*_exchange);
+        session1_conn.start();
         Session &session1 = session1_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = session1.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Consumer::Ptr sub = session1.createDurableConsumer(topic, subName);
@@ -117,6 +122,7 @@ TEST_F(DurableSubscriberTest, testNonPersistentNotBuffered) {
 
     {
         Connection session2_conn(*_exchange);
+        session2_conn.start();
         Session &session2 = session2_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = session2.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Producer::Ptr producer = session2.createProducer(topic);
@@ -127,6 +133,7 @@ TEST_F(DurableSubscriberTest, testNonPersistentNotBuffered) {
 
     {
         Connection session3_conn(*_exchange);
+        session3_conn.start();
         Session &session3 = session3_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = session3.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Consumer::Ptr sub = session3.createDurableConsumer(topic, subName);
@@ -146,6 +153,7 @@ TEST_F(DurableSubscriberTest, testUnsubscribeRemovesSubscription) {
 
     {
         Connection s_conn(*_exchange);
+        s_conn.start();
         Session &s = s_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Consumer::Ptr sub = s.createDurableConsumer(topic, subName);
@@ -155,6 +163,7 @@ TEST_F(DurableSubscriberTest, testUnsubscribeRemovesSubscription) {
     {
         // Publish while offline
         Connection s_conn(*_exchange);
+        s_conn.start();
         Session &s = s_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Producer::Ptr producer = s.createProducer(topic);
@@ -167,6 +176,7 @@ TEST_F(DurableSubscriberTest, testUnsubscribeRemovesSubscription) {
     {
         // A new subscription with the same name starts fresh
         Connection s_conn(*_exchange);
+        s_conn.start();
         Session &s = s_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Consumer::Ptr sub = s.createDurableConsumer(topic, subName);
@@ -188,6 +198,7 @@ TEST_F(DurableSubscriberTest, testMultipleDurableSubscribers) {
     // Both subscriptions go offline
     {
         Connection s_conn(*_exchange);
+        s_conn.start();
         Session &s = s_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         s.createDurableConsumer(topic, subA);
@@ -197,6 +208,7 @@ TEST_F(DurableSubscriberTest, testMultipleDurableSubscribers) {
     // Publish while both are offline
     {
         Connection s_conn(*_exchange);
+        s_conn.start();
         Session &s = s_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Producer::Ptr producer = s.createProducer(topic);
@@ -206,6 +218,7 @@ TEST_F(DurableSubscriberTest, testMultipleDurableSubscribers) {
     // Both subscriptions should independently receive the message on reconnect
     {
         Connection s_conn(*_exchange);
+        s_conn.start();
         Session &s = s_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
 
@@ -236,12 +249,14 @@ TEST_F(DurableSubscriberTest, testClientIdScopesDurableSubscription) {
     {
         Connection connA(*_exchange);
         connA.setClientID("client-A");
+        connA.start();
         Session &sA = connA.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = sA.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         ASSERT_NE(sA.createDurableConsumer(topic, subName), nullptr);
 
         Connection connB(*_exchange);
         connB.setClientID("client-B");
+        connB.start();
         Session &sB = connB.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topicB = sB.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         // Same name under a different clientID must NOT collide with client-A's.
@@ -251,6 +266,7 @@ TEST_F(DurableSubscriberTest, testClientIdScopesDurableSubscription) {
     // Publish one persistent message while both subscriptions are offline.
     {
         Connection pub(*_exchange);
+        pub.start();
         Session &s = pub.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Producer::Ptr producer = s.createProducer(topic);
@@ -261,6 +277,7 @@ TEST_F(DurableSubscriberTest, testClientIdScopesDurableSubscription) {
     {
         Connection connA(*_exchange);
         connA.setClientID("client-A");
+        connA.start();
         Session &sA = connA.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = sA.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Consumer::Ptr consA = sA.createDurableConsumer(topic, subName);
@@ -270,6 +287,7 @@ TEST_F(DurableSubscriberTest, testClientIdScopesDurableSubscription) {
 
         Connection connB(*_exchange);
         connB.setClientID("client-B");
+        connB.start();
         Session &sB = connB.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topicB = sB.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Consumer::Ptr consB = sB.createDurableConsumer(topicB, subName);
@@ -289,6 +307,7 @@ TEST_F(DurableSubscriberTest, testClientIdScopesDurableSubscription) {
 // Attempting to create a durable consumer on a Queue must throw.
 TEST_F(DurableSubscriberTest, testDurableConsumerOnQueueThrows) {
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
     ASSERT_NE(queue, nullptr);
@@ -302,6 +321,7 @@ TEST_F(DurableSubscriberTest, testAcknowledgedMessagesNotRedelivered) {
     const std::string subName = "sub-ack";
     {
         Connection s_conn(*_exchange);
+        s_conn.start();
         Session &s = s_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Consumer::Ptr sub = s.createDurableConsumer(topic, subName);
@@ -318,6 +338,7 @@ TEST_F(DurableSubscriberTest, testAcknowledgedMessagesNotRedelivered) {
     {
         // Reconnect — no messages should be waiting
         Connection s_conn(*_exchange);
+        s_conn.start();
         Session &s = s_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
         Consumer::Ptr sub = s.createDurableConsumer(topic, subName);

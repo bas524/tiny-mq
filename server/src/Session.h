@@ -6,6 +6,8 @@
 #define TINY_MQ__SESSION_H_
 
 #include "Exchange.h"
+#include "SessionDispatch.h"
+#include "TransactionBuffer.h"
 #include "QueueBrowser.h"
 #include "TextMessage.h"
 #include "MapMessage.h"
@@ -100,15 +102,10 @@ class Session {
   static std::string getAcknowledgeModeName(Session::AcknowledgeMode mode);
 
   void commit();
+  void close();
+  void acknowledge();
 
-  // Explicit application rollback (JMS 2.0 § 4.4, SESSION_TRANSACTED):
-  // redelivers every buffered in-flight message with headers.redelivered =
-  // true and headers.deliveryCount incremented, honoring the destination's
-  // RedeliveryPolicy backoff/DLQ (spec 24, Consumer::redeliver). ~Session()
-  // reaches the same in-flight messages via the private rollback(bool)
-  // overload below with sessionClosing=true, which still increments the
-  // counter (and can still dead-letter) but never applies backoff — see
-  // Consumer::redeliver's sessionClosing contract.
+  // Discards staged sends and returns this session's consumed deliveries.
   void rollback();
 
   // JMS 2.0 § 8.4.8. Stops message delivery and requeues every message this
@@ -131,13 +128,23 @@ class Session {
   Session(Connection &connection, AcknowledgeMode mode = AcknowledgeMode::AUTO_ACKNOWLEDGE);
   friend class Connection;
 
-  // Spec 24 (E15): sessionClosing=true only from ~Session() — see the public
-  // rollback() comment above. The public rollback() delegates here with false.
-  void rollback(bool sessionClosing);
+  friend class SessionDispatch;
+  friend class Consumer;
+  friend class Producer;
+
+  void ensureOpen() const;
+  void returnClaims(bool transacted);
   Consumer::Ptr remember(Consumer::Ptr consumer);
   void pruneClosedConsumers();
+  void finishTransaction(std::string nextId);
 
   AcknowledgeMode _mode;
+  SessionDispatch _dispatch{*this};
+  TransactionBuffer _transaction;
+  std::atomic_bool _closing{false};
+  bool _closed = false;
+  std::mutex _closeMutex;
+  uint64_t _receiveSequence = 0;
   std::reference_wrapper<Poco::Logger> _logger;
   std::reference_wrapper<Connection> _connection;
   std::string _suffix;

@@ -28,6 +28,7 @@ void TransactionTest::TearDown() {
 TEST_F(TransactionTest, testSendReceiveTransactedBatches) {
   // Create CMS Object for Comms
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   EXPECT_NE(destination, nullptr);
@@ -64,6 +65,7 @@ TEST_F(TransactionTest, testSendReceiveTransactedBatches) {
 TEST_F(TransactionTest, testSendRollback) {
   // Create CMS Object for Comms
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   EXPECT_NE(destination, nullptr);
@@ -116,6 +118,7 @@ TEST_F(TransactionTest, testSendRollback) {
 TEST_F(TransactionTest, testSendRollbackCommitRollback) {
   // Create CMS Object for Comms
   Connection connection(*_exchange);
+  connection.start();
   Session *session = &connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr destination = session->createDestination(tiny_mq::destination::Queue, CurrentTestName);
   EXPECT_NE(destination, nullptr);
@@ -164,6 +167,7 @@ TEST_F(TransactionTest, testSendRollbackCommitRollback) {
 }
 TEST_F(TransactionTest, testSendSessionClose) {
   auto connection = std::make_unique<Connection>(*_exchange);
+  connection->start();
   Session *session = &connection->createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr destination = session->createDestination(tiny_mq::destination::Queue, CurrentTestName);
   EXPECT_NE(destination, nullptr);
@@ -191,6 +195,7 @@ TEST_F(TransactionTest, testSendSessionClose) {
   EXPECT_NO_THROW(connection.reset());
 
   connection = std::make_unique<Connection>(*_exchange);
+  connection->start();
   session = &connection->createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   destination = session->createDestination(tiny_mq::destination::Queue, CurrentTestName);
   EXPECT_NE(destination, nullptr);

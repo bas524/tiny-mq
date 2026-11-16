@@ -33,6 +33,7 @@ void PersistentTransactionTest::TearDown() {
 TEST_F(PersistentTransactionTest, testPersistentSendReceiveTransactedBatches) {
     // Create CMS Object for Comms
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
     EXPECT_NE(destination, nullptr);
@@ -71,6 +72,7 @@ TEST_F(PersistentTransactionTest, testPersistentSendReceiveTransactedBatches) {
 TEST_F(PersistentTransactionTest, testPersistentSendRollback) {
     // Create CMS Object for Comms
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
     EXPECT_NE(destination, nullptr);
@@ -126,6 +128,7 @@ TEST_F(PersistentTransactionTest, testPersistentSendRollback) {
 TEST_F(PersistentTransactionTest, testPersistentSendAndAcknowledgeInSameTransaction) {
     // Test where message is sent and acknowledged in same transaction
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
     EXPECT_NE(destination, nullptr);
@@ -162,6 +165,7 @@ TEST_F(PersistentTransactionTest, testPersistentSendAndAcknowledgeInSameTransact
 TEST_F(PersistentTransactionTest, testMixedPersistentNonPersistentInTransaction) {
     // Test mixing persistent and non-persistent messages in same transaction
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
     EXPECT_NE(destination, nullptr);
@@ -225,6 +229,7 @@ TEST_F(PersistentTransactionTest, testTransactionRecoveryAfterRestart) {
     // First session - send message but don't commit
     {
         Connection session_conn(*_exchange);
+        session_conn.start();
         Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
         Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, testName);
         EXPECT_NE(destination, nullptr);
@@ -245,6 +250,7 @@ TEST_F(PersistentTransactionTest, testTransactionRecoveryAfterRestart) {
     // New session - should not see the uncommitted message
     {
         Connection session_conn(*_exchange);
+        session_conn.start();
         Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
         Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, testName);
         EXPECT_NE(destination, nullptr);
@@ -266,6 +272,7 @@ TEST_F(PersistentTransactionTest, testCommittedTransactionSurvivesRestart) {
     // First session - send message and commit
     {
         Connection session_conn(*_exchange);
+        session_conn.start();
         Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
         Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, testName);
         EXPECT_NE(destination, nullptr);
@@ -286,6 +293,7 @@ TEST_F(PersistentTransactionTest, testCommittedTransactionSurvivesRestart) {
     // New session - should see the committed message
     {
         Connection session_conn(*_exchange);
+        session_conn.start();
         Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
         Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, testName);
         EXPECT_NE(destination, nullptr);

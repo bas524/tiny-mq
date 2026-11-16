@@ -28,6 +28,7 @@ void DisableHeadersTest::TearDown() {
 // By default the provider assigns a "ID:" messageId and a non-zero timestamp.
 TEST_F(DisableHeadersTest, testEnabledByDefault) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -46,6 +47,7 @@ TEST_F(DisableHeadersTest, testEnabledByDefault) {
 // setDisableMessageID -> outgoing messageId stays empty.
 TEST_F(DisableHeadersTest, testDisableMessageID) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -66,6 +68,7 @@ TEST_F(DisableHeadersTest, testDisableMessageID) {
 // setDisableMessageTimestamp -> outgoing timestamp stays 0.
 TEST_F(DisableHeadersTest, testDisableTimestamp) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);

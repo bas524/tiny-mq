@@ -9,6 +9,7 @@
 #include <memory>
 #include "LogTracer.h"
 #include "Message.h"
+#include "DeliveryClock.h"
 
 namespace linear_storage {
 
@@ -258,7 +259,7 @@ void ConcurrentLinearStorage::sweepExpired() {
   auto batch = _linearStorage.scanPrefix(kPrefixLen, kSweepBudget, _sweepCursor);
   if (batch.empty()) return;
 
-  const int64_t nowMs = Poco::Timestamp().epochMicroseconds() / 1000;
+  const int64_t nowMs = tiny_mq::DeliveryClock::now();
   for (auto& [record, prefix] : batch) {
     if (prefix.size() < kPrefixLen) continue;                          // too short to carry headers
     if (!tiny_mq::hasStorageHeaders(static_cast<uint8_t>(prefix[kMagicOffset]))) continue;

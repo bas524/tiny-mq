@@ -52,6 +52,7 @@ TEST_F(ObjectMessageTest, testEmptyBody) {
 // End-to-end persistent send/recv keeps body + className through storage.
 TEST_F(ObjectMessageTest, testPersistentSendRecv) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   ASSERT_NE(queue, nullptr);

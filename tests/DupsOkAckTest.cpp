@@ -33,6 +33,7 @@ void DupsOkAckTest::TearDown() {
 // The mode name is exposed correctly.
 TEST_F(DupsOkAckTest, testModeName) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::DUPS_OK_ACKNOWLEDGE);
   EXPECT_EQ(Session::AcknowledgeMode::DUPS_OK_ACKNOWLEDGE, session.acknowledgeMode());
   EXPECT_EQ("DUPS_OK_ACKNOWLEDGE", session.acknowledgeModeName());
@@ -41,6 +42,7 @@ TEST_F(DupsOkAckTest, testModeName) {
 // All persistent messages are delivered and acked under DUPS_OK without error.
 TEST_F(DupsOkAckTest, testReceivesAllAndAcks) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::DUPS_OK_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -62,6 +64,7 @@ TEST_F(DupsOkAckTest, testReceivesAllAndAcks) {
 // the destructor flush. All messages must still be delivered in order.
 TEST_F(DupsOkAckTest, testThresholdFlush) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::DUPS_OK_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -75,6 +78,6 @@ TEST_F(DupsOkAckTest, testThresholdFlush) {
     TextMessage::Ptr in = Message::As<TextMessage>(consumer->recv());
     ASSERT_NE(in, nullptr) << "missing message " << i;
     EXPECT_EQ("x-" + std::to_string(i), in->text());
-    EXPECT_NO_THROW(consumer->acknowledgeOn(*in));
   }
+  EXPECT_NO_THROW(consumer->close());
 }

@@ -30,6 +30,7 @@ void SimpleTest::TearDown() {
 ////////////////////////////////////////////////////////////////////////////////
 TEST_F(SimpleTest, testSendRecv) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, "test");
   EXPECT_NE(destination, nullptr);
@@ -61,6 +62,7 @@ TEST_F(SimpleTest, testSendRecv) {
 ////////////////////////////////////////////////////////////////////////////////
 TEST_F(SimpleTest, testTransactSendRecv) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, "test");
   EXPECT_NE(destination, nullptr);
@@ -96,6 +98,7 @@ TEST_F(SimpleTest, testTransactSendRecv) {
 // acknowledge modes against the same destination, independently.
 TEST_F(SimpleTest, testTwoSessionsDifferentAckModesSameDestination) {
   Connection connection(*_exchange);
+  connection.start();
   Session &txSession = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Session &autoSession = connection.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
 
@@ -130,6 +133,7 @@ TEST_F(SimpleTest, testTwoSessionsDifferentAckModesSameDestination) {
 
 TEST_F(SimpleTest, testSaveAndRestoreMessage) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   TextMessage message = session.createTextMessage("TEST MESSAGE 1");
   std::string propName = "test-int";

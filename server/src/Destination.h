@@ -12,6 +12,7 @@
 #include "Consumer.h"
 #include "DeliveryScheduler.h"
 #include "DestinationType.h"
+#include "Exceptions.h"
 #include "Producer.h"
 #include "RedeliveryPolicy.h"
 #include "SubscriptionRegistry.h"
@@ -22,7 +23,7 @@ class Exchange;
 class QueueBrowser;
 class Session;
 class TemporaryDestination;
-class TransactionBuffer;
+class LocalTransactionJournal;
 
 // Cheap uncontended locking for the ready set and the publication target list.
 class DestinationMutex {
@@ -49,7 +50,9 @@ class DestinationMutex {
 class DeliveryState {
  public:
   void enqueue(Message::Ptr message);
-  Message::Ptr claim(const Selector* selector, int64_t& timeout);
+  Message::Ptr claim(const Selector* selector, int64_t timeout, std::chrono::steady_clock::time_point& deadline,
+                     const std::atomic_bool& started, const std::atomic_bool& closing,
+                     const std::function<bool(const Message&)>* check, bool& incompatible);
   std::vector<Message::Ptr> snapshot(const Selector* selector);
   void close();
   bool isClosed() const { return _closed.load(std::memory_order_acquire); }
@@ -68,13 +71,53 @@ class DeliveryState {
     bool signalled{false};
   };
 
-  Message::Ptr take(const Selector* selector);
+  void insert(Message::Ptr message, bool special);
+  Message::Ptr take(const Selector* selector, const std::function<bool(const Message&)>* check,
+                    bool& incompatible);
+  bool followsRecoveredDelivery(const Message& message, const Selector* selector) const;
+  template<class Range>
+  void enqueueBatch(Range& entries) {
+    std::lock_guard lock(_mutex);
+    if (_closed) throw IllegalStateException("transaction destination is closed");
+    const auto previousMask = _nonEmpty;
+    auto next = entries.begin();
+    try {
+      for (; next != entries.end(); ++next) {
+        const auto band = next->message->jmsHeaders.priority;
+        _bands[band].push_back(std::move(next->message));
+        _nonEmpty |= 1u << band;
+      }
+    } catch (...) {
+      while (next != entries.begin()) {
+        // Keep the original drafts and ready set intact on an allocation error.
+        --next;
+        const auto band = next->priority;
+        next->message = std::move(_bands[band].back());
+        _bands[band].pop_back();
+      }
+      _nonEmpty = previousMask;
+      throw;
+    }
+    notifyWaiters();
+  }
+  void wake();
+  void watch(const std::shared_ptr<std::atomic_uint64_t>& listener);
+  void unwatch(const std::shared_ptr<std::atomic_uint64_t>& listener);
+  void notifyWaiters();
+  friend class Connection;
+  friend class Consumer;
+  friend class Session;
+  friend class SessionDispatch;
+  friend class Destination;
 
   DestinationMutex _mutex;
   std::array<std::deque<Message::Ptr>, QueueT::kBands> _bands;
   unsigned _nonEmpty{0};
+  size_t _special = 0;
   std::atomic_bool _closed{false};
   std::vector<std::shared_ptr<Waiter>> _waiters;
+  std::vector<std::weak_ptr<std::atomic_uint64_t>> _listeners;
+  void notifyListeners();
 };
 
 class Destination : public std::enable_shared_from_this<Destination> {
@@ -128,15 +171,30 @@ class Destination : public std::enable_shared_from_this<Destination> {
   void shutdown();
   void deleteTemporary(const Poco::UUID& owner);
 
-  void save(const Producer& producer, const Message& message);
-  void deliverCommitted(const Producer& producer, Message::Ptr message);
-  void publish(const Producer& producer, const Message& message);
-  void deliver(const Subscription& subscription, Message::Ptr message);
+  void save(const Producer& producer, const Message& message, int64_t acceptedAt);
+  struct Publication {
+    Destination* destination;
+    std::shared_ptr<DeliveryState> queue;
+    std::shared_ptr<Storage> storage;
+    Message::Ptr message;
+    int32_t priority;
+  };
+  void preparePublication(const Producer& producer, const Message::Ptr& message,
+                          std::vector<Publication>& outputs, int64_t now);
+
+  Message::Ptr prepareCopy(const Producer& producer, Message::Ptr copy, int64_t number);
+  bool matches(const Subscription& sub, const Producer& producer, const Message& message) const;
+  void publish(const Producer& producer, const Message& message, int64_t acceptedAt);
+  void deliver(const Subscription& subscription, Message::Ptr message, int64_t acceptedAt);
   static void persist(Storage& storage, Message& message);
   Poco::UUID storageKey(int64_t sequence) const;
-  static void replay(const std::shared_ptr<DeliveryState>& queue, Storage& storage, DeliveryScheduler& scheduler);
+  static Message::Ptr decodeStored(const std::vector<char>& bytes);
+  void replay(const std::shared_ptr<DeliveryState>& queue, Storage& storage);
+  void registerAttempt(Storage& storage, Message& message);
+  void retry(const std::shared_ptr<DeliveryState>& queue, Storage* storage, Message::Ptr message,
+             bool restoring = false);
   void enqueueOrSchedule(const std::shared_ptr<DeliveryState>& queue, Message::Ptr message);
-  void deadLetter(Message::Ptr message, std::string reason) noexcept;
+  void enqueueOrSchedule(const std::shared_ptr<DeliveryState>& queue, Message::Ptr message, int64_t now);
 
   Exchange& _exchange;
   destination::Type _type;
@@ -152,7 +210,6 @@ class Destination : public std::enable_shared_from_this<Destination> {
 
   std::shared_ptr<DeliveryState> _queue;
   std::shared_ptr<Storage> _storage;
-  std::unique_ptr<TransactionBuffer> _transactionBuffer;
   DeliveryScheduler _scheduler;
   DestinationMutex _mutex;
   std::list<std::shared_ptr<Subscription>> _subscriptions;
@@ -162,6 +219,7 @@ class Destination : public std::enable_shared_from_this<Destination> {
   RedeliveryPolicy _redeliveryPolicy;
 
   friend class Exchange;
+  friend class LocalTransactionJournal;
   friend class Producer;
   friend class Consumer;
   friend class Session;

@@ -124,6 +124,7 @@ TEST_F(MessageContractTest, V03DeliveryAndTransaction) {
   {
     Exchange exchange(path);
     Connection connection(exchange);
+    connection.start();
     for (auto mode : {Session::AUTO_ACKNOWLEDGE, Session::SESSION_TRANSACTED}) {
       auto& session = connection.createSession(mode);
       auto queue = session.createDestination(destination::Queue, std::to_string(mode));

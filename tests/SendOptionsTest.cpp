@@ -39,6 +39,7 @@ static TextMessage::Ptr tryRecv(Consumer &c, int64_t usec = 200000) {
 // send falls back to the stored default.
 TEST_F(SendOptionsTest, testPerSendOverrideBeatsDefault) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -62,6 +63,7 @@ TEST_F(SendOptionsTest, testPerSendOverrideBeatsDefault) {
 // A producer default persists across multiple plain sends.
 TEST_F(SendOptionsTest, testDefaultPersistsAcrossSends) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -81,6 +83,7 @@ TEST_F(SendOptionsTest, testDefaultPersistsAcrossSends) {
 // timeToLive sets JMSExpiration to send-time + ttl; ttl == 0 leaves it unset.
 TEST_F(SendOptionsTest, testTimeToLiveSetsExpiration) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -111,12 +114,14 @@ TEST_F(SendOptionsTest, testDeliveryModeOverridePersists) {
   const std::string subName = "sub-delivmode";
   {
     Connection c(*_exchange);
+    c.start();
     Session &s = c.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
     ASSERT_NE(s.createDurableConsumer(topic, subName), nullptr);  // goes offline at scope end
   }
   {
     Connection c(*_exchange);
+    c.start();
     Session &s = c.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
     Producer::Ptr producer = s.createProducer(topic);
@@ -126,6 +131,7 @@ TEST_F(SendOptionsTest, testDeliveryModeOverridePersists) {
   }
   {
     Connection c(*_exchange);
+    c.start();
     Session &s = c.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr topic = s.createDestination(tiny_mq::destination::Topic, CurrentTestName);
     Consumer::Ptr sub = s.createDurableConsumer(topic, subName);
@@ -140,6 +146,7 @@ TEST_F(SendOptionsTest, testDeliveryModeOverridePersists) {
 // Invalid priority / negative ttl are rejected.
 TEST_F(SendOptionsTest, testInvalidOptionsThrow) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -156,6 +163,7 @@ TEST_F(SendOptionsTest, testInvalidOptionsThrow) {
 // and priority untouched (backward compatibility).
 TEST_F(SendOptionsTest, testNoDefaultPreservesMessage) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);

@@ -35,7 +35,7 @@ jobs:
         run: |
           git diff --name-only "$BASE_SHA" HEAD -- \
             server/ external/ CMakeLists.txt CMakePresets.json vcpkg.json \
-            'tests/BenchmarkTest.*' tests/nfr71.py .github/workflows/performance.yml > "$RUNNER_TEMP/perf-changes"
+            'tests/BenchmarkTest.*' tests/nfr71.py tests/nfr72.py .github/workflows/performance.yml > "$RUNNER_TEMP/perf-changes"
           if [ ! -s "$RUNNER_TEMP/perf-changes" ]; then
             echo 'No broker performance inputs changed.' >> "$GITHUB_STEP_SUMMARY"
             exit 0
@@ -82,20 +82,30 @@ jobs:
 
           path = Path(sys.argv[1])
           source = path.read_text()
-          signature = "BenchmarkFixture, AutoAck_Persistent_RoundTrip"
-          legacy = f"BENCHMARK_F({signature})"
-          registration = f"BENCHMARK_REGISTER_F({signature})->MeasureProcessCPUTime();"
-          if legacy in source:
-              pattern = rf"^{re.escape(legacy)}(.*?^\}})"
-              def register(match):
-                  return f"BENCHMARK_DEFINE_F({signature}){match[1]}\n{registration}"
-              source, count = re.subn(pattern, register, source, flags=re.M | re.S)
+          for name in ("AutoAck_Persistent_RoundTrip", "ClientAck_Persistent_RoundTrip",
+                       "Transacted_Persistent_RoundTrip", "Transacted_Batch_Persistent"):
+              signature = f"BenchmarkFixture, {name}"
+              legacy = f"BENCHMARK_F({signature})"
+              if legacy in source:
+                  pattern = rf"^{re.escape(legacy)}(.*?^\}})"
+                  def register(match):
+                      return (f"BENCHMARK_DEFINE_F({signature}){match[1]}\n"
+                              f"BENCHMARK_REGISTER_F({signature})->MeasureProcessCPUTime();")
+                  source, count = re.subn(pattern, register, source, flags=re.M | re.S)
+                  if count != 1:
+                      sys.exit(f"Expected exactly one legacy {name} benchmark")
+                  if name == "AutoAck_Persistent_RoundTrip":
+                      Path(sys.argv[2]).touch()
+                  continue
+              pattern = rf"(BENCHMARK_REGISTER_F\({re.escape(signature)}\)[^;]*);"
+              def measure(match):
+                  if "MeasureProcessCPUTime()" in match[1]:
+                      return match[0]
+                  return f"{match[1]}->MeasureProcessCPUTime();"
+              source, count = re.subn(pattern, measure, source)
               if count != 1:
-                  sys.exit("Expected exactly one legacy persistent benchmark")
-              path.write_text(source)
-              Path(sys.argv[2]).touch()
-          elif registration not in source:
-              sys.exit("The baseline persistent benchmark must measure process CPU")
+                  sys.exit(f"Missing persistent benchmark {name}")
+          path.write_text(source)
           PY
           (
             cd "$RUNNER_TEMP/perf-base"
@@ -122,10 +132,10 @@ jobs:
             fi
             lscpu
           } > "$out/environment.txt"
-          python3 -B tests/nfr71.py \
+          python3 -B tests/nfr72.py \
             --baseline "$RUNNER_TEMP/perf-base/cmake-build-releasewithdebuginfo/tiny_mq" \
             --candidate "$GITHUB_WORKSPACE/cmake-build-releasewithdebuginfo/tiny_mq" \
-            --out "$out" --repetitions 9 | tee "$out/summary.log"
+            --out "$out" | tee "$out/summary.log"
 
       - name: Save the raw samples
         if: always() && steps.comparison.outputs.run == 'true'

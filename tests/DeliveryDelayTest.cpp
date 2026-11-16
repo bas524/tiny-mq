@@ -45,6 +45,7 @@ void DeliveryDelayTest::TearDown() {
 // consumer until the delay has elapsed, then must be delivered.
 TEST_F(DeliveryDelayTest, testDelayedMessageInvisibleUntilDue) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -75,6 +76,7 @@ TEST_F(DeliveryDelayTest, testPersistentDelayedMessageSurvivesRestart) {
   {
     tiny_mq::Exchange ex(dir);
     Connection conn(ex);
+    conn.start();
     Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, destName);
     Producer::Ptr producer = session.createProducer(queue);
@@ -85,6 +87,7 @@ TEST_F(DeliveryDelayTest, testPersistentDelayedMessageSurvivesRestart) {
 
   tiny_mq::Exchange ex2(dir);
   Connection conn2(ex2);
+  conn2.start();
   Session &session2 = conn2.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue2 = session2.createDestination(tiny_mq::destination::Queue, destName);
   Consumer::Ptr consumer2 = session2.createConsumer(queue2);
@@ -102,10 +105,10 @@ TEST_F(DeliveryDelayTest, testPersistentDelayedMessageSurvivesRestart) {
   EXPECT_EQ("persisted-delayed", received->text());
 }
 
-// Test plan #3: for a transactional send, the delay clock starts at commit
-// (not send), and a rollback discards the delayed message entirely.
-TEST_F(DeliveryDelayTest, testTransactionalCommitStartsClockRollbackDiscards) {
+// REQ-72-1: the delay clock starts at send. Rollback discards the staged message.
+TEST_F(DeliveryDelayTest, testTransactionalSendStartsClockRollbackDiscards) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -122,18 +125,14 @@ TEST_F(DeliveryDelayTest, testTransactionalCommitStartsClockRollbackDiscards) {
   EXPECT_EQ(consumer->recv(50000), nullptr)
       << "a rolled-back delayed message must never be delivered";
 
-  // --- commit starts the clock, not send: elapse well past kDelayMs *before*
-  // committing. If the clock had started at send(), the message would already
-  // be due by the time commit() runs; it must not be.
   TextMessage delayed = session.createTextMessage("committed-delayed");
   producer->send(delayed, SendOptions{Message::NOT_PERSISTENT, 4, 0, kDelayMs});
   Poco::Thread::sleep(static_cast<long>(kDelayMs + 150));
+  EXPECT_FALSE(consumer->receiveNoWait());
   session.commit();
-  EXPECT_EQ(consumer->recv(50000), nullptr)
-      << "the delay clock starts at commit, not send — message must still be pending right after commit";
-
-  auto received = Message::As<TextMessage>(consumer->recv(500000));
-  ASSERT_NE(received, nullptr) << "message must be delivered once the commit-time delay elapses";
+  auto received = Message::As<TextMessage>(consumer->receiveNoWait());
+  ASSERT_NE(received, nullptr);
+  EXPECT_EQ(delayed.jmsHeaders.deliveryTime, received->jmsHeaders.deliveryTime);
   EXPECT_EQ("committed-delayed", received->text());
 }
 
@@ -165,19 +164,10 @@ TEST_F(DeliveryDelayTest, testSchedulerDeliversImmediatelyInsteadOfStartingThrea
   // started (or, pre-fix, one that leaked past the first stop()).
 }
 
-// Round-2 fix (B2): a persistent, transactional, delayed message must arrive
-// with the real (commit-resolved) JMSDeliveryTime, not the pre-commit 0.
-// Producer::commit() patches the deliveryTime in two independently-cached
-// copies of the serialized bytes: the TransactionBuffer's buffered copy (which
-// this test's *storage* ends up holding) and the Message's own
-// _cachedStorageBytes (which Consumer::recv()'s fast path reads instead of
-// storage, since this is the same process). This test exercises exactly that
-// fast path — the one the missing patch broke — and also, in passing,
-// exercises TransactionBuffer::patchDeliveryTime's offset-43 memcpy for real
-// (previously that code path ran zero times across the whole suite because no
-// test combined persistent + transactional + delayed).
+// A persistent delayed send keeps its original headers when commit publishes it.
 TEST_F(DeliveryDelayTest, testPersistentTransactionalDelayedPreservesDeliveryTimeOnReceipt) {
   Connection conn(*_exchange);
+  conn.start();
   Session &session = conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -187,125 +177,87 @@ TEST_F(DeliveryDelayTest, testPersistentTransactionalDelayedPreservesDeliveryTim
   TextMessage delayed = session.createTextMessage("persisted-transactional-delayed", Message::PERSISTENT);
   producer->send(delayed, SendOptions{Message::PERSISTENT, 4, 0, kDelayMs});
 
-  Poco::Timestamp commitTime;
   session.commit();
 
   EXPECT_EQ(consumer->recv(50000), nullptr)
-      << "persistent transactional delayed message must stay invisible until its commit-resolved delivery time";
+      << "persistent transactional delayed message must stay invisible until its send-time delivery deadline";
 
   auto received = Message::As<TextMessage>(consumer->recv(500000));
   ASSERT_NE(received, nullptr) << "delayed message must be delivered once due";
   EXPECT_EQ("persisted-transactional-delayed", received->text());
 
-  ASSERT_NE(received->jmsHeaders.deliveryTime, 0)
-      << "JMSDeliveryTime must reflect the real commit-resolved delivery time, not the "
-         "pre-commit 0 — spec 13 review B2";
-  const int64_t expectedDeliveryTimeMs = commitTime.epochMicroseconds() / 1000 + kDelayMs;
-  EXPECT_NEAR(static_cast<double>(received->jmsHeaders.deliveryTime),
-              static_cast<double>(expectedDeliveryTimeMs), 3000.0)
-      << "JMSDeliveryTime must match the commit-time-resolved value (offset-43 patch)";
+  EXPECT_EQ(delayed.jmsHeaders.deliveryTime, received->jmsHeaders.deliveryTime);
 }
 
-// Round-2 fix (B2, continued): the same combination must also come back
-// correct after a restart, i.e. once the *only* surviving copy of the
-// deliveryTime is whatever TransactionBuffer::patchDeliveryTime wrote into the
-// bytes handed to storage (Consumer's own in-process cache doesn't survive a
-// restart; a fresh Message shell is built straight from storage bytes).
+// Reopening the store keeps the send-time deadline from the persisted bytes.
 TEST_F(DeliveryDelayTest, testPersistentTransactionalDelayedPreservesDeliveryTimeAcrossRestart) {
   const std::string destName = std::string(CurrentTestName) + "_queue";
   const std::string dir = CurrentTestSuiteStorageDir() + "/restart-transactional-delay-test";
   constexpr int64_t kDelayMs = 500;
 
-  Poco::Timestamp commitTime;
+  int64_t deliveryTime = 0;
   {
     tiny_mq::Exchange ex(dir);
     Connection conn(ex);
+    conn.start();
     Session &session = conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, destName);
     Producer::Ptr producer = session.createProducer(queue);
     TextMessage delayed = session.createTextMessage("persisted-transactional-delayed-restart", Message::PERSISTENT);
     producer->send(delayed, SendOptions{Message::PERSISTENT, 4, 0, kDelayMs});
     session.commit();
-    commitTime.update();
+    deliveryTime = delayed.jmsHeaders.deliveryTime;
     // Exchange goes out of scope here -> destructor runs, simulating a restart.
   }
 
   tiny_mq::Exchange ex2(dir);
   Connection conn2(ex2);
+  conn2.start();
   Session &session2 = conn2.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr queue2 = session2.createDestination(tiny_mq::destination::Queue, destName);
   Consumer::Ptr consumer2 = session2.createConsumer(queue2);
 
-  const int64_t elapsedMs = commitTime.elapsed() / 1000;
-  if (elapsedMs < kDelayMs) {
+  if (Poco::Timestamp().epochMicroseconds() / 1000 + 60 < deliveryTime) {
     EXPECT_EQ(consumer2->recv(50000), nullptr)
         << "delayed persistent transactional message must stay invisible across restart "
-           "until its commit-resolved delivery time";
+           "until its send-time delivery deadline";
   }
 
   auto received = Message::As<TextMessage>(consumer2->recv(2000000));
   ASSERT_NE(received, nullptr) << "message must eventually be delivered after restart";
   EXPECT_EQ("persisted-transactional-delayed-restart", received->text());
 
-  ASSERT_NE(received->jmsHeaders.deliveryTime, 0)
-      << "JMSDeliveryTime must survive persistence + restart, not come back as 0";
-  const int64_t expectedDeliveryTimeMs = commitTime.epochMicroseconds() / 1000 + kDelayMs;
-  EXPECT_NEAR(static_cast<double>(received->jmsHeaders.deliveryTime),
-              static_cast<double>(expectedDeliveryTimeMs), 5000.0)
-      << "JMSDeliveryTime must match the commit-time-resolved value after restart";
+  EXPECT_EQ(deliveryTime, received->jmsHeaders.deliveryTime);
 }
 
-// Round-2 fix (N1): an absurdly large deliveryDelay/timeToLive must be
-// rejected up front rather than silently overflowing nowMs + delay (or the
-// millisecond -> nanosecond conversion inside DeliveryScheduler's wait_until)
-// into a negative deliveryTime, which would deliver the message immediately —
-// the opposite of what was requested.
-TEST_F(DeliveryDelayTest, testDeliveryDelayUpperBoundRejected) {
+TEST_F(DeliveryDelayTest, testDeliveryDelayUpperBoundSaturates) {
   Connection conn(*_exchange);
-  Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
-  Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
-  Producer::Ptr producer = session.createProducer(queue);
-
-  TextMessage msg = session.createTextMessage("too-far-out");
-  EXPECT_THROW(
-      producer->send(msg, SendOptions{Message::NOT_PERSISTENT, 4, 0, std::numeric_limits<int64_t>::max()}),
-      std::invalid_argument)
-      << "an absurdly large deliveryDelay must be rejected, not silently overflow "
-         "into immediate delivery";
-
-  EXPECT_THROW(
-      producer->setDefault(SendOptions{Message::NOT_PERSISTENT, 4, std::numeric_limits<int64_t>::max(), 0}),
-      std::invalid_argument)
-      << "the same upper bound must apply to timeToLive, checked via setDefault";
+  conn.start();
+  Session &session = conn.createSession();
+  auto queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
+  auto producer = session.createProducer(queue);
+  auto consumer = session.createConsumer(queue);
+  auto message = session.createTextMessage("far in the future");
+  constexpr auto max = std::numeric_limits<int64_t>::max();
+  producer->setDefault({Message::NOT_PERSISTENT, 4, max, max});
+  producer->send(message);
+  EXPECT_EQ(max, message.jmsHeaders.expiration);
+  EXPECT_EQ(max, message.jmsHeaders.deliveryTime);
+  EXPECT_FALSE(consumer->receiveNoWait());
 }
 
-// Round-3 fix (B4): validateSendOptions only guards the SendOptions ingress.
-// jmsHeaders.deliveryTime is a public field, and Producer::send(message)
-// without setDefault() never calls applyOptions/validateSendOptions at all —
-// exactly the path the review's end-to-end reproduction used
-// (Exchange -> Session -> producer->send(m) with m.jmsHeaders.deliveryTime
-// set directly, no SendOptions in sight). Pre-fix, deliveryTime = INT64_MAX
-// reaches DeliveryScheduler::run() unclamped: "now() + milliseconds(delta)"
-// overflows system_clock's native duration and wraps into the past,
-// wait_until returns instantly, nothing is actually due, and the worker spins
-// at 100% CPU while holding _mutex — so stop() (called from ~Destination)
-// blocks on that same mutex forever and the destination can never be torn
-// down. Run teardown on a separate thread with a bounded join so that if this
-// regresses, the test fails fast (and diagnosably) instead of hanging the
-// whole suite.
+// Teardown must stop a worker waiting on a saturated deadline.
 TEST_F(DeliveryDelayTest, testAbsurdDeliveryTimeDoesNotHangTeardown) {
   auto exchange = std::make_unique<tiny_mq::Exchange>(CurrentTestSuiteStorageDir() + "/absurd-delivery-time");
   {
     Connection conn(*exchange);
+    conn.start();
     Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
     Producer::Ptr producer = session.createProducer(queue);
 
-    // Public field, no SendOptions involved — bypasses validateSendOptions
-    // entirely, unlike testDeliveryDelayUpperBoundRejected above.
     TextMessage msg = session.createTextMessage("absurd");
-    msg.jmsHeaders.deliveryTime = std::numeric_limits<int64_t>::max();
-    producer->send(msg);
+    producer->send(msg, {Message::NOT_PERSISTENT, 4, 0, std::numeric_limits<int64_t>::max()});
   }
 
   std::atomic<bool> destroyed{false};
@@ -336,46 +288,22 @@ TEST_F(DeliveryDelayTest, testAbsurdDeliveryTimeDoesNotHangTeardown) {
   }
 }
 
-// Round-3 fix (N15): DeliveryScheduler::enqueueOrSchedule clamps an absurd
-// deliveryTime to 0 and fixes up the header so a consumer doesn't see a bogus
-// JMSDeliveryTime on a message actually delivered immediately. For a
-// PERSISTENT message, Consumer::preparePush caches this message's serialized
-// bytes (via toBytes()) *before* the clamp runs, and Consumer::recv's fast
-// path rehydrates jmsHeaders from that cache (fromBytes) on receipt — so
-// patching only the live header without also patching the cached bytes
-// (Message::patchCachedDeliveryTime) reverts the fix-up the instant the
-// consumer receives the message. Same defect class as round 2's B2
-// recurring in new code (docs/reviews/13-delivery-delay.review.md, round 3).
-TEST_F(DeliveryDelayTest, testAbsurdDeliveryTimePersistentMessageClampedOnReceipt) {
+// The provider overwrites a caller-supplied deliveryTime on send.
+TEST_F(DeliveryDelayTest, testSendReplacesPersistentDeliveryTime) {
   Connection conn(*_exchange);
-  Session &session = conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
-  Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
-  Producer::Ptr producer = session.createProducer(queue);
-  Consumer::Ptr consumer = session.createConsumer(queue);
-
-  // Public field, no SendOptions involved — bypasses validateSendOptions
-  // entirely, same ingress as testAbsurdDeliveryTimeDoesNotHangTeardown, but
-  // PERSISTENT this time so preparePush's cached-bytes path is exercised.
-  TextMessage msg = session.createTextMessage("absurd-persistent");
-  msg.reliability = Message::PERSISTENT;
-  msg.jmsHeaders.deliveryTime = std::numeric_limits<int64_t>::max();
-  producer->send(msg);
-
-  // Clamped to "immediate": must be visible right away, not scheduled ~forever.
-  Message::Ptr received = consumer->recv(5000000);
-  ASSERT_NE(received, nullptr) << "an absurd deliveryTime must be clamped to immediate "
-                                   "delivery, not silently scheduled far in the future";
-  EXPECT_EQ(received->jmsHeaders.deliveryTime, 0)
-      << "JMSDeliveryTime seen by the application must be the clamped value (0), not the "
-         "original garbage restored from preparePush's pre-clamp cached bytes";
+  conn.start();
+  auto& session = conn.createSession();
+  auto queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
+  auto producer = session.createProducer(queue);
+  auto consumer = session.createConsumer(queue);
+  auto message = session.createTextMessage("persistent", Message::PERSISTENT);
+  message.jmsHeaders.deliveryTime = std::numeric_limits<int64_t>::max();
+  producer->send(message);
+  auto received = consumer->receiveNoWait();
+  ASSERT_TRUE(received);
+  EXPECT_EQ(message.jmsHeaders.timestamp, received->jmsHeaders.deliveryTime);
 }
 
-// Round-3 fix (B4, continued): direct, deterministic test of the exact
-// bounded-delta arithmetic run() uses to pick wait_until's deadline — no
-// threading involved, so this pins down the fix's correctness independently
-// of the end-to-end test above (which also benefits from
-// DeliveryScheduler::enqueueOrSchedule's own ingress clamp and so alone
-// wouldn't prove this specific arithmetic is what's protecting run()).
 TEST_F(DeliveryDelayTest, testSchedulerWaitDeltaCappedAgainstOverflow) {
   using tiny_mq::DeliveryScheduler;
   const int64_t now = Poco::Timestamp().epochMicroseconds() / 1000;

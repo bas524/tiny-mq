@@ -116,6 +116,7 @@ TEST_F(SelectorTest, testEmptySelectorMatchesAll) {
   ASSERT_NE(sel, nullptr);
 
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Consumer::Ptr consumer = session.createConsumer(destination, "");
@@ -133,6 +134,7 @@ TEST_F(SelectorTest, testEmptySelectorMatchesAll) {
 
 TEST_F(SelectorTest, testStringEquality) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -143,6 +145,7 @@ TEST_F(SelectorTest, testStringEquality) {
 
 TEST_F(SelectorTest, testJMSTypeSelector) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -156,6 +159,7 @@ TEST_F(SelectorTest, testJMSTypeSelector) {
 
 TEST_F(SelectorTest, testNumericComparisons) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -170,6 +174,7 @@ TEST_F(SelectorTest, testNumericComparisons) {
 
 TEST_F(SelectorTest, testDoubleComparisons) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -184,6 +189,7 @@ TEST_F(SelectorTest, testDoubleComparisons) {
 
 TEST_F(SelectorTest, testBooleanLogic) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -204,6 +210,7 @@ TEST_F(SelectorTest, testBooleanLogic) {
 
 TEST_F(SelectorTest, testBetween) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -220,6 +227,7 @@ TEST_F(SelectorTest, testBetween) {
 
 TEST_F(SelectorTest, testIn) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -236,6 +244,7 @@ TEST_F(SelectorTest, testIn) {
 
 TEST_F(SelectorTest, testIsNull) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -253,6 +262,7 @@ TEST_F(SelectorTest, testIsNull) {
 
 TEST_F(SelectorTest, testLike) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -272,6 +282,7 @@ TEST_F(SelectorTest, testLike) {
 
 TEST_F(SelectorTest, testCompoundSelectors) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -287,6 +298,7 @@ TEST_F(SelectorTest, testCompoundSelectors) {
 
 TEST_F(SelectorTest, testSelectorWithTransactedSession) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
 
@@ -324,6 +336,7 @@ TEST_F(SelectorTest, testSelectorWithTransactedSession) {
 
 TEST_F(SelectorTest, testTopicMultipleSelectors) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Topic, CurrentTestName);
 

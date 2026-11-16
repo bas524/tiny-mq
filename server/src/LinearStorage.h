@@ -10,9 +10,12 @@
 #include <Poco/FileStream.h>
 #include <Poco/Path.h>
 #include <memory>
+#include <filesystem>
 #include <vector>
 #include <unordered_map>
 #include <fc/disk_btree.h>
+
+namespace tiny_mq { class LocalTransactionJournal; }
 
 namespace linear_storage {
 
@@ -26,6 +29,9 @@ struct Header {
   Poco::UInt64 dataSize{0};
   /// deleted - flag shows that record is alive or removed
   Poco::Int8 deleted{0};
+  // First byte of legacy tail padding, used only in marked delivery volumes.
+  uint8_t attempt = 0;
+  std::array<unsigned char, 6> reserved{};
 
   friend bool operator==(const Header &lhs, const Header &rhs) {
     return (lhs.deleted == rhs.deleted) && (lhs.dataSize == rhs.dataSize) && (memcmp(&lhs.uuid[0], &rhs.uuid[0], sizeof(lhs.uuid)) == 0);
@@ -49,10 +55,27 @@ struct SweepCursor {
 };
 
 class Tom {
+  friend class Storage;
+  friend class tiny_mq::LocalTransactionJournal;
   Poco::UInt32 _id{0};
   Poco::Path _basePath;
   Poco::UInt64 _size{0};
+#if defined(_WIN32)
   std::unique_ptr<Poco::FileStream> _tomF;
+#else
+  int _fd = -1;
+  char* _mapped = nullptr;
+  size_t _mappedSize = 0;
+  Poco::UInt64 _mappedAt = 0;
+  void unmap() noexcept;
+#endif
+  bool _deliveryVolume = false;
+  bool writeAt(const void* data, size_t size, Poco::UInt64 offset);
+  bool readAt(void* data, size_t size, Poco::UInt64 offset) const;
+  bool setFlag(Poco::UInt64 offset);
+  void markAttempt(Poco::UInt64 offset);
+  void open();
+  void truncate(Poco::UInt64 size);
 
  public:
   Tom(Poco::UInt32 id, Poco::Path basePath);
@@ -74,11 +97,15 @@ class Tom {
 };
 
 class Storage {
+  friend class tiny_mq::LocalTransactionJournal;
   Poco::UUID _id;
   Poco::Path _basePath;
   Poco::UInt32 _currrentTomId;
   std::unordered_map<Poco::UInt32, Tom> _tom;
   std::unique_ptr<fc::DiskBTreeMap<MsgUUIDType, Record>> _index;
+  void clearDeliveryAttempt(const Record& record) const noexcept;
+  bool _hasAttemptFiles = false;
+  std::filesystem::path _directory;
 
  public:
   Storage(const Poco::UUID &id, Poco::Path basePath);

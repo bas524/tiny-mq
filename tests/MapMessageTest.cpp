@@ -105,6 +105,7 @@ TEST_F(MapMessageTest, testToJson) {
 }
 TEST_F(MapMessageTest, testSendRecvCloneMapMessage) {
   Connection session_conn(*_exchange);
+  session_conn.start();
   Session &session = session_conn.createSession();
   Destination::Ptr destination = session.createDestination(tiny_mq::destination::Queue, "testSendRecvCloneMapMessage");
   EXPECT_NE(destination, nullptr);

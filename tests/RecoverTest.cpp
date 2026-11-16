@@ -33,6 +33,7 @@ void RecoverTest::TearDown() {
 // on the second recv().
 TEST_F(RecoverTest, ClientAckRedeliversUnacked) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   ASSERT_NE(queue, nullptr);
@@ -94,6 +95,7 @@ TEST_F(RecoverTest, ClientAckRedeliversUnacked) {
 // rollback() instead (JMS 2.0 § 8.4.8).
 TEST_F(RecoverTest, RejectsOnTransactedSession) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   ASSERT_NE(queue, nullptr);
@@ -114,6 +116,7 @@ TEST_F(RecoverTest, RejectsOnTransactedSession) {
 // touching storage (there is none to touch).
 TEST_F(RecoverTest, NonPersistentRedelivery) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   Producer::Ptr producer = session.createProducer(queue);
@@ -143,6 +146,7 @@ TEST_F(RecoverTest, NonPersistentRedelivery) {
 // recover() replays exactly the unacknowledged messages once, never more.
 TEST_F(RecoverTest, DurableSubscriberNotRepersisted) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr topic = session.createDestination(tiny_mq::destination::Topic, CurrentTestName);
   ASSERT_NE(topic, nullptr);
@@ -199,6 +203,7 @@ TEST_F(RecoverTest, DurableSubscriberNotRepersisted) {
 // chain it actually lived in, and spliced it out of the real owner's chain.
 TEST_F(RecoverTest, AcknowledgeOnWrongConsumerOfSameQueueIsNoOp) {
   Connection connection(*_exchange);
+  connection.start();
   // c1 and c2 live in separate sessions so that Session::recover() (which
   // recovers *every* consumer of its session) exercises c1's chain only —
   // isolating the wrong-consumer-ack defect from the (unrelated, and
@@ -275,6 +280,7 @@ TEST_F(RecoverTest, AcknowledgeOnWrongConsumerOfSameQueueIsNoOp) {
 // actually sent.
 TEST_F(RecoverTest, ForwardingHeadMessageDoesNotLeakChainToOtherConsumer) {
   Connection connection(*_exchange);
+  connection.start();
   Session &sessionA = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr queueA = sessionA.createDestination(tiny_mq::destination::Queue, std::string(CurrentTestName) + "-A");
   ASSERT_NE(queueA, nullptr);
@@ -340,6 +346,7 @@ TEST_F(RecoverTest, ForwardingHeadMessageDoesNotLeakChainToOtherConsumer) {
 // node, so unlinking on one side could zombie/lose messages on the other.
 TEST_F(RecoverTest, ForwardingMiddleMessageDoesNotCorruptEitherChain) {
   Connection connection(*_exchange);
+  connection.start();
   Session &sessionA = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr queueA = sessionA.createDestination(tiny_mq::destination::Queue, std::string(CurrentTestName) + "-A");
   ASSERT_NE(queueA, nullptr);
@@ -410,6 +417,7 @@ TEST_F(RecoverTest, ForwardingMiddleMessageDoesNotCorruptEitherChain) {
 // plain debug/release.
 TEST_F(RecoverTest, ForwardedMiddleMessageDestructionDoesNotDangleTail) {
   Connection connection(*_exchange);
+  connection.start();
   Session &sessionA = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr queueA = sessionA.createDestination(tiny_mq::destination::Queue, std::string(CurrentTestName) + "-A");
   ASSERT_NE(queueA, nullptr);
@@ -502,6 +510,7 @@ TEST_F(RecoverTest, ForwardedMiddleMessageDestructionDoesNotDangleTail) {
 // branch.
 TEST_F(RecoverTest, AcknowledgeOnSurvivesCallerDroppingOwnPtrHeadOfChain) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   ASSERT_NE(queue, nullptr);
@@ -530,6 +539,7 @@ TEST_F(RecoverTest, AcknowledgeOnSurvivesCallerDroppingOwnPtrHeadOfChain) {
 // `_inFlightHead = ...`.
 TEST_F(RecoverTest, AcknowledgeOnSurvivesCallerDroppingOwnPtrTailOfChain) {
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   ASSERT_NE(queue, nullptr);
@@ -569,6 +579,7 @@ TEST_F(RecoverTest, AcknowledgeOnSurvivesCallerDroppingOwnPtrTailOfChain) {
 TEST_F(RecoverTest, DestroyingConsumerWithDeepInFlightChainDoesNotOverflowStack) {
   constexpr int kDepth = 200000;
   Connection connection(*_exchange);
+  connection.start();
   Session &session = connection.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
   Destination::Ptr queue = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
   ASSERT_NE(queue, nullptr);

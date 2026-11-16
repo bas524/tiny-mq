@@ -243,8 +243,10 @@ bool isTemporary(destination::Type type) {
 Exchange::Exchange(Poco::Path path)
     : _path(std::move(path).makeDirectory()),
       _registryPath(Poco::Path(_path).append("subscriptions-71").makeDirectory()),
+      _journal(_path),
       _logger(Poco::Logger::get("tiny_mq.exchange")) {
   Poco::File(_path).createDirectories();
+  _journal.recover();
   loadRegistry();
 }
 
@@ -446,7 +448,7 @@ Exchange::RegisteredSubscription Exchange::openDurable(const SubscriptionIdentit
   }
   state->storage = std::make_shared<Destination::Storage>(definition.generation, state->path);
   state->storage->start();
-  Destination::replay(state->deliveries, *state->storage, topic->_scheduler);
+  topic->replay(state->deliveries, *state->storage);
   return {std::move(definition), topic, std::move(state)};
 }
 

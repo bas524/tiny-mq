@@ -28,6 +28,7 @@ void TopicTest::TearDown() {
 // Each subscriber on a topic receives its own copy of every published message.
 TEST_F(TopicTest, testPublishToMultipleSubscribers) {
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr topic = session.createDestination(tiny_mq::destination::Topic, CurrentTestName);
     ASSERT_NE(topic, nullptr);
@@ -56,6 +57,7 @@ TEST_F(TopicTest, testPublishToMultipleSubscribers) {
 // Publishing multiple messages preserves per-subscriber ordering.
 TEST_F(TopicTest, testPublishOrdering) {
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr topic = session.createDestination(tiny_mq::destination::Topic, CurrentTestName);
     ASSERT_NE(topic, nullptr);
@@ -82,6 +84,7 @@ TEST_F(TopicTest, testPublishOrdering) {
 // A subscriber created after a message is published should not receive it.
 TEST_F(TopicTest, testLateSubscriberMissesEarlierMessages) {
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr topic = session.createDestination(tiny_mq::destination::Topic, CurrentTestName);
     ASSERT_NE(topic, nullptr);
@@ -112,6 +115,7 @@ TEST_F(TopicTest, testLateSubscriberMissesEarlierMessages) {
 // Transacted topic publish: messages only delivered after commit.
 TEST_F(TopicTest, testTransactedTopicPublish) {
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::SESSION_TRANSACTED);
     Destination::Ptr topic = session.createDestination(tiny_mq::destination::Topic, CurrentTestName);
     ASSERT_NE(topic, nullptr);

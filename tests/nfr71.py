@@ -4,6 +4,7 @@ import argparse
 import collections
 import json
 from pathlib import Path
+import re
 import shlex
 import statistics
 import subprocess
@@ -43,7 +44,9 @@ def run(binary, names, repetitions, minimum, warmup, output):
         if entry["run_type"] != "iteration":
             continue
         name = entry["run_name"].removeprefix("BenchmarkFixture/")
-        scale = NANOSECONDS[entry["time_unit"]] / entry.get("deliveries_per_iteration", 1)
+        batch = re.search(r"/(\d+)(?:/process_time)?$", name) if "_Batch_" in name else None
+        deliveries = entry.get("deliveries_per_iteration", int(batch[1]) if batch else 1)
+        scale = NANOSECONDS[entry["time_unit"]] / deliveries
         results[name].append((entry["cpu_time"] * scale, entry["real_time"] * scale))
     for name in names:
         if len(results[name]) != repetitions:
@@ -51,7 +54,7 @@ def run(binary, names, repetitions, minimum, warmup, output):
     return results
 
 
-def compare(args, name, repetitions, minimum, warmup, directory):
+def compare(args, name, repetitions, minimum, warmup, directory, baseline_name=None):
     directory.mkdir(exist_ok=True)
     samples = {"baseline": [], "candidate": []}
     first = repetitions // 2
@@ -60,9 +63,10 @@ def compare(args, name, repetitions, minimum, warmup, directory):
         ("candidate", repetitions - first), ("baseline", repetitions - first),
     )
     for step, (label, count) in enumerate(order, start=1):
-        result = run(getattr(args, label), (name,), count, minimum, warmup,
+        registration = baseline_name if label == "baseline" and baseline_name else name
+        result = run(getattr(args, label), (registration,), count, minimum, warmup,
                      directory / f"{step}-{label}.json")
-        samples[label].extend(result[name])
+        samples[label].extend(result[registration])
 
     (baseline, baseline_real), (candidate, candidate_real) = (
         zip(*samples[label]) for label in ("baseline", "candidate")

@@ -53,7 +53,7 @@ class Message {
   Properties _properties;
   // [1-byte type prefix][toBytes() payload] while staging a persistent delivery.
   // The ready set holds fully materialized messages, so recv() needs no storage read.
-  std::vector<char> _cachedStorageBytes;
+  mutable std::vector<char> _cachedStorageBytes;
   // Cached storage location so acknowledgeOn/commit can remove without a UUID lookup.
   // Set to max when the record location is unknown (e.g. restart path or not-yet-committed).
   Poco::UInt32 _storageTomId{std::numeric_limits<Poco::UInt32>::max()};
@@ -63,7 +63,6 @@ class Message {
   // requested via SendOptions::deliveryDelay. Resolved to an absolute
   // jmsHeaders.deliveryTime at commit time (spec 13 — the clock starts at
   // commit, not send), by Producer::commit.
-  int64_t _pendingDeliveryDelay{0};
   // Spec 23 round 2 (perf fix): intrusive doubly-linked list node backing
   // Consumer::_inFlight (the per-consumer received-not-yet-acked set behind
   // Session.recover()). Two prior designs were measured and rejected:
@@ -134,6 +133,16 @@ class Message {
   // mutable: acknowledgeOn() takes `const Message&` (it only reads the
   // message otherwise) but must still unlink and clear this on acknowledge.
   mutable InFlightLink _inFlightLink;
+  uint64_t _receiveSequence = 0;
+  uint64_t _recoveryBatch = 0;
+  int64_t _nextRedeliveryAt = 0;
+  bool _storedAttempt = false;
+  bool _attemptSidecar = false;
+  std::shared_ptr<std::atomic_bool> _publication;
+  bool isPublished() const { return !_publication || _publication->load(std::memory_order_acquire); }
+  friend class DeliveryState;
+  friend class DeliveryScheduler;
+  friend class Session;
   friend class Consumer;
   friend class Destination;
   friend class Producer;
@@ -181,7 +190,7 @@ class Message {
   Poco::UUID uuid;
   enum Type { UNDEFINED = 0, TEXT_MESSAGE = 1, STREAM_MESSAGE = 2, BYTES_MESSAGE = 3, MAP_MESSAGE = 4, OBJECT_MESSAGE = 5 };
   enum Reliability { NOT_PERSISTENT = 0, PERSISTENT };
-  Reliability reliability = NOT_PERSISTENT;
+  mutable Reliability reliability = NOT_PERSISTENT;
 
   // The fixed storage prefix is shared by versions 0x02 and 0x03.
   struct Headers {
@@ -210,7 +219,7 @@ class Message {
     CorrelationId getCorrelationId() const;
     void setType(std::variant<std::monostate, std::string> value);
   };
-  Headers jmsHeaders;
+  mutable Headers jmsHeaders;
   struct PersistentInfo {
     struct Transaction {
       std::string dataPath;

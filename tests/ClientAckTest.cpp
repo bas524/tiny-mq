@@ -29,6 +29,7 @@ void ClientAckTest::TearDown() {
 // AUTO_ACKNOWLEDGE: message is removed from storage automatically on recv (no ack call needed).
 TEST_F(ClientAckTest, testAutoAcknowledge) {
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr dest = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
     ASSERT_NE(dest, nullptr);
@@ -50,6 +51,7 @@ TEST_F(ClientAckTest, testAutoAcknowledge) {
 // CLIENT_ACKNOWLEDGE: persistent message stays in storage until acknowledgeOn is called.
 TEST_F(ClientAckTest, testClientAcknowledgePersistent) {
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::CLIENT_ACKNOWLEDGE);
     Destination::Ptr dest = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
     ASSERT_NE(dest, nullptr);
@@ -87,6 +89,7 @@ TEST_F(ClientAckTest, testClientAcknowledgePersistent) {
 // Non-persistent messages in AUTO_ACKNOWLEDGE: no storage interaction.
 TEST_F(ClientAckTest, testNonPersistentAutoAcknowledge) {
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr dest = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
     ASSERT_NE(dest, nullptr);
@@ -109,6 +112,7 @@ TEST_F(ClientAckTest, testNonPersistentAutoAcknowledge) {
 // Mixing persistent and non-persistent messages preserves order.
 TEST_F(ClientAckTest, testMixedPersistenceOrdering) {
     Connection session_conn(*_exchange);
+    session_conn.start();
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
     Destination::Ptr dest = session.createDestination(tiny_mq::destination::Queue, CurrentTestName);
     ASSERT_NE(dest, nullptr);

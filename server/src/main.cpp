@@ -11,6 +11,11 @@
 #ifdef ENABLE_TESTS
 #include <gtest/gtest.h>
 #include <benchmark/benchmark.h>
+namespace tiny_mq {
+void setDeliveryTestExecutable(const char* executable);
+int deliveryTestChild(const char* directory, const char* scenario);
+}
+
 #endif
 namespace tiny_mq {
 class App : public Poco::Util::ServerApplication {
@@ -192,11 +197,16 @@ class App : public Poco::Util::ServerApplication {
 
 int main(int argc, char **argv) {
 #ifdef ENABLE_TESTS
+  if (argc == 4 && std::strcmp(argv[1], "--delivery-test-child") == 0) {
+    return tiny_mq::deliveryTestChild(argv[2], argv[3]);
+  }
   if (argc > 1 && std::strncmp(argv[1], "--gtest", std::strlen("--gtest")) == 0) {
+    tiny_mq::setDeliveryTestExecutable(argv[0]);
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
   }
   if (argc > 1 && std::strncmp(argv[1], "--gbench", std::strlen("--gbench")) == 0) {
+    tiny_mq::setDeliveryTestExecutable(argv[0]);
     // Shift argv to drop --gbench before handing off to the benchmark library.
     for (int i = 1; i < argc - 1; ++i) argv[i] = argv[i + 1];
     --argc;
@@ -207,10 +217,11 @@ int main(int argc, char **argv) {
     return 0;
   }
   const size_t testModeSz = std::strlen("--test-mode");
-  if (std::strncmp(argv[1], "--test-mode", testModeSz) == 0) {
+  if (argc > 1 && std::strncmp(argv[1], "--test-mode", testModeSz) == 0) {
     for (size_t i = 0; i < testModeSz; ++i) {
       argv[1][i] = ' ';
     }
+    tiny_mq::setDeliveryTestExecutable(argv[0]);
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
   }

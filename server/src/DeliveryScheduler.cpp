@@ -4,15 +4,13 @@
 
 #include "DeliveryScheduler.h"
 #include "Destination.h"
+#include "DeliveryClock.h"
 #include <Poco/Format.h>
 #include <Poco/Timestamp.h>
 #include "LogTracer.h"
 
 namespace tiny_mq {
 
-namespace {
-int64_t nowMs() { return Poco::Timestamp().epochMicroseconds() / 1000; }
-}  // namespace
 
 DeliveryScheduler::DeliveryScheduler()
     : _logger(Poco::Logger::get("tiny_mq.deliveryscheduler")) {}
@@ -36,52 +34,16 @@ void DeliveryScheduler::enqueueOrSchedule(std::shared_ptr<QueueT> queue, Message
 }
 
 void DeliveryScheduler::Entry::deliver() {
+  if (msg && msg->jmsHeaders.expiration && msg->isExpired(DeliveryClock::now())) return;
   std::visit([&](auto& target) { target->enqueue(std::move(msg)); }, queue);
 }
 
 void DeliveryScheduler::schedule(Entry entry) {
   TRACE(_logger);
   auto& msg = entry.msg;
-  int64_t deliveryTime = msg ? msg->jmsHeaders.deliveryTime : 0;
-  if (deliveryTime > 0) {
-    // Defense-in-depth (spec 13 review round 2, B4): validateSendOptions only
-    // guards the SendOptions ingress. jmsHeaders.deliveryTime can also arrive
-    // here directly from a public-field send() (no SendOptions involved at
-    // all) or from a replayed storage record (see
-    // Destination.cpp's deliveryTimeFromStorageBytes, which applies the same
-    // bound independently since it never reaches this function's msg
-    // parameter path through a fresh header write — it constructs the shell's
-    // header itself). A deliveryTime absurdly far in the future is treated as
-    // corrupt/garbage input, not honored: clamp to "immediate" rather than
-    // schedule it, and fix up the header so a consumer doesn't see a bogus
-    // JMSDeliveryTime on a message that was actually delivered right away.
-    // (DeliveryScheduler::run additionally caps how long it ever sleeps for,
-    // so even a value that somehow slipped past this check cannot overflow
-    // the wait_until conversion or spin the worker — this check exists to
-    // give a diagnosable "why" and correct JMSDeliveryTime, not as the sole
-    // guard against the CPU-spin/hang failure mode.)
-    const int64_t now = nowMs();
-    if (deliveryTime - now > kMaxFutureHeaderMs) {
-      poco_warning(_logger.get(),
-                   Poco::format("DeliveryScheduler: deliveryTime=%?d (now=%?d) exceeds the "
-                                "%?d ms sanity bound — treating as immediate delivery instead "
-                                "of scheduling",
-                                deliveryTime, now, kMaxFutureHeaderMs));
-      deliveryTime = 0;
-      if (msg) {
-        msg->jmsHeaders.deliveryTime = 0;
-        // The header alone is not enough: preparePush already cached this
-        // message's serialized bytes (persistent messages only) before this
-        // clamp ran, and Consumer::recv rehydrates jmsHeaders from that cache
-        // via fromBytes, silently reverting the fix-up above. This is the
-        // same defect class as spec 13 review round 2's B2 (header and
-        // cached-bytes drifting apart) recurring in new code — see
-        // docs/reviews/13-delivery-delay.review.md, round 3, N15.
-        msg->patchCachedDeliveryTime(0);
-      }
-    }
-  }
-  if (deliveryTime == 0 || deliveryTime <= nowMs()) {
+  auto deadline = msg ? std::max(msg->jmsHeaders.deliveryTime, msg->_nextRedeliveryAt) : 0;
+  if (msg && msg->jmsHeaders.expiration > 0) deadline = std::min(deadline, msg->jmsHeaders.expiration);
+  if (deadline <= DeliveryClock::now()) {
     entry.deliver();
     return;
   }
@@ -99,23 +61,16 @@ void DeliveryScheduler::schedule(Entry entry) {
     _thread = std::thread(&DeliveryScheduler::run, this);
     _threadStarted = true;
   }
-  _pending.emplace(deliveryTime, std::move(entry));
+  _pending.emplace(deadline, std::move(entry));
   ++_version;
   lock.unlock();
   _cv.notify_one();
 }
 
 /*static*/ int64_t DeliveryScheduler::cappedWaitDeltaMs(int64_t deadlineMs, int64_t nowMsValue) {
-  // Compare before subtracting: deadlineMs - nowMsValue can overflow a
-  // signed int64_t when deadlineMs is huge (e.g. INT64_MAX), which is UB and
-  // lets an optimizer treat the "delta < 0" check below as unreachable and
-  // remove it. nowMsValue is a real clock reading (~1.7e12), so
-  // nowMsValue + kMaxWaitMs cannot overflow, and these two guards can be
-  // evaluated without ever forming an out-of-range difference.
   if (deadlineMs <= nowMsValue) return 0;
-  if (deadlineMs >= nowMsValue + kMaxWaitMs) return kMaxWaitMs;
-  // At this point nowMsValue < deadlineMs < nowMsValue + kMaxWaitMs, so the
-  // difference fits in (0, kMaxWaitMs] and cannot overflow.
+  if (nowMsValue <= std::numeric_limits<int64_t>::max() - kMaxWaitMs &&
+      deadlineMs > nowMsValue + kMaxWaitMs) return kMaxWaitMs;
   return deadlineMs - nowMsValue;
 }
 
@@ -129,29 +84,11 @@ void DeliveryScheduler::run() {
 
     const int64_t deadlineMs = _pending.begin()->first;
     const uint64_t startVersion = _version;
-    // cappedWaitDeltaMs bounds a single wait_until sleep to at most kMaxWaitMs,
-    // independent of how far out deadlineMs claims to be. This is the last
-    // line of defense for spec 13 review round 2's B4: if a deliveryTime ever
-    // reaches _pending corrupt or absurd (storage bit-rot, a future network
-    // ingress, or simply a bound this file doesn't know about yet),
-    // "deadlineMs - nowMs()" can be enormous, and system_clock::now() +
-    // milliseconds(that) overflows system_clock's native
-    // (finer-than-millisecond) duration representation and wraps into the
-    // past. Unbounded, that produces two compounding failures: wait_until
-    // returns instantly with woken == false, the due-delivery scan below
-    // finds nothing actually due, and the outer while(!_stop) loop spins at
-    // 100% CPU while holding _mutex — which in turn means stop() hangs
-    // forever on that same mutex and the owning Destination can never be torn
-    // down. Capping the sleep means the worker always genuinely sleeps (up to
-    // a day) before re-evaluating, no matter what value is sitting at
-    // _pending.begin(): no overflow, no spin, no unkillable process. This is
-    // deliberately not the only guard (see enqueueOrSchedule's own clamp and
-    // Destination.cpp's deliveryTimeFromStorageBytes) but it is the one that
-    // holds even if every other check is somehow bypassed — see
-    // DeliveryDelayTest.testSchedulerWaitDeltaCappedAgainstOverflow, which
-    // exercises this arithmetic directly.
-    const int64_t deltaMs = cappedWaitDeltaMs(deadlineMs, nowMs());
-    const auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(deltaMs);
+    auto deltaMs = cappedWaitDeltaMs(deadlineMs, DeliveryClock::now());
+#ifdef ENABLE_TESTS
+    if (DeliveryClock::isManual()) deltaMs = std::min<int64_t>(deltaMs, 2);
+#endif
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(deltaMs);
     const bool woken = _cv.wait_until(lock, deadline, [this, startVersion] { return _stop || _version != startVersion; });
     if (woken) {
       // Stopped, or a nearer deadline was inserted — re-evaluate the heap top.
@@ -159,7 +96,7 @@ void DeliveryScheduler::run() {
     }
 
     // Timed out: deliver every entry that is now due.
-    const int64_t deliverUpToMs = nowMs();
+    const int64_t deliverUpToMs = DeliveryClock::now();
     while (!_pending.empty() && _pending.begin()->first <= deliverUpToMs) {
       auto it = _pending.begin();
       Entry entry = std::move(it->second);
