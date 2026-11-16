@@ -2,7 +2,7 @@
 
 Класс K1. Предложение к обсуждению и критике; критерии ниже описывают будущую реализацию.
 
-Version: 0.2
+Version: 0.3
 Review Date: 2026-11-16
 Examples: `DestinationContractTest.SelectiveQueueClaim` в критериях приёмки.
 Machine Readability: Markdown, ID требований, Scenario, Test и таблица Entity inventory.
@@ -115,7 +115,7 @@ SDD 71 поставляет локальное C++ ядро. [SDD 74](74-jakarta
 ID: `REQ-71-1`
 Источник: `repo:tasks/UNIFIED-PLAN.md@9f7983c0054636a6686f9928831c8c53dfbd3679#майлстоны-последовательность-по-зависимостям`
 
-Основание поведения — [Jakarta Messaging 3.1](https://jakarta.ee/specifications/messaging/3.1/jakarta-messaging-spec-3.1.html), § 4.1.2, 6.2.9, 8.2, 8.4.8.
+Основание поведения — [Jakarta Messaging 3.1](https://jakarta.ee/specifications/messaging/3.1/jakarta-messaging-spec-3.1.html), § 4.1.2, 6.2.9, 6.2.10, 8.2, 8.8.
 
 #### Scenario: SelectiveQueueClaim
 
@@ -140,7 +140,7 @@ ID: `REQ-71-2`
 
 ### Requirement: Ключи и замена durable
 
-Провайдер SHALL требовать client ID для unshared durable и считать его необязательным для shared. Активные конфликтующие определения отклоняются; допустимое изменение неактивного определения заменяет подписку и её backlog по правилам спецификации. Shared и unshared durable с одинаковой парой конфликтуют даже в неактивном состоянии. Shared nondurable хранится отдельно, а при открытии с отличающимися топиком или селектором действующая shared nondurable выдаёт ошибку. Для стандартного unsubscribe нужны существующий ключ вызывающего соединения и отсутствие активных consumer и неподтверждённых доставок. Замена определения подчиняется тем же условиям удаления старого. Имя принимает буквы и десятичные цифры Unicode, `_`, `.` и `-` в любой позиции от 1 до 128 кодовых точек UTF-8. Пустое, длинное, невалидное UTF-8 или имя с другими символами отклоняется до обращения к хранилищу.
+Провайдер SHALL требовать client ID для unshared durable и считать его необязательным для shared. Активные конфликтующие определения отклоняются; допустимое изменение неактивного определения заменяет подписку и её backlog по правилам спецификации. Shared и unshared durable с одинаковой парой конфликтуют даже в неактивном состоянии. Shared nondurable хранится отдельно, а при открытии с отличающимися топиком или селектором действующая shared nondurable выдаёт ошибку. Стандартный unsubscribe требует отсутствия активных consumer и неподтверждённых доставок. Unshared durable удаляется по (client ID, имя). Shared durable, созданная с client ID, удаляется по той же паре. Соединение без client ID может удалить shared durable, созданную без client ID, по имени в пространстве ключей без client ID. Неизвестный ключ даёт ошибку. Замена определения подчиняется тем же условиям удаления старого. Имя принимает Java letters и Java digits по классификации [Character.isJavaIdentifierPart(int)](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/lang/Character.html#isJavaIdentifierPart(int)), а также `.` и `-`, в любой позиции от 1 до 128 кодовых точек UTF-8. Сюда входят `_`, знаки валют и соединительная пунктуация. Пустое, длинное, невалидное UTF-8 или имя с другими символами отклоняется до обращения к хранилищу.
 
 ID: `REQ-71-3`
 Источник: `repo:docs/jms-spec/26-shared-consumers.md@9f7983c0054636a6686f9928831c8c53dfbd3679#semantics`
@@ -149,7 +149,7 @@ ID: `REQ-71-3`
 
 #### Scenario: DurableIdentityMatrix
 
-- **WHEN** матрица меняет топик, селектор и noLocal где применимо, проверяет shared/unshared, активную или неподтверждённую подписку, отсутствие client ID, пограничные имена, повторное открытие после перезапуска и unsubscribe
+- **WHEN** матрица меняет топик, селектор и noLocal где применимо, проверяет shared/unshared, активную или неподтверждённую подписку, отсутствие client ID, пограничные имена, включая знаки валют и соединительную пунктуацию, открытие после перезапуска, unsubscribe shared durable с client ID и без него
 - **THEN** ключи и ошибки соответствуют виду подписки, эквивалентное повторное открытие сохраняет backlog, а допустимая замена сбрасывает backlog. Старый backlog открывается через прежний C++ API и остаётся доступен старой сборке на копии данных. Новый ключ с тем же именем не получает legacy-записи
 - Test: `DestinationContractTest.DurableIdentityMatrix`
 
