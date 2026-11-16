@@ -12,6 +12,7 @@
 #include <Poco/Runnable.h>
 #include <Poco/Thread.h>
 #include <external/concurrent_queue/BlockingConcurrentQueueHeader.h>
+#include <mutex>
 
 namespace linear_storage {
 enum class OperationId {
@@ -20,7 +21,6 @@ enum class OperationId {
   GET_DATA_BY_RECORD = 2,
   APPEND = 3,
   REMOVE = 4,
-  STOP = 5,
   SCAN = 6,
   APPEND_BATCH = 7  // persist multiple records in one worker dispatch
 };
@@ -43,11 +43,14 @@ struct Operation {
 
 class ConcurrentLinearStorage: Poco::Runnable {
   Storage _linearStorage;
+  std::mutex _storageMutex;
+  mutable std::mutex _lifecycleMutex;
   mutable moodycamel::BlockingConcurrentQueue<Operation*> _operations;
+  moodycamel::ProducerToken _operationProducer{_operations};
   Poco::Thread _thread;
-  std::atomic<bool> _isRunning;
-  std::atomic<bool> _started{false};        // start() was actually called — join() is only valid then
-  std::atomic<bool> _stopRequested{false};  // guards stop() against concurrent/repeat calls
+  std::atomic<bool> _isRunning{false};
+  // Written with both mutexes held. Readers hold the mutex for their operation path.
+  bool _acceptingOperations{false};
   std::atomic<int64_t> _sweepIntervalUs{1'000'000};  // JMSExpiration sweep cadence (spec 44), default 1 s
   int64_t _lastSweepUs{0};                           // worker-only: deadline for the next sweep (B1)
   linear_storage::SweepCursor _sweepCursor{};        // worker-only: resume point for chunked sweeps (B2)
@@ -57,6 +60,8 @@ public:
   ConcurrentLinearStorage(const Poco::UUID &id, Poco::Path basePath);
   ~ConcurrentLinearStorage() override;
 
+  Record appendDelivery(const Poco::UUID &uuid, const std::vector<char> &data);
+  bool removeDelivery(Record record);
   Record append(const Poco::UUID &uuid, const std::vector<char> &data);
   // Append multiple records in a single worker dispatch (amortises round-trip cost).
   void appendBatch(std::vector<std::pair<Poco::UUID, std::vector<char>>> items);
@@ -76,7 +81,8 @@ public:
   void setSweepIntervalMicros(int64_t us);
 
  private:
-  // Runs on the worker thread during idle ticks: removes expired persistent records.
+  void enqueue(Operation* operation) const;
+  // Runs on the worker thread with _storageMutex held.
   void sweepExpired();
 };
 

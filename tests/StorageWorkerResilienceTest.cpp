@@ -10,6 +10,7 @@
 #include "TextMessage.h"
 #include <gtest/gtest.h>
 #include <Poco/Channel.h>
+#include <Poco/Exception.h>
 #include <Poco/File.h>
 #include <Poco/Format.h>
 #include <Poco/Logger.h>
@@ -100,6 +101,23 @@ TEST(StorageWorkerResilienceTest, InvalidOperationIsLoggedNotFatal) {
   storage.stop();
   Poco::File dir(basePath);
   if (dir.exists()) dir.remove(true);
+}
+
+TEST(StorageWorkerResilienceTest, StopImmediatelyAfterStart) {
+  auto& generator = Poco::UUIDGenerator::defaultGenerator();
+  const auto storageId = generator.createRandom();
+  const auto basePath = "./tiny-mq-storage-stop-" + storageId.toString();
+  {
+    linear_storage::ConcurrentLinearStorage storage(storageId, basePath);
+    storage.start();
+    storage.stop();
+
+    EXPECT_FALSE(storage.isRunning());
+    EXPECT_THROW(storage.appendDelivery(storageId, {'x'}), Poco::IllegalStateException);
+    EXPECT_THROW(storage.removeDelivery({}), Poco::IllegalStateException);
+    EXPECT_THROW((void)storage.scan(), Poco::IllegalStateException);
+  }
+  Poco::File(basePath).remove(true);
 }
 
 // Test plan #2: after Exchange is destroyed, no storage worker thread is still

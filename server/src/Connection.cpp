@@ -11,13 +11,20 @@
 namespace tiny_mq {
 
 Connection::Connection(Exchange &exchange)
-    : _exchange(exchange), _logger(Poco::Logger::get("tiny_mq.connection")) {
+    : _exchange(exchange), _logger(Poco::Logger::get("tiny_mq.connection")),
+      _identity(Poco::UUIDGenerator::defaultGenerator().createRandom()) {
   TRACE(_logger);
 }
 
 Connection::~Connection() {
   TRACE(_logger);
-  close();
+  try {
+    close();
+  } catch (const std::exception& error) {
+    poco_error(_logger.get(), std::string("connection teardown: ") + error.what());
+  } catch (...) {
+    poco_error(_logger.get(), "connection teardown failed");
+  }
 }
 
 Session &Connection::createSession(Session::AcknowledgeMode mode) {
@@ -84,6 +91,7 @@ void Connection::close() {
   if (_closed) return;  // idempotent
   _closed = true;
   _sessions.clear();
+  _exchange.get().removeTemporary(_identity);
   _started = false;
 }
 

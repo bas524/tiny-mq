@@ -6,6 +6,7 @@
 #include <Poco/RunnableAdapter.h>
 #include <Poco/Timestamp.h>
 #include <cstring>
+#include <memory>
 #include "LogTracer.h"
 #include "Message.h"
 
@@ -18,7 +19,6 @@ std::string OperationIdToString(OperationId operationId) {
     case OperationId::GET_DATA_BY_RECORD:       return "GET_DATA_BY_RECORD";
     case OperationId::APPEND:                   return "APPEND";
     case OperationId::REMOVE:                   return "REMOVE";
-    case OperationId::STOP:                     return "STOP";
     case OperationId::SCAN:                     return "SCAN";
     case OperationId::APPEND_BATCH:             return "APPEND_BATCH";
     default:                                    return "UNKNOWN";
@@ -44,13 +44,32 @@ ConcurrentLinearStorage::~ConcurrentLinearStorage() {
     poco_error(_logger.get(), "stop() threw in destructor: unknown exception — ignoring");
   }
 }
+
+Record ConcurrentLinearStorage::appendDelivery(const Poco::UUID& uuid, const std::vector<char>& data) {
+  std::lock_guard lock(_storageMutex);
+  if (!_acceptingOperations) throw Poco::IllegalStateException("storage is not running");
+  return _linearStorage.append(uuid, data);
+}
+
+bool ConcurrentLinearStorage::removeDelivery(Record record) {
+  std::lock_guard lock(_storageMutex);
+  if (!_acceptingOperations) throw Poco::IllegalStateException("storage is not running");
+  return _linearStorage.remove(record);
+}
+
+void ConcurrentLinearStorage::enqueue(Operation* operation) const {
+  std::lock_guard lock(_lifecycleMutex);
+  if (!_acceptingOperations) throw Poco::IllegalStateException("storage is not running");
+  if (!_operations.enqueue(_operationProducer, operation)) throw std::bad_alloc();
+}
+
 Record ConcurrentLinearStorage::append(const Poco::UUID& uuid, const std::vector<char>& data) {
   TRACE(_logger);
   Operation operation;
   operation.id = OperationId::APPEND;
   operation.uuid = uuid;
   operation.data = data;
-  _operations.enqueue(&operation);
+  enqueue(&operation);
   operation.event.wait();
   return operation.record;
 }
@@ -60,7 +79,7 @@ Record ConcurrentLinearStorage::record(Poco::UInt32 tomId, Poco::UInt64 offset) 
   operation.id = OperationId::GET_RECORD_BY_TOM_OFFSET;
   operation.tomId = tomId;
   operation.offset = offset;
-  _operations.enqueue(&operation);
+  enqueue(&operation);
   operation.event.wait();
   return operation.record;
 }
@@ -69,7 +88,7 @@ Record ConcurrentLinearStorage::record(const Poco::UUID& uuid) const {
   Operation operation;
   operation.id = OperationId::GET_RECORD_BY_UUID;
   operation.uuid = uuid;
-  _operations.enqueue(&operation);
+  enqueue(&operation);
   operation.event.wait();
   return operation.record;
 }
@@ -78,7 +97,7 @@ std::vector<char> ConcurrentLinearStorage::data(const Record& record) const {
   Operation operation;
   operation.id = OperationId::GET_DATA_BY_RECORD;
   operation.record = record;
-  _operations.enqueue(&operation);
+  enqueue(&operation);
   operation.event.wait();
   return operation.data;
 }
@@ -87,18 +106,19 @@ bool ConcurrentLinearStorage::remove(const Record& record) {
   Operation operation;
   operation.id = OperationId::REMOVE;
   operation.record = record;
-  _operations.enqueue(&operation);
+  enqueue(&operation);
   operation.event.wait();
   return static_cast<bool>(operation.record.header.deleted);
 }
 
 void ConcurrentLinearStorage::removeAsync(const Record& record) {
   if (record.tomId == std::numeric_limits<Poco::UInt32>::max()) return;
-  auto* op = new Operation;
+  auto op = std::make_unique<Operation>();
   op->id = OperationId::REMOVE;
   op->record = record;
   op->async = true;
-  _operations.enqueue(op);
+  enqueue(op.get());
+  op.release();
 }
 
 void ConcurrentLinearStorage::appendBatch(std::vector<std::pair<Poco::UUID, std::vector<char>>> items) {
@@ -106,45 +126,38 @@ void ConcurrentLinearStorage::appendBatch(std::vector<std::pair<Poco::UUID, std:
   Operation operation;
   operation.id = OperationId::APPEND_BATCH;
   operation.batchItems = std::move(items);
-  _operations.enqueue(&operation);
+  enqueue(&operation);
   operation.event.wait();
 }
 std::vector<std::pair<Record, std::vector<char>>> ConcurrentLinearStorage::scan() const {
   TRACE(_logger);
   Operation operation;
   operation.id = OperationId::SCAN;
-  _operations.enqueue(&operation);
+  enqueue(&operation);
   operation.event.wait();
   return std::move(operation.scanResult);
 }
 void ConcurrentLinearStorage::start() {
   TRACE(_logger);
-  if (_isRunning == false) {
-    _thread.start(*this);
-    _started = true;
-  }
+  std::lock_guard lifecycleLock(_lifecycleMutex);
+  std::lock_guard storageLock(_storageMutex);
+  if (_acceptingOperations) return;
+  _thread.start(*this);
+  _acceptingOperations = true;
 }
 void ConcurrentLinearStorage::run() {
   TRACE(_logger);
   _isRunning = true;
   _lastSweepUs = Poco::Timestamp().epochMicroseconds();
-  while (_isRunning) {
+  for (;;) {
     Operation* operation = nullptr;
     // Wait at most one sweep interval so the deadline check below still fires when
     // the queue is idle; under load an operation arrives well before the timeout.
-    _operations.wait_dequeue_timed(operation, _sweepIntervalUs.load());
-
-    if (operation != nullptr) {
-      if (operation->id == OperationId::STOP) {
-        // Stop is observed here, before any further filesystem access this
-        // iteration — the caller's stop() is about to return, so nothing below
-        // (including the sweep deadline check) may touch storage after this.
-        _isRunning = false;
-        operation->event.set();
-        break;
-      }
+    if (_operations.wait_dequeue_timed(operation, _sweepIntervalUs.load())) {
+      if (operation == nullptr) break;
 
       try {
+        std::lock_guard lock(_storageMutex);
         switch (operation->id) {
           case OperationId::GET_RECORD_BY_TOM_OFFSET:
             operation->record = _linearStorage.record(operation->tomId, operation->offset);
@@ -169,8 +182,6 @@ void ConcurrentLinearStorage::run() {
           case OperationId::SCAN:
             operation->scanResult = _linearStorage.scan();
             break;
-          case OperationId::STOP:
-            break;  // handled above
         }
       } catch (const Poco::Exception& e) {
         poco_error(_logger.get(),
@@ -200,6 +211,7 @@ void ConcurrentLinearStorage::run() {
     const int64_t nowUs = Poco::Timestamp().epochMicroseconds();
     if (nowUs - _lastSweepUs >= _sweepIntervalUs.load()) {
       try {
+        std::lock_guard lock(_storageMutex);
         sweepExpired();
       } catch (const Poco::Exception& e) {
         poco_error(_logger.get(), Poco::format("sweepExpired failed: %s", e.displayText()));
@@ -211,19 +223,18 @@ void ConcurrentLinearStorage::run() {
       _lastSweepUs = nowUs;
     }
   }
+  _isRunning = false;
 }
 void ConcurrentLinearStorage::stop() {
   TRACE(_logger);
-  // Guard against repeat/concurrent stop() calls (explicit unsubscribe followed
-  // by the destructor, or vice versa): only the first caller enqueues STOP and
-  // joins the thread, subsequent callers are no-ops.
-  if (_stopRequested.exchange(true)) return;
-  if (!_started) return;  // start() was never called — nothing to stop/join
-  if (_isRunning) {
-    Operation operation;
-    operation.id = OperationId::STOP;
-    _operations.enqueue(&operation);
-    operation.event.wait();
+  std::lock_guard lifecycleLock(_lifecycleMutex);
+  {
+    std::lock_guard storageLock(_storageMutex);
+    if (!_acceptingOperations) return;
+    // The same producer token puts the shutdown marker after all accepted work.
+    // Enqueue it even if the newly started worker has yet to enter run().
+    if (!_operations.enqueue(_operationProducer, nullptr)) throw std::bad_alloc();
+    _acceptingOperations = false;
   }
   _thread.join();
 }
@@ -234,9 +245,6 @@ void ConcurrentLinearStorage::setSweepIntervalMicros(int64_t us) {
 }
 
 void ConcurrentLinearStorage::sweepExpired() {
-  // Runs on the worker thread, so it may touch _linearStorage directly without
-  // racing the operation dispatch in run().
-  //
   // Stored record layout: [1-byte type][0x02/0x03 message payload]. JMSExpiration is an
   // int64 at a fixed offset inside the common header block:
   //   type(1) + magic(1) + number(8) + uuid(16) + reliability(1) + timestamp(8).

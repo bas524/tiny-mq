@@ -24,6 +24,8 @@
 #include <Poco/File.h>
 #include <Poco/Logger.h>
 #include <Poco/Channel.h>
+#include <barrier>
+#include <thread>
 
 namespace {
 
@@ -89,7 +91,7 @@ BENCHMARK_F(BenchmarkFixture, AutoAck_NonPersistent_RoundTrip)(benchmark::State&
 // 2. AUTO_ACKNOWLEDGE + PERSISTENT
 //    Each send appends to storage; recv reads & marks deleted.
 // ---------------------------------------------------------------------------
-BENCHMARK_F(BenchmarkFixture, AutoAck_Persistent_RoundTrip)(benchmark::State& state) {
+BENCHMARK_DEFINE_F(BenchmarkFixture, AutoAck_Persistent_RoundTrip)(benchmark::State& state) {
     using namespace tiny_mq;
     Connection session_conn(*exchange);
     Session &session = session_conn.createSession(Session::AcknowledgeMode::AUTO_ACKNOWLEDGE);
@@ -105,6 +107,7 @@ BENCHMARK_F(BenchmarkFixture, AutoAck_Persistent_RoundTrip)(benchmark::State& st
     }
     state.SetItemsProcessed(state.iterations());
 }
+BENCHMARK_REGISTER_F(BenchmarkFixture, AutoAck_Persistent_RoundTrip)->MeasureProcessCPUTime();
 
 // ---------------------------------------------------------------------------
 // 3. CLIENT_ACKNOWLEDGE + PERSISTENT
@@ -375,3 +378,65 @@ static void MessageSelector(benchmark::State& state) {
     }
 }
 BENCHMARK(MessageSelector);
+
+// REQ-71-7: both reader sessions claim in parallel. Report process CPU time
+// across all threads and normalize a benchmark iteration to one delivery.
+BENCHMARK_DEFINE_F(BenchmarkFixture, Destination_ConcurrentClaim)(benchmark::State& state) {
+    using namespace tiny_mq;
+    Connection conn(*exchange);
+    auto& send = conn.createSession();
+    auto queue = send.createDestination(destination::Queue, "competing-claims");
+    auto writer = send.createProducer(queue);
+    auto left = conn.createSession().createConsumer(queue);
+    auto right = conn.createSession().createConsumer(queue);
+    auto message = send.createTextMessage(kPayload);
+    constexpr int perReader = 128;
+    std::barrier batch(3);
+    std::atomic_bool finished{false};
+    auto read = [&](const Consumer::Ptr& consumer) {
+        for (;;) {
+            batch.arrive_and_wait();
+            if (finished.load(std::memory_order_relaxed)) return;
+            for (int i = 0; i < perReader; ++i) {
+                auto delivery = consumer->recv(-1);
+                benchmark::DoNotOptimize(delivery);
+            }
+            batch.arrive_and_wait();
+        }
+    };
+    std::jthread first(read, left);
+    std::jthread second(read, right);
+    for (auto _ : state) {
+        batch.arrive_and_wait();
+        for (int i = 0; i < perReader * 2; ++i) writer->send(message);
+        batch.arrive_and_wait();
+    }
+    finished.store(true, std::memory_order_relaxed);
+    batch.arrive_and_wait();
+    state.SetItemsProcessed(state.iterations() * perReader * 2);
+    state.counters["deliveries_per_iteration"] = perReader * 2;
+}
+BENCHMARK_REGISTER_F(BenchmarkFixture, Destination_ConcurrentClaim)->MeasureProcessCPUTime();
+
+// REQ-71-7: measure the eligible fan-out on one, two and four subscriptions.
+BENCHMARK_DEFINE_F(BenchmarkFixture, Destination_Fanout)(benchmark::State& state) {
+    using namespace tiny_mq;
+    Connection conn(*exchange);
+    auto& session = conn.createSession();
+    auto topic = session.createDestination(destination::Topic, "fanout");
+    auto writer = session.createProducer(topic);
+    std::vector<Consumer::Ptr> receivers;
+    const auto count = state.range(0);
+    for (int64_t i = 0; i < count; ++i) receivers.push_back(session.createConsumer(topic));
+    auto message = session.createTextMessage(kPayload);
+    for (auto _ : state) {
+        writer->send(message);
+        for (const auto& receiver : receivers) {
+            auto delivery = receiver->recv(0);
+            benchmark::DoNotOptimize(delivery);
+        }
+    }
+    state.SetItemsProcessed(state.iterations() * count);
+    state.counters["deliveries_per_iteration"] = static_cast<double>(count);
+}
+BENCHMARK_REGISTER_F(BenchmarkFixture, Destination_Fanout)->Arg(1)->Arg(2)->Arg(4);

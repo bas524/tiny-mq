@@ -3,6 +3,7 @@
 //
 
 #include "DeliveryScheduler.h"
+#include "Destination.h"
 #include <Poco/Format.h>
 #include <Poco/Timestamp.h>
 #include "LogTracer.h"
@@ -26,8 +27,21 @@ DeliveryScheduler::~DeliveryScheduler() {
   }
 }
 
+void DeliveryScheduler::enqueueOrSchedule(std::shared_ptr<DeliveryState> queue, Message::Ptr msg) {
+  schedule({std::move(queue), std::move(msg)});
+}
+
 void DeliveryScheduler::enqueueOrSchedule(std::shared_ptr<QueueT> queue, Message::Ptr msg) {
+  schedule({std::move(queue), std::move(msg)});
+}
+
+void DeliveryScheduler::Entry::deliver() {
+  std::visit([&](auto& target) { target->enqueue(std::move(msg)); }, queue);
+}
+
+void DeliveryScheduler::schedule(Entry entry) {
   TRACE(_logger);
+  auto& msg = entry.msg;
   int64_t deliveryTime = msg ? msg->jmsHeaders.deliveryTime : 0;
   if (deliveryTime > 0) {
     // Defense-in-depth (spec 13 review round 2, B4): validateSendOptions only
@@ -68,47 +82,24 @@ void DeliveryScheduler::enqueueOrSchedule(std::shared_ptr<QueueT> queue, Message
     }
   }
   if (deliveryTime == 0 || deliveryTime <= nowMs()) {
-    queue->enqueue(std::move(msg));
+    entry.deliver();
     return;
   }
 
   std::unique_lock<std::mutex> lock(_mutex);
+  const auto* target = std::get_if<std::shared_ptr<DeliveryState>>(&entry.queue);
+  if (target && (*target)->isClosed()) return;
   if (_stopped) {
-    // stop() has already run (possibly before any thread was ever started —
-    // e.g. the destination never saw a delayed message until now). Starting a
-    // new worker thread here would race stop(): stop() already returned via
-    // its "if (_stopped) return" fast path without joining anything, so a
-    // thread spun up after that point would never be joined and ~std::thread
-    // would call std::terminate on a joinable thread (the exact failure mode
-    // ADR-0006 exists to prevent, and one try/catch in the destructor cannot
-    // catch since std::terminate is not a throw).
-    //
-    // What to do with the message differs by durability (spec 13 review N9,
-    // making the policy consistent with stop()'s own draining behavior
-    // below, which discards not-yet-due entries rather than delivering them
-    // early): a persistent message is still an un-acked record in storage:
-    // delivering it now would let the consumer ack it, erasing that record
-    // and losing the delay (and the message) forever, whereas dropping the
-    // in-memory delivery here leaves the record for a future replay to
-    // re-arm correctly. A non-persistent message has no such second life —
-    // nothing will ever redeliver it — so late-but-delivered beats losing it
-    // outright, matching "provider is shutting down" semantics.
     lock.unlock();
-    if (msg && msg->isPersistent()) {
-      poco_warning(_logger.get(),
-                   "DeliveryScheduler: enqueueOrSchedule after stop() for a persistent "
-                   "message — dropping the in-memory delivery instead of delivering early; "
-                   "the storage record remains and a future replay will re-arm it");
-      return;
-    }
-    queue->enqueue(std::move(msg));
+    // Preserve the standalone QueueT scheduler contract after stop.
+    if (!target && msg && !msg->isPersistent()) entry.deliver();
     return;
   }
   if (!_threadStarted) {
     _thread = std::thread(&DeliveryScheduler::run, this);
     _threadStarted = true;
   }
-  _pending.emplace(deliveryTime, Entry{std::move(queue), std::move(msg)});
+  _pending.emplace(deliveryTime, std::move(entry));
   ++_version;
   lock.unlock();
   _cv.notify_one();
@@ -174,7 +165,7 @@ void DeliveryScheduler::run() {
       Entry entry = std::move(it->second);
       _pending.erase(it);
       lock.unlock();
-      entry.queue->enqueue(std::move(entry.msg));
+      entry.deliver();
       lock.lock();
     }
   }
@@ -195,18 +186,20 @@ void DeliveryScheduler::stop() {
       poco_error(_logger.get(), Poco::format("DeliveryScheduler worker join() threw: %s", std::string(e.what())));
     }
   }
-  // After join() (or if the worker never started), no other thread can still be
-  // touching _pending: enqueueOrSchedule() now bails out (via the _stopped check
-  // above) before inserting anything new, and the worker loop exits its "while
-  // (!_stop)" as soon as _stop flips without draining what is left. Anything
-  // still here is a not-yet-due delivery that is being discarded — log how many
-  // so "message never arrived" is diagnosable instead of silent.
-  if (!_pending.empty()) {
-    poco_warning(_logger.get(),
-                 Poco::format("DeliveryScheduler stop(): discarding %z not-yet-due pending "
-                              "delivery(ies)",
-                              _pending.size()));
+  std::lock_guard<std::mutex> lock(_mutex);
+  _pending.clear();
+}
+
+void DeliveryScheduler::cancel(const DeliveryState& queue) {
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    std::erase_if(_pending, [&queue](const auto& entry) {
+      const auto* target = std::get_if<std::shared_ptr<DeliveryState>>(&entry.second.queue);
+      return target && target->get() == &queue;
+    });
+    ++_version;
   }
+  _cv.notify_one();
 }
 
 }  // namespace tiny_mq

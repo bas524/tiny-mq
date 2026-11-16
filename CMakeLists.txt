@@ -73,7 +73,6 @@ add_executable(tiny_mq)
 add_subdirectory(server)
 
 set(POCO_LIBS
-    Poco::Foundation
     Poco::Util
     Poco::Net
     Poco::XML
@@ -114,6 +113,7 @@ if (ENABLE_TESTS)
                  tests/BenchmarkTest.h
                  tests/SelectorTest.cpp
                  tests/SelectorTest.h
+                 tests/DestinationContractTest.cpp
                  tests/DurableSubscriberTest.cpp
                  tests/DurableSubscriberTest.h
                  tests/MessageContractTest.cpp
@@ -148,7 +148,6 @@ if (ENABLE_TESTS)
       COMPILE_DEFINITIONS "TINY_MQ_MESSAGE_CONTRACT_FIXTURE=\"${CMAKE_CURRENT_BINARY_DIR}/MessageContract.tsv\"")
   set(TEST_LIBS
       GTest::gtest
-      GTest::gtest_main
       benchmark::benchmark)
 endif ()
 

@@ -64,12 +64,19 @@ class Connection {
 
   std::reference_wrapper<Exchange> _exchange;
   std::reference_wrapper<Poco::Logger> _logger;
+  const Poco::UUID _identity;
   std::string _clientID;
   bool _started{false};
   bool _closed{false};
   ExceptionListener _exceptionListener;
   std::vector<std::unique_ptr<Session>> _sessions;
   mutable Poco::FastMutex _mutex;
+
+  friend class Destination;
+  friend class Exchange;
+  friend class QueueBrowser;
+  friend class Session;
+  friend class TemporaryDestination;
 };
 }  // namespace tiny_mq
 
