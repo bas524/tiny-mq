@@ -11,7 +11,11 @@
 #include <fstream>
 #include <future>
 #include <iostream>
+#include <iterator>
 #include <latch>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace tiny_mq {
 namespace internal {
@@ -73,6 +77,18 @@ int child(const std::string& directory, const std::string& scenario, const std::
   std::cout << "  child " << scenario << " " << point << " exit=" << status << std::endl;
   return status;
 }
+
+#ifndef _WIN32
+std::string readScratch(const fs::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  require(input.is_open(), "cannot open scratch file");
+  return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+fs::path retryAttempts(const fs::path& root) {
+  return root / std::to_string(destination::hash(destination::Queue, "origin")) / "attempt-72";
+}
+#endif
 
 void legacyRecord(const std::string& directory, const std::string& name, int64_t expiration = 0,
                   bool extended = false) {
@@ -238,6 +254,40 @@ TEST_F(DeliveryContractTest, ReceiveLifecycle) {
   consumer->close();
   EXPECT_FALSE(waiting.get());
   EXPECT_THROW(consumer->receiveNoWait(), IllegalStateException);
+
+  // A checked client receive runs the predicate outside the ready-set lock.
+  // Close must still wait for receive to release the session and its claim.
+  auto& client = connection.createSession(Session::CLIENT_ACKNOWLEDGE);
+  auto checked = client.createConsumer(queue);
+  send(session, *producer, "checked", Message::NOT_PERSISTENT);
+  std::promise<void> evaluating;
+  auto entered = evaluating.get_future();
+  std::latch finishCheck(1);
+  auto result = std::async(std::launch::async, [&] {
+    return checked->receiveChecked([&](const Message&) {
+      evaluating.set_value();
+      finishCheck.wait();
+      return true;
+    });
+  });
+  EXPECT_EQ(std::future_status::ready, entered.wait_for(2s));
+  std::latch closing(2);
+  const auto close = [&] {
+    closing.count_down();
+    checked->close();
+  };
+  auto closeFirst = std::async(std::launch::async, close);
+  auto closeSecond = std::async(std::launch::async, close);
+  closing.wait();
+  EXPECT_EQ(std::future_status::timeout, closeFirst.wait_for(15ms));
+  EXPECT_EQ(std::future_status::timeout, closeSecond.wait_for(15ms));
+  finishCheck.count_down();
+  EXPECT_EQ("checked", body(result.get().message));
+  closeFirst.get();
+  closeSecond.get();
+  EXPECT_THROW(checked->receiveNoWait(), IllegalStateException);
+  client.acknowledge();
+
   auto other = session.createConsumer(queue);
   connection.stop();
   auto stopped = std::async(std::launch::async, [&] { return other->recv(-1); });
@@ -732,6 +782,81 @@ TEST_F(DeliveryContractTest, AtomicConsumeAndSend) {
   ASSERT_EQ(crashCode, child(corrupt, "tx-crash", "commit:after-decision"));
   std::ofstream(corrupt + "delivery-72/decision", std::ios::binary | std::ios::app).put('!');
   EXPECT_EQ(74, child(corrupt, "expect-corruption"));
+#ifndef _WIN32
+  for (bool linkDirectory : {false, true}) {
+    SCOPED_TRACE(linkDirectory ? "delivery-72 directory symlink" : "decision file symlink");
+    const auto path = directory + "linked-" + std::to_string(linkDirectory) + "/";
+    ASSERT_EQ(crashCode, child(path, "tx-crash", "commit:after-decision"));
+    const auto journal = fs::path(path) / "delivery-72";
+    const auto outside = fs::absolute(directory + "outside-" + std::to_string(linkDirectory));
+    const auto entry = linkDirectory ? journal : journal / "decision";
+    const auto externalDecision = linkDirectory ? outside / "decision" : outside;
+    const auto expected = readScratch(journal / "decision");
+    ASSERT_FALSE(expected.empty());
+    ASSERT_EQ(1, expected.front());
+    fs::rename(entry, outside);
+    if (linkDirectory) {
+      fs::create_directory_symlink(outside, entry);
+    } else {
+      fs::create_symlink(outside, entry);
+    }
+    EXPECT_EQ(74, child(path, "tx-check-commit"));
+    EXPECT_EQ(expected, readScratch(externalDecision));
+    EXPECT_TRUE(fs::is_symlink(entry));
+    fs::remove(entry);
+    fs::rename(outside, entry);
+    EXPECT_EQ(0, child(path, "tx-check-commit"));
+    EXPECT_EQ(0, child(path, "tx-check-empty"));
+  }
+  {
+    SCOPED_TRACE("decision creation through a dangling symlink");
+    const auto path = directory + "dangling/";
+    const auto decision = fs::path(path) / "delivery-72" / "decision";
+    const auto outside = fs::absolute(directory + "must-not-create");
+    // Start clean, then substitute the entry after Exchange has opened the root.
+    TransactionFixture broker(path);
+    broker.stage(Message::PERSISTENT, Message::PERSISTENT, Message::PERSISTENT, true);
+    fs::create_directory(decision.parent_path());
+    fs::create_symlink(outside, decision);
+    EXPECT_THROW(broker.transaction.commit(), Poco::DataFormatException);
+    EXPECT_FALSE(fs::exists(outside));
+    fs::remove(decision);
+    broker.transaction.commit();
+    EXPECT_NO_THROW(broker.check(true));
+  }
+  {
+    SCOPED_TRACE("decision replaced after opening");
+    const auto path = directory + "swapped/";
+    const auto decision = fs::path(path) / "delivery-72" / "decision";
+    const auto openedDecision = decision.parent_path() / "opened-decision";
+    const auto outside = fs::absolute(directory + "outside-after-open");
+    const std::string sentinel(1024 * 1024 + 1, 'x');
+    std::ofstream(outside, std::ios::binary) << sentinel;
+    TransactionFixture broker(path);
+    broker.stage(Message::PERSISTENT, Message::PERSISTENT, Message::PERSISTENT, true);
+    const std::function<void()> swap = [&] {
+      fs::rename(decision, openedDecision);
+      fs::create_symlink(outside, decision);
+    };
+    internal::observeCommitPreparation(&swap);
+    EXPECT_NO_THROW(broker.transaction.commit());
+    internal::observeCommitPreparation(nullptr);
+    EXPECT_NO_THROW(broker.check(true));
+    const auto retired = readScratch(openedDecision);
+    ASSERT_FALSE(retired.empty());
+    EXPECT_EQ(0, retired.front());
+    EXPECT_TRUE(fs::is_symlink(decision));
+    EXPECT_TRUE(sentinel == readScratch(outside));
+  }
+  {
+    SCOPED_TRACE("decision FIFO");
+    const auto path = directory + "fifo/";
+    const auto journal = fs::path(path) / "delivery-72";
+    fs::create_directories(journal);
+    ASSERT_EQ(0, ::mkfifo((journal / "decision").c_str(), 0600));
+    EXPECT_EQ(74, child(path, "expect-corruption"));
+  }
+#endif
 }
 
 void ackCrash(const std::string& directory, std::string_view scenario) {
@@ -856,6 +981,81 @@ TEST_F(DeliveryContractTest, CrashAndDeadLetterMatrix) {
   const auto retry = directory + "retry/";
   EXPECT_EQ(crashCode, child(retry, "retry-crash", "retry:scheduled"));
   EXPECT_EQ(0, child(retry, "retry-check"));
+
+#ifndef _WIN32
+  for (bool linkDirectory : {false, true}) {
+    SCOPED_TRACE(linkDirectory ? "attempt-72 directory symlink" : "attempt file symlink");
+    const auto path = directory + "linked-retry-" + std::to_string(linkDirectory) + "/";
+    ASSERT_EQ(crashCode, child(path, "retry-crash", "retry:scheduled"));
+    const auto attempts = retryAttempts(path);
+    const auto sidecar = fs::directory_iterator(attempts)->path();
+    const auto outside = fs::absolute(directory + "outside-retry-" + std::to_string(linkDirectory));
+    const auto entry = linkDirectory ? attempts : sidecar;
+    const auto externalFrame = linkDirectory ? outside / sidecar.filename() : outside;
+    const auto expected = readScratch(sidecar);
+    ASSERT_TRUE(expected.starts_with("TMQ72A01"));
+    fs::rename(entry, outside);
+    if (linkDirectory) {
+      fs::create_directory_symlink(outside, entry);
+    } else {
+      fs::create_symlink(outside, entry);
+    }
+    EXPECT_EQ(74, child(path, "retry-check"));
+    ASSERT_TRUE(fs::exists(externalFrame));
+    EXPECT_EQ(expected, readScratch(externalFrame));
+    EXPECT_TRUE(fs::is_symlink(entry));
+    fs::remove(entry);
+    fs::rename(outside, entry);
+    EXPECT_EQ(0, child(path, "retry-check"));
+  }
+  {
+    SCOPED_TRACE("attempt write and cleanup with substituted paths");
+    const auto path = directory + "live-attempts/";
+    Exchange exchange(path);
+    Connection connection(exchange);
+    auto& session = connection.createSession(Session::CLIENT_ACKNOWLEDGE);
+    auto queue = session.createDestination(destination::Queue, "origin");
+    queue->setRedeliveryPolicy({3, 0, 0, {}});
+    auto producer = session.createProducer(queue);
+    auto consumer = session.createConsumer(queue);
+    connection.start();
+    send(session, *producer, "sidecar");
+    ASSERT_EQ("sidecar", body(consumer->receiveNoWait()));
+
+    const auto attempts = retryAttempts(path);
+    const auto frame = fs::directory_iterator(attempts)->path();
+    const auto temporary = fs::path(frame.string() + ".tmp");
+    const auto outside = fs::absolute(directory + "outside-temporary");
+    const std::string sentinel = "external scratch";
+    std::ofstream(outside, std::ios::binary) << sentinel;
+    fs::remove(frame);
+    fs::create_symlink(outside, frame);
+    fs::create_symlink(outside, temporary);
+    session.recover();
+    EXPECT_FALSE(fs::is_symlink(temporary));
+    EXPECT_FALSE(fs::is_symlink(frame));
+    EXPECT_EQ(sentinel, readScratch(outside));
+    ASSERT_EQ("sidecar", body(consumer->receiveNoWait()));
+
+    const auto externalDirectory = fs::absolute(directory + "outside-live-attempts");
+    const auto externalFrame = externalDirectory / frame.filename();
+    const auto expected = readScratch(frame);
+    fs::rename(attempts, externalDirectory);
+    fs::create_directory_symlink(externalDirectory, attempts);
+    send(session, *producer, "new sidecar");
+    EXPECT_THROW(consumer->receiveNoWait(), Poco::DataFormatException);
+    session.acknowledge();
+    ASSERT_TRUE(fs::exists(externalFrame));
+    EXPECT_EQ(expected, readScratch(externalFrame));
+    EXPECT_EQ(1, std::distance(fs::directory_iterator(externalDirectory), fs::directory_iterator{}));
+    EXPECT_TRUE(fs::is_symlink(attempts));
+    fs::remove(attempts);
+    fs::rename(externalDirectory, attempts);
+    ASSERT_EQ("new sidecar", body(consumer->receiveNoWait()));
+    session.acknowledge();
+    EXPECT_FALSE(consumer->receiveNoWait());
+  }
+#endif
 
   for (const auto* scenario : {"dlq-crash", "dlq-topic-crash"}) {
     for (const auto* point : {"dlq:before-decision", "dlq:after-decision", "dlq:apply-1"}) {

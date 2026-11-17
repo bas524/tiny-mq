@@ -3,8 +3,10 @@
 
 #include "ConcurrentLinearStorage.h"
 #include <filesystem>
-#include <fstream>
 #include <optional>
+#ifdef _WIN32
+#include <fstream>
+#endif
 
 namespace tiny_mq {
 class Consumer;
@@ -50,7 +52,7 @@ class LocalTransactionJournal {
 
   explicit LocalTransactionJournal(const Poco::Path& root);
   ~LocalTransactionJournal() noexcept;
-  void openDecision();
+  bool openDecision(bool create);
   void writeDecisionBytes(const void* bytes, size_t size, uint64_t offset);
   void resizeDecision(uint64_t size);
   void retireDecision();
@@ -69,11 +71,13 @@ class LocalTransactionJournal {
   [[noreturn]] static void stopAfterDecision(const char* detail) noexcept;
 
   std::filesystem::path _root;
-  std::filesystem::path _directory;
-  std::filesystem::path _decisionPath;
 #ifdef _WIN32
+  std::filesystem::path _decisionPath;
   std::fstream _decisionFile;
 #else
+  int openAttemptDirectory(const Poco::Path& storage, bool create = false) const;
+  std::filesystem::path _configuredRoot;
+  int _rootFd = -1;
   int _decisionFd = -1;
 #endif
   uint64_t _decisionSize = 0;

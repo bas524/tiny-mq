@@ -45,7 +45,7 @@ class Consumer {
   Message::Ptr receiveImpl(int64_t timeout, const std::function<bool(const Message&)>* predicate,
                            ReceiveBodyDisposition* disposition = nullptr);
   bool dispatchOne();
-  void track(const Message::Ptr& message);
+  void track(const Message::Ptr& message) noexcept;
   void unlink(const Message& message);
   void redeliver(const Message& message, uint64_t batch = 0);
   void finishSession() noexcept;
@@ -55,11 +55,14 @@ class Consumer {
   bool hasStorage(const Message& message) const {
     return message._storageTomId != std::numeric_limits<Poco::UInt32>::max();
   }
-  bool isClosing() const {
-    return _receiveState.load(std::memory_order_acquire) & closing;
-  }
+  enum class CloseState : uint8_t { open, closing, closed };
+  bool receiveSealed() const { return _closeState.load(std::memory_order_acquire) != CloseState::open; }
+  bool isClosed() const { return _closeState.load(std::memory_order_acquire) == CloseState::closed; }
   linear_storage::Record record(const Message& message) const;
-  void acknowledge(const Message& message);
+  void acknowledgeStored(const Message& message);
+  void acknowledge(const Message& message) {
+    if (hasStorage(message)) [[unlikely]] acknowledgeStored(message);
+  }
 
   Poco::UUID _uuid;
   std::shared_ptr<Destination> _destination;
@@ -71,18 +74,15 @@ class Consumer {
   std::deque<Message::Ptr> _transacted;
   MessageListener _listener;
   std::mutex _listenerMutex;
-  static constexpr uint8_t receiving = 1;
-  static constexpr uint8_t closing = 2;
-  // Close seals the receive gate and waits for the active receive to leave.
-  // Only a receiver leaving a sealed gate has to notify the closer.
-  std::atomic_uint8_t _receiveState{0};
+  std::atomic_uint32_t _receiving{0};
+  std::atomic<CloseState> _closeState{CloseState::open};
   std::atomic_bool _callbackActive{false};
   size_t _pendingAcks = 0;
   // ADR-0005 gives the owning session exclusive access to these delivery links.
   Message::Ptr _inFlightHead;
   Message* _inFlightTail{nullptr};
-  std::atomic_bool _closed{false};
   bool _durable;
+  bool _countClaims;
 
   friend class Destination;
   friend class DeliveryState;

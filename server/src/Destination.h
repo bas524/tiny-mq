@@ -149,12 +149,12 @@ class Destination : public std::enable_shared_from_this<Destination> {
     std::shared_ptr<DeliveryState> deliveries = std::make_shared<DeliveryState>();
     std::shared_ptr<Selector> selector;
     std::shared_ptr<Storage> storage;
-    Poco::Path path;
-    Poco::UUID connectionId;
-    std::string clientId;
     bool noLocal{false};
     bool legacy{false};
     size_t active{0};  // guarded by the destination mutex
+    Poco::Path path;
+    Poco::UUID connectionId;
+    std::string clientId;
     std::weak_ptr<Consumer> legacyConsumer;
     std::optional<SubscriptionIdentity> sharedIdentity;
 
@@ -194,7 +194,6 @@ class Destination : public std::enable_shared_from_this<Destination> {
   void prepareCopy(const Producer& producer, Message& copy, int64_t number);
   bool matches(const Subscription& sub, const Producer& producer, const Message& message) const;
   void publish(const Producer& producer, const Message& message, int64_t acceptedAt);
-  void deliver(const Subscription& subscription, Message::Ptr message, int64_t acceptedAt);
   static void persist(Storage& storage, Message& message);
   Poco::UUID storageKey(int64_t sequence) const;
   static Message::Ptr decodeStored(const std::vector<char>& bytes);

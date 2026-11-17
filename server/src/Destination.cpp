@@ -50,7 +50,7 @@ void DeliveryState::insert(Message::Ptr&& message, bool special) {
   const auto band = std::clamp(message->jmsHeaders.priority, 0, QueueT::kBands - 1);
   const auto& added = _bands[band].emplace_back(std::move(message));
   _nonEmpty |= 1u << band;
-  _special += special;
+  if (special) [[unlikely]] ++_special;
   if (!_listeners.empty()) notifyListeners();
   if (_waiters.empty()) return;
   if (added->jmsHeaders.expiration != 0 && added->isExpired(DeliveryClock::now())) return;
@@ -159,7 +159,7 @@ Message::Ptr DeliveryState::claim(const Consumer& consumer, int64_t timeout,
     armReceiveTimeout(timeout, deadline);
     lock.lock();
   }
-  if (_closed.load(std::memory_order_relaxed) || consumer.isClosing() ||
+  if (_closed.load(std::memory_order_relaxed) || consumer.receiveSealed() ||
       (deadline != SteadyClock::time_point{} && SteadyClock::now() >= deadline)) return {};
   if (started) {
     if (auto message = take(consumer._selector.get(), check, incompatible)) {
@@ -178,14 +178,14 @@ Message::Ptr DeliveryState::waitForClaim(std::unique_lock<DestinationMutex>& loc
   const auto* selector = consumer._selector.get();
   const auto waiter = std::make_shared<Waiter>(selector);
   _waiters.push_back(waiter);
-  const auto signalled = [&] { return _closed || consumer.isClosing() || waiter->signalled; };
+  const auto signalled = [&] { return _closed || consumer.receiveSealed() || waiter->signalled; };
   Message::Ptr message;
   try {
-    while (!_closed && !consumer.isClosing()) {
+    while (!_closed && !consumer.receiveSealed()) {
       waiter->signalled = false;
       if (deadline == SteadyClock::time_point{}) waiter->condition.wait(lock, signalled);
       else if (!waiter->condition.wait_until(lock, deadline, signalled)) break;
-      if (!_closed && !consumer.isClosing() && started) message = take(selector, check, incompatible);
+      if (!_closed && !consumer.receiveSealed() && started) message = take(selector, check, incompatible);
       if (message || incompatible) break;
     }
   } catch (...) {
@@ -328,8 +328,8 @@ void Destination::detach(Consumer& consumer) {
   std::shared_ptr<Subscription> removed;
   {
     std::lock_guard lock(_mutex);
-    if (consumer._closed) return;
-    consumer._closed = true;
+    if (consumer.isClosed()) return;
+    consumer._closeState.store(Consumer::CloseState::closed);
     --_activeConsumers;
     if (isQueueFamily()) return;
     const auto it = std::find_if(_subscriptions.begin(), _subscriptions.end(), [&](const auto& sub) {
@@ -560,46 +560,54 @@ void Destination::preparePublication(const Producer& producer, const Message::Pt
 }
 
 void Destination::publish(const Producer& producer, const Message& message, int64_t acceptedAt) {
-  std::shared_ptr<Subscription> first;
-  std::vector<std::shared_ptr<Subscription>> rest;
+  struct Target {
+    std::shared_ptr<DeliveryState> queue;
+    Storage* storage = nullptr;
+  };
+  Target first;
+  std::optional<std::vector<Target>> rest;
   int64_t number;
   {
     std::lock_guard lock(_mutex);
     checkLive();
     for (const auto& sub : _subscriptions) {
       if (!matches(*sub, producer, message)) continue;
-      if (first) rest.push_back(sub);
-      else first = sub;
+      // Pin the subscription (and its storage) while exposing the ready set
+      // directly. Publishing must run outside the subscription-list mutex.
+      Target target{{sub, sub->deliveries.get()}, sub->storage.get()};
+      if (first.queue) {
+        if (!rest) rest.emplace();
+        rest->push_back(std::move(target));
+      } else {
+        first = std::move(target);
+      }
     }
-    if (!first) return;
+    if (!first.queue) return;
     number = _messageCounter.load(std::memory_order_relaxed);
     _messageCounter.store(number + 1, std::memory_order_relaxed);
   }
 
-  auto dispatch = [&](const Subscription& sub) {
+  const auto* target = &first;
+  size_t next = 0;
+  for (;;) {
     auto copy = message.copy();
     prepareCopy(producer, *copy, number);
-    if (sub.storage && copy->isPersistent()) {
+    const auto enqueue = [&] {
+      if (copy->jmsHeaders.deliveryTime <= acceptedAt) target->queue->insert(std::move(copy), false);
+      else _scheduler.enqueueOrSchedule(target->queue, std::move(copy));
+    };
+    if (target->storage && copy->isPersistent()) [[unlikely]] {
       copy->_storageId = storageKey(copy->_number);
+      std::lock_guard lock(target->queue->storageMutex);
+      if (!target->queue->retired) {
+        persist(*target->storage, *copy);
+        enqueue();
+      }
+    } else {
+      enqueue();
     }
-    deliver(sub, std::move(copy), acceptedAt);
-  };
-  dispatch(*first);
-  for (const auto& sub : rest) dispatch(*sub);
-}
-
-void Destination::deliver(const Subscription& subscription, Message::Ptr message, int64_t acceptedAt) {
-  auto publish = [&] {
-    if (message->jmsHeaders.deliveryTime <= acceptedAt) subscription.deliveries->insert(std::move(message), false);
-    else _scheduler.enqueueOrSchedule(subscription.deliveries, std::move(message));
-  };
-  if (subscription.storage && message->isPersistent()) {
-    std::lock_guard lock(subscription.deliveries->storageMutex);
-    if (subscription.deliveries->retired) return;
-    persist(*subscription.storage, *message);
-    publish();
-  } else {
-    publish();
+    if (!rest || next == rest->size()) break;
+    target = &(*rest)[next++];
   }
 }
 

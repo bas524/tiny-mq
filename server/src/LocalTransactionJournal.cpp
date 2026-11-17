@@ -5,14 +5,16 @@
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <functional>
 #include <map>
 #include <span>
 #ifndef _WIN32
 #include <cerrno>
+#include <dirent.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 #endif
 
 namespace tiny_mq {
@@ -99,22 +101,7 @@ std::vector<char> encodeFrame(std::string_view header, const Encoder& payload) {
   return std::move(frame.bytes);
 }
 
-void writeFrame(const fs::path& path, std::string_view header, const Encoder& payload) {
-  const auto frame = encodeFrame(header, payload);
-  std::ofstream output(path, std::ios::binary | std::ios::trunc);
-  output.exceptions(std::ios::badbit | std::ios::failbit);
-  output.write(frame.data(), static_cast<std::streamsize>(frame.size()));
-  output.close();
-}
-
-std::vector<char> readFrame(const fs::path& path, std::string_view header, uint64_t offset = 0) {
-  const auto size = fs::file_size(path) - offset;
-  if (size > static_cast<uint64_t>(UINT32_MAX) + 28 || size < 28) invalid();
-  std::ifstream input(path, std::ios::binary);
-  input.exceptions(std::ios::badbit | std::ios::failbit);
-  input.seekg(offset);
-  std::vector<char> bytes(static_cast<size_t>(size));
-  input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+std::vector<char> decodeFrame(std::span<const char> bytes, std::string_view header) {
   Decoder frame(bytes);
   frame.expect(header);
   const auto payload = frame.take(frame.number<uint64_t>());
@@ -124,9 +111,143 @@ std::vector<char> readFrame(const fs::path& path, std::string_view header, uint6
   return {payload.begin(), payload.end()};
 }
 
+size_t frameSize(uint64_t size, uint64_t offset) {
+  if (size < offset || size - offset < 28 || size - offset > static_cast<uint64_t>(UINT32_MAX) + 28 ||
+      size - offset > SIZE_MAX) invalid();
+  return static_cast<size_t>(size - offset);
+}
+
+#ifdef _WIN32
+void writeFrame(const fs::path& path, std::string_view header, const Encoder& payload) {
+  const auto frame = encodeFrame(header, payload);
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  output.exceptions(std::ios::badbit | std::ios::failbit);
+  output.write(frame.data(), static_cast<std::streamsize>(frame.size()));
+  output.close();
+}
+
+std::vector<char> readFrame(const fs::path& path, std::string_view header, uint64_t offset = 0) {
+  const auto size = frameSize(fs::file_size(path), offset);
+  std::ifstream input(path, std::ios::binary);
+  input.exceptions(std::ios::badbit | std::ios::failbit);
+  input.seekg(offset);
+  std::vector<char> bytes(size);
+  input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  return decodeFrame(bytes, header);
+}
+
 fs::path attemptPath(const Poco::Path& directory, const Poco::UUID& key) {
   return fs::path(directory.toString()) / "attempt-72" / key.toString();
 }
+#else
+class Descriptor {
+ public:
+  explicit Descriptor(int fd = -1) : _fd(fd) {}
+  ~Descriptor() { if (_fd >= 0) ::close(_fd); }
+  Descriptor(const Descriptor&) = delete;
+  Descriptor& operator=(const Descriptor&) = delete;
+  int get() const { return _fd; }
+  int release() { return std::exchange(_fd, -1); }
+  void reset(int fd) {
+    if (_fd >= 0) ::close(_fd);
+    _fd = fd;
+  }
+
+ private:
+  int _fd;
+};
+
+[[noreturn]] void unsafeEntry(const char* name) {
+  throw Poco::DataFormatException("unsafe delivery metadata entry", name);
+}
+
+int openDirectory(int parent, const char* name, bool optional = false, bool create = false) {
+  constexpr int flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+  int fd = ::openat(parent, name, flags);
+  if (fd < 0 && errno == ENOENT && create) {
+    if (::mkdirat(parent, name, 0700) < 0 && errno != EEXIST) throw Poco::CreateFileException(name);
+    fd = ::openat(parent, name, flags);
+  }
+  if (fd >= 0 || (optional && errno == ENOENT)) return fd;
+  if (errno == ENOTDIR || errno == ELOOP) unsafeEntry(name);
+  throw Poco::OpenFileException(name);
+}
+
+// Walk one component at a time so swapping any opened path for a link cannot
+// redirect later operations. The caller owns the starting descriptor.
+int openDirectoryPath(int parent, const fs::path& path, bool optional = false) {
+  Descriptor directory;
+  for (const auto& part : path) {
+    if (part.empty() || part == ".") continue;
+    if (part == ".." || part.has_root_path()) unsafeEntry(part.c_str());
+    directory.reset(openDirectory(parent, part.c_str(), optional));
+    parent = directory.get();
+    if (parent < 0) return -1;
+  }
+  return directory.release();
+}
+
+int openAbsoluteDirectory(const fs::path& path, bool optional = false) {
+  Descriptor root(openDirectory(AT_FDCWD, "/"));
+  if (path == path.root_path()) return root.release();
+  return openDirectoryPath(root.get(), path.relative_path(), optional);
+}
+
+int openFile(int directory, const char* name, int flags, bool optional = false) {
+  // Nonblocking open lets fstat reject a FIFO even without a peer.
+  const int fd = ::openat(directory, name, flags | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0600);
+  if (fd >= 0 || (optional && errno == ENOENT)) return fd;
+  if (errno == ELOOP || errno == EISDIR) unsafeEntry(name);
+  throw Poco::OpenFileException(name);
+}
+
+uint64_t regularFileSize(int fd, const char* name) {
+  struct stat info {};
+  if (::fstat(fd, &info) < 0) throw Poco::FileException(name);
+  if (!S_ISREG(info.st_mode)) unsafeEntry(name);
+  return static_cast<uint64_t>(info.st_size);
+}
+
+void readBytes(int fd, char* bytes, size_t size, uint64_t offset) {
+  while (size != 0) {
+    const auto result = ::pread(fd, bytes, size, static_cast<off_t>(offset));
+    if (result < 0 && errno == EINTR) continue;
+    if (result <= 0) throw Poco::IOException("delivery-72 metadata read failed");
+    bytes += result;
+    size -= static_cast<size_t>(result);
+    offset += static_cast<uint64_t>(result);
+  }
+}
+
+std::vector<char> readFrame(int fd, uint64_t size, std::string_view header, uint64_t offset = 0) {
+  std::vector<char> bytes(frameSize(size, offset));
+  readBytes(fd, bytes.data(), bytes.size(), offset);
+  return decodeFrame(bytes, header);
+}
+
+void unlinkEntry(int directory, const char* name) {
+  if (::unlinkat(directory, name, 0) < 0 && errno != ENOENT) throw Poco::FileException(name);
+}
+
+void writeAttempt(int directory, const std::string& name, const Encoder& body) {
+  const auto frame = encodeFrame(attemptMagic, body);
+  const auto temporary = name + ".tmp";
+  // A stale temporary entry can be unlinked even if it is a link. Exclusive
+  // creation also rejects an entry substituted between unlink and open.
+  unlinkEntry(directory, temporary.c_str());
+  Descriptor file(openFile(directory, temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL));
+  size_t offset = 0;
+  while (offset < frame.size()) {
+    const auto result = ::write(file.get(), frame.data() + offset, frame.size() - offset);
+    if (result < 0 && errno == EINTR) continue;
+    if (result <= 0) throw Poco::IOException("delivery-72 attempt write failed");
+    offset += static_cast<size_t>(result);
+  }
+  if (::renameat(directory, temporary.c_str(), directory, name.c_str()) < 0) {
+    throw Poco::FileException(name);
+  }
+}
+#endif
 
 constexpr auto missing = std::numeric_limits<Poco::UInt32>::max();
 #ifdef ENABLE_TESTS
@@ -141,32 +262,54 @@ void observeCommitPreparation(const std::function<void()>* observer) { beforeCom
 #endif
 
 LocalTransactionJournal::LocalTransactionJournal(const Poco::Path& root)
-    : _root(fs::weakly_canonical(fs::absolute(root.toString()))), _directory(_root / "delivery-72"),
-      _decisionPath(_directory / "decision") {}
+    : _root(fs::weakly_canonical(fs::absolute(root.toString())))
+#ifdef _WIN32
+      , _decisionPath(_root / "delivery-72" / "decision")
+#else
+      , _configuredRoot(fs::absolute(root.toString()).lexically_normal())
+#endif
+{}
 
 LocalTransactionJournal::~LocalTransactionJournal() noexcept {
 #ifndef _WIN32
   if (_decisionFd >= 0 && ::close(_decisionFd) < 0) std::fprintf(stderr, "delivery-72: cannot close journal\n");
+  if (_rootFd >= 0) ::close(_rootFd);
 #endif
 }
 
-void LocalTransactionJournal::openDecision() {
+bool LocalTransactionJournal::openDecision(bool create) {
 #ifdef _WIN32
-  if (_decisionFile.is_open()) return;
-#else
-  if (_decisionFd >= 0) return;
-#endif
-  fs::create_directories(_directory);
-#ifdef _WIN32
+  if (_decisionFile.is_open()) return true;
+  if (!create && !fs::exists(_decisionPath)) return false;
+  if (create) fs::create_directories(_decisionPath.parent_path());
   if (!fs::exists(_decisionPath)) std::ofstream(_decisionPath, std::ios::binary).close();
   _decisionFile.open(_decisionPath, std::ios::binary | std::ios::in | std::ios::out);
   if (!_decisionFile) throw Poco::OpenFileException(_decisionPath.string());
-#else
-  _decisionFd = ::open(_decisionPath.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-  if (_decisionFd < 0) throw Poco::OpenFileException(_decisionPath.string());
-#endif
   _decisionSize = fs::file_size(_decisionPath);
+#else
+  if (_decisionFd >= 0) return true;
+  Descriptor directory(openDirectory(_rootFd, "delivery-72", !create, create));
+  if (directory.get() < 0) return false;
+  Descriptor file(openFile(directory.get(), "decision", O_RDWR | (create ? O_CREAT : 0), !create));
+  if (file.get() < 0) return false;
+  _decisionSize = regularFileSize(file.get(), "decision");
+  _decisionFd = file.release();
+#endif
+  return true;
 }
+
+#ifndef _WIN32
+int LocalTransactionJournal::openAttemptDirectory(const Poco::Path& storage, bool create) const {
+  const auto path = fs::absolute(storage.toString()).lexically_normal();
+  auto relative = path.lexically_relative(_configuredRoot);
+  // Replay constructs storage from the resolved Exchange root.
+  if (relative.empty() || *relative.begin() == "..") relative = path.lexically_relative(_root);
+  if (relative.empty() || relative == ".") invalid();
+  Descriptor parent(openDirectoryPath(_rootFd, relative, !create));
+  if (parent.get() < 0) return -1;
+  return openDirectory(parent.get(), "attempt-72", !create, create);
+}
+#endif
 
 void LocalTransactionJournal::writeDecisionBytes(const void* bytes, size_t size, uint64_t offset) {
 #ifdef _WIN32
@@ -217,37 +360,49 @@ fs::path LocalTransactionJournal::resolve(const Address& address) const {
 }
 
 void LocalTransactionJournal::recover() {
-  if (fs::exists(_decisionPath) && fs::file_size(_decisionPath) != 0) {
-    std::ifstream input(_decisionPath, std::ios::binary);
-    const auto state = input.get();
-    if (state == 0) return;
-    if (state != 1) invalid();
-    const auto bytes = readFrame(_decisionPath, magic, 1);
-    Decoder payload(bytes);
-    const auto count = payload.number<uint32_t>();
-    if (count == 0 || count > bytes.size() / 37) invalid();
-    std::vector<Operation> operations;
-    operations.reserve(count);
-    for (uint32_t i = 0; i < count; ++i) {
-      const auto tag = payload.number<uint8_t>();
-      Operation operation{{payload.string(), payload.uuid()}, payload.uuid(), {}, nullptr, {}};
-      resolve(operation.address);
-      if (operation.address.store.isNull() || operation.key.isNull()) invalid();
-      if (tag == 1) {
-        const auto data = payload.take(payload.number<uint64_t>());
-        if (data.empty()) invalid();
-        operation.bytes.assign(data.begin(), data.end());
-        Destination::decodeStored(operation.bytes);
-      } else if (tag != 2) {
-        invalid();
-      }
-      operations.push_back(std::move(operation));
+#ifdef _WIN32
+  if (!fs::exists(_decisionPath) || fs::file_size(_decisionPath) == 0) return;
+  std::ifstream input(_decisionPath, std::ios::binary);
+  const auto state = input.get();
+#else
+  _rootFd = openAbsoluteDirectory(_root);
+  if (!openDecision(false) || _decisionSize == 0) return;
+  char state;
+  readBytes(_decisionFd, &state, 1, 0);
+#endif
+  if (state == 0) return;
+  if (state != 1) invalid();
+#ifdef _WIN32
+  const auto bytes = readFrame(_decisionPath, magic, 1);
+#else
+  const auto bytes = readFrame(_decisionFd, _decisionSize, magic, 1);
+#endif
+  Decoder payload(bytes);
+  const auto count = payload.number<uint32_t>();
+  if (count == 0 || count > bytes.size() / 37) invalid();
+  std::vector<Operation> operations;
+  operations.reserve(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    const auto tag = payload.number<uint8_t>();
+    Operation operation{{payload.string(), payload.uuid()}, payload.uuid(), {}, nullptr, {}};
+    resolve(operation.address);
+    if (operation.address.store.isNull() || operation.key.isNull()) invalid();
+    if (tag == 1) {
+      const auto data = payload.take(payload.number<uint64_t>());
+      if (data.empty()) invalid();
+      operation.bytes.assign(data.begin(), data.end());
+      Destination::decodeStored(operation.bytes);
+    } else if (tag != 2) {
+      invalid();
     }
-    payload.end();
-    apply(operations, "replay");
-    openDecision();
-    retireDecision();
+    operations.push_back(std::move(operation));
   }
+  payload.end();
+  apply(operations, "replay");
+#ifdef _WIN32
+  openDecision(true);
+#endif
+  retireDecision();
 }
 
 void LocalTransactionJournal::decide(std::vector<Operation>& operations, std::string_view context) {
@@ -267,7 +422,7 @@ void LocalTransactionJournal::decide(std::vector<Operation>& operations, std::st
     }
   }
   const auto frame = encodeFrame(magic, payload);
-  openDecision();
+  openDecision(true);
   // On the first write the leading hole reads as state 0 on process restart.
   writeDecisionBytes(frame.data(), frame.size(), 1);
   if (_decisionSize != frame.size() + 1) resizeDecision(frame.size() + 1);
@@ -331,9 +486,18 @@ void LocalTransactionJournal::apply(std::vector<Operation>& operations, std::str
 std::optional<LocalTransactionJournal::DeliveryAttempt> LocalTransactionJournal::attempt(
     const Storage& storage, const Poco::UUID& key) const {
   if (!storage._linearStorage._hasAttemptFiles) return {};
+#ifdef _WIN32
   const auto path = attemptPath(storage._linearStorage._basePath, key);
   if (!fs::exists(path)) return {};
   const auto bytes = readFrame(path, attemptMagic);
+#else
+  Descriptor directory(openAttemptDirectory(storage._linearStorage._basePath));
+  if (directory.get() < 0) return {};
+  const auto name = key.toString();
+  Descriptor file(openFile(directory.get(), name.c_str(), O_RDONLY, true));
+  if (file.get() < 0) return {};
+  const auto bytes = readFrame(file.get(), regularFileSize(file.get(), name.c_str()), attemptMagic);
+#endif
   Decoder body(bytes);
   DeliveryAttempt attempt;
   const auto phase = body.number<uint8_t>();
@@ -367,10 +531,6 @@ void LocalTransactionJournal::saveAttempt(Storage& storage, const Poco::UUID& ke
                                           const DeliveryAttempt& state) {
   std::lock_guard lock(storage._storageMutex);
   if (storage._linearStorage.record(key).tomId == missing) return;  // TTL sweep won the race
-  const auto path = attemptPath(storage._linearStorage._basePath, key);
-  if (!storage._linearStorage._hasAttemptFiles) fs::create_directory(path.parent_path());
-  auto temporary = path;
-  temporary += ".tmp";
   Encoder body;
   body.number<uint8_t>(state.phase);
   body.number(state.count);
@@ -383,14 +543,24 @@ void LocalTransactionJournal::saveAttempt(Storage& storage, const Poco::UUID& ke
     body.string(state.deadLetter->path);
     body.uuid(state.deadLetter->store);
   }
+#ifdef _WIN32
+  const auto path = attemptPath(storage._linearStorage._basePath, key);
+  if (!storage._linearStorage._hasAttemptFiles) fs::create_directory(path.parent_path());
+  auto temporary = path;
+  temporary += ".tmp";
   writeFrame(temporary, attemptMagic, body);
   fs::rename(temporary, path);
+#else
+  Descriptor directory(openAttemptDirectory(storage._linearStorage._basePath, true));
+  writeAttempt(directory.get(), key.toString(), body);
+#endif
   storage._linearStorage._hasAttemptFiles = true;
 }
 
 void LocalTransactionJournal::sweepAttempts(Storage& storage) {
   std::lock_guard lock(storage._storageMutex);
   auto& linear = storage._linearStorage;
+#ifdef _WIN32
   const auto directory = fs::path(linear._basePath.toString()) / "attempt-72";
   if (!fs::exists(directory)) return;
   for (const auto& entry : fs::directory_iterator(directory)) {
@@ -400,11 +570,40 @@ void LocalTransactionJournal::sweepAttempts(Storage& storage) {
       fs::remove(entry.path());
     }
   }
+#else
+  Descriptor directory(openAttemptDirectory(linear._basePath));
+  if (directory.get() < 0) return;
+  const auto closeDirectory = [](DIR* stream) { ::closedir(stream); };
+  std::unique_ptr<DIR, decltype(closeDirectory)> entries(::fdopendir(directory.get()), closeDirectory);
+  if (!entries) throw Poco::OpenFileException("attempt-72");
+  const int fd = directory.release();  // owned by entries
+  for (;;) {
+    errno = 0;
+    const auto* entry = ::readdir(entries.get());
+    if (!entry) {
+      if (errno != 0) throw Poco::FileException("attempt-72");
+      break;
+    }
+    const std::string name(entry->d_name);
+    if (name == "." || name == "..") continue;
+    if (name.ends_with(".tmp") || linear.record(Poco::UUID(name)).tomId == missing) {
+      unlinkEntry(fd, name.c_str());
+    }
+  }
+#endif
 }
 
 void LocalTransactionJournal::removeAttempt(const Poco::Path& directory, const Poco::UUID& key) noexcept {
   try {
+#ifdef _WIN32
     fs::remove(attemptPath(directory, key));
+#else
+    Descriptor storage(openAbsoluteDirectory(fs::absolute(directory.toString()).lexically_normal(), true));
+    if (storage.get() < 0) return;
+    Descriptor attempts(openDirectory(storage.get(), "attempt-72", true));
+    if (attempts.get() < 0) return;
+    unlinkEntry(attempts.get(), key.toString().c_str());
+#endif
   } catch (const std::exception& error) {
     std::fprintf(stderr, "delivery-72 attempt cleanup: %s\n", error.what());
   }

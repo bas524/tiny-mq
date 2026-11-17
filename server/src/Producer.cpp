@@ -7,20 +7,17 @@
 
 namespace tiny_mq {
 namespace {
-const char* deliveryError(Message::Reliability mode, int32_t priority) {
-  if (priority < 0 || priority > 9) {
-    return "priority must be in range 0..9";
+void validateDelivery(Message::Reliability mode, int32_t priority) {
+  if (priority < 0 || priority > 9) [[unlikely]] {
+    throw std::invalid_argument("priority must be in range 0..9");
   }
-  if (mode != Message::PERSISTENT && mode != Message::NOT_PERSISTENT) {
-    return "invalid delivery mode";
+  if (mode != Message::PERSISTENT && mode != Message::NOT_PERSISTENT) [[unlikely]] {
+    throw std::invalid_argument("invalid delivery mode");
   }
-  return nullptr;
 }
 
 void validate(const SendOptions& options) {
-  if (const auto* error = deliveryError(options.deliveryMode, options.priority)) {
-    throw std::invalid_argument(error);
-  }
+  validateDelivery(options.deliveryMode, options.priority);
   if (options.timeToLive < 0 || options.deliveryDelay < 0) {
     throw std::invalid_argument("timeToLive and deliveryDelay must be non-negative");
   }
@@ -35,10 +32,10 @@ Producer::Producer(Destination& destination, Session& session)
 Producer::~Producer() = default;
 
 Session& Producer::ensureOpen() const {
-  if (_closed) throw IllegalStateException("producer is closed");
+  if (_closed) [[unlikely]] throw IllegalStateException("producer is closed");
   auto* session = _session.load(std::memory_order_acquire);
-  if (!session) throw IllegalStateException("producer session is closed");
-  session->ensureOpen();
+  if (!session) [[unlikely]] throw IllegalStateException("producer session is closed");
+  if (session->_closing.load(std::memory_order_acquire)) [[unlikely]] session->ensureOpen();
   _destination->checkLive();
   return *session;
 }
@@ -59,11 +56,7 @@ void Producer::setDefault(const SendOptions& options) {
 void Producer::send(const Message& message) {
   auto& session = ensureOpen();
   const auto* options = _default ? &*_default : nullptr;
-  if (!options) {
-    if (const auto* error = deliveryError(message.reliability, message.jmsHeaders.priority)) [[unlikely]] {
-      throw std::invalid_argument(error);
-    }
-  }
+  if (!options) validateDelivery(message.reliability, message.jmsHeaders.priority);
   dispatch(session, message, options);
 }
 

@@ -83,7 +83,7 @@ Consumer::Ptr Session::remember(Consumer::Ptr consumer) {
 
 void Session::pruneClosedConsumers() {
   for (auto it = _consumers.begin(); it != _consumers.end();) {
-    if (it->second->_closed && !it->second->hasClaims()) {
+    if (it->second->isClosed() && !it->second->hasClaims()) {
       it->second->_session = nullptr;
       it = _consumers.erase(it);
     } else {

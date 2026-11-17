@@ -16,7 +16,8 @@ Consumer::Consumer(Destination& destination, Session& session, std::shared_ptr<D
       _storage(std::move(storage)),
       _selector(std::move(selector)),
       _logger(Poco::Logger::get("tiny_mq.consumer")),
-      _durable(durable) {}
+      _durable(durable),
+      _countClaims(durable || session.acknowledgeMode() == Session::DUPS_OK_ACKNOWLEDGE) {}
 
 Consumer::~Consumer() { clearInFlight(); }
 
@@ -51,34 +52,40 @@ template<bool listener, bool checked>
 Message::Ptr Consumer::receiveImpl(int64_t timeout, const std::function<bool(const Message&)>* predicate,
                                    ReceiveBodyDisposition* disposition) {
   struct ReceiveGuard {
-    std::atomic_uint8_t* state;
+    std::atomic_uint32_t* active;
     ~ReceiveGuard() {
-      if (state && (state->fetch_sub(receiving, std::memory_order_release) & closing)) {
-        state->notify_all();
+      if (active) {
+        active->store(0, std::memory_order_release);
+        active->notify_one();
       }
     }
   } guard{nullptr};
 
   if constexpr (!listener) {
-    uint8_t idle = 0;
-    if (!_receiveState.compare_exchange_strong(idle, receiving, std::memory_order_acquire)) {
-      if (idle & closing) throw IllegalStateException("consumer is closed");
+    uint32_t idle = 0;
+    if (!_receiving.compare_exchange_strong(idle, 1, std::memory_order_seq_cst)) {
+      if (receiveSealed()) throw IllegalStateException("consumer is closed");
       throw IllegalStateException("receive already active");
     }
-    guard.state = &_receiveState;
-    if (_closed) throw IllegalStateException("consumer is closed");
-    _session->ensureOpen();
+    guard.active = &_receiving;
+    // Sequentially consistent admission pairs with close's seal and active
+    // load. At least one side observes the other before touching the session.
+    if (_closeState.load(std::memory_order_seq_cst) != CloseState::open) {
+      throw IllegalStateException("consumer is closed");
+    }
+    if (_session->_closing.load(std::memory_order_acquire)) [[unlikely]] _session->ensureOpen();
     if (_session->_dispatch.hasListeners()) throw IllegalStateException("session has message listeners");
-  } else if (isClosing() || _closed) {
+  } else if (receiveSealed()) {
     return {};
   }
 
-  const auto mode = _session->acknowledgeMode();
+  auto& session = *_session;
+  const auto mode = session.acknowledgeMode();
   const bool dups = mode == Session::DUPS_OK_ACKNOWLEDGE;
   const bool automatic = mode == Session::AUTO_ACKNOWLEDGE;
-  if (dups && _pendingAcks >= 100) flushPendingAcks();
+  if (dups && _pendingAcks >= 100) [[unlikely]] flushPendingAcks();
   const auto* readyCheck = checked && (automatic || dups) ? predicate : nullptr;
-  auto& started = _session->connection()._started;
+  auto& started = session.connection()._started;
   bool incompatible = false;
   std::chrono::steady_clock::time_point deadline;
   for (;;) {
@@ -92,14 +99,22 @@ Message::Ptr Consumer::receiveImpl(int64_t timeout, const std::function<bool(con
     if (!message) return {};
     const bool expired = message->jmsHeaders.expiration != 0 && message->isExpired(DeliveryClock::now());
     try {
-      if (hasStorage(*message)) {
+      if (hasStorage(*message)) [[unlikely]] {
         if (!expired) {
           _destination->registerAttempt(*_storage, *message);
           LocalTransactionJournal::point("ack", "before-ack");
         }
-        if (expired || (automatic && !listener)) acknowledge(*message);
+        if (expired || (automatic && !listener)) acknowledgeStored(*message);
       }
-      if (!expired && !automatic) track(message);
+      if (!expired && !automatic) {
+        message->_receiveSequence = session._receiveSequence++;
+        if (mode == Session::SESSION_TRANSACTED) {
+          _transacted.push_back(message);
+          if (_durable) ++_queue->pending;
+        } else {
+          track(message);
+        }
+      }
     } catch (...) {
       _queue->enqueue(std::move(message));
       throw;
@@ -118,7 +133,7 @@ Message::Ptr Consumer::receiveImpl(int64_t timeout, const std::function<bool(con
 }
 
 void Consumer::setMessageListener(MessageListener listener) {
-  if (isClosing() || _closed) throw IllegalStateException("consumer is closed");
+  if (receiveSealed()) throw IllegalStateException("consumer is closed");
   _session->ensureOpen();
   auto& dispatch = _session->_dispatch;
   const bool enable = static_cast<bool>(listener);
@@ -159,7 +174,7 @@ bool Consumer::dispatchOne() {
     return true;
   }
   if (mode == Session::AUTO_ACKNOWLEDGE) acknowledge(*message);
-  else if (mode == Session::DUPS_OK_ACKNOWLEDGE && (isClosing() || _closed)) flushPendingAcks();
+  else if (mode == Session::DUPS_OK_ACKNOWLEDGE && receiveSealed()) flushPendingAcks();
   return true;
 }
 
@@ -171,49 +186,47 @@ linear_storage::Record Consumer::record(const Message& message) const {
   return rec;
 }
 
-void Consumer::acknowledge(const Message& message) {
-  if (!hasStorage(message)) return;
+void Consumer::acknowledgeStored(const Message& message) {
   std::lock_guard lock(_queue->storageMutex);
   if (_queue->retired) return;
   if (!_storage->removeDelivery(record(message))) throw Poco::IOException("cannot acknowledge stored delivery");
   LocalTransactionJournal::point("ack", "after-ack");
 }
 
-void Consumer::track(const Message::Ptr& message) {
-  message->_receiveSequence = _session->_receiveSequence++;
-  if (_session->acknowledgeMode() == Session::SESSION_TRANSACTED) {
-    _transacted.push_back(message);
-  } else {
-    auto* previous = _inFlightTail;
-    message->_inFlightLink.prev = previous;
-    message->_inFlightLink.owner = this;
-    auto& link = previous ? previous->_inFlightLink.next : _inFlightHead;
-    link = message;
-    _inFlightTail = message.get();
+void Consumer::track(const Message::Ptr& message) noexcept {
+  auto* previous = _inFlightTail;
+  message->_inFlightLink.prev = previous;
+  message->_inFlightLink.owner = this;
+  auto& link = previous ? previous->_inFlightLink.next : _inFlightHead;
+  link = message;
+  _inFlightTail = message.get();
+  if (_countClaims) [[unlikely]] {
     ++_pendingAcks;
+    if (_durable) ++_queue->pending;
   }
-  if (_durable) ++_queue->pending;
 }
 
 void Consumer::acknowledgeOn(const Message& message) {
-  if (!_session) throw IllegalStateException("consumer session is closed");
+  if (!_session) [[unlikely]] throw IllegalStateException("consumer session is closed");
   if (message._inFlightLink.owner != this) return;
-  if (hasStorage(message)) acknowledge(message);
+  acknowledge(message);
   unlink(message);
 }
 
 void Consumer::unlink(const Message& message) {
   auto* prev = message._inFlightLink.prev;
+  auto* next = message._inFlightLink.next.get();
   auto& link = prev ? prev->_inFlightLink.next : _inFlightHead;
-  auto self = std::move(link);  // Pin the bare Message& through unlink.
-  auto next = std::move(message._inFlightLink.next);
+  link.swap(message._inFlightLink.next);
+  auto self = std::move(message._inFlightLink.next);  // Pin the bare Message& through unlink.
   if (next) next->_inFlightLink.prev = prev;
   else _inFlightTail = prev;
-  link = std::move(next);
   message._inFlightLink.prev = nullptr;
   message._inFlightLink.owner = nullptr;
-  --_pendingAcks;
-  if (_durable) --_queue->pending;
+  if (_countClaims) [[unlikely]] {
+    --_pendingAcks;
+    if (_durable) --_queue->pending;
+  }
 }
 
 void Consumer::redeliver(const Message& message, uint64_t batch) {
@@ -227,23 +240,18 @@ bool Consumer::hasClaims() const { return _inFlightHead || !_transacted.empty();
 void Consumer::close() {
   const bool self = SessionDispatch::current && !SessionDispatch::inCompletion &&
                     SessionDispatch::current->_activeConsumer == this;
-  if (_closed) {
-    if (!self) _callbackActive.wait(true);
-    return;
-  }
-  if (_receiveState.fetch_or(closing, std::memory_order_acq_rel) & closing) {
+  auto state = CloseState::open;
+  if (!_closeState.compare_exchange_strong(state, CloseState::closing, std::memory_order_seq_cst)) {
     if (self) return;
-    auto state = _receiveState.load(std::memory_order_acquire);
-    while (state & closing) {
-      _receiveState.wait(state);
-      state = _receiveState.load(std::memory_order_acquire);
-    }
-    if (!_closed) close();
+    _closeState.wait(CloseState::closing);
+    if (!isClosed()) close();
     else _callbackActive.wait(true);
     return;
   }
   _queue->wake();
-  _receiveState.wait(closing | receiving);
+  if (_receiving.load(std::memory_order_seq_cst) != 0) {
+    _receiving.wait(1, std::memory_order_acquire);
+  }
   try {
     auto& dispatch = _session->_dispatch;
     dispatch.remove(*this);
@@ -252,13 +260,11 @@ void Consumer::close() {
         SessionDispatch::current != &dispatch) flushPendingAcks();
     _destination->detach(*this);
   } catch (...) {
-    _receiveState.store(0, std::memory_order_release);
-    _receiveState.notify_all();
+    if (!isClosed()) _closeState.store(CloseState::open);
+    _closeState.notify_all();
     throw;
   }
-  _receiveState.store(0, std::memory_order_release);
-  _receiveState.notify_all();
-  // A detached consumer stays closed even though the close barrier is over.
+  _closeState.notify_all();
   _queue->wake();
 }
 
@@ -270,7 +276,7 @@ void Consumer::finishSession() noexcept {
   } catch (...) {
     poco_error(_logger.get(), "consumer teardown failed");
   }
-  _closed = true;
+  _closeState.store(CloseState::closed);
   _session = nullptr;
   if (_durable) _queue->pending -= _transacted.size() + _pendingAcks;
   _transacted.clear();
