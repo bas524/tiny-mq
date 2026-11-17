@@ -97,7 +97,7 @@ class Session {
   BytesMessage createBytesMessage(const int8_t *bytes, size_t size, Message::Reliability reliability = Message::NOT_PERSISTENT);
   ObjectMessage createObjectMessage(BytesVector body, std::string className, Message::Reliability reliability = Message::NOT_PERSISTENT);
 
-  Session::AcknowledgeMode acknowledgeMode() const;
+  Session::AcknowledgeMode acknowledgeMode() const { return _mode; }
   std::string acknowledgeModeName() const;
   static std::string getAcknowledgeModeName(Session::AcknowledgeMode mode);
 
@@ -132,7 +132,9 @@ class Session {
   friend class Consumer;
   friend class Producer;
 
-  void ensureOpen() const;
+  void ensureOpen() const {
+    if (_closing && SessionDispatch::current != &_dispatch) throw IllegalStateException("session is closed");
+  }
   void returnClaims(bool transacted);
   Consumer::Ptr remember(Consumer::Ptr consumer);
   void pruneClosedConsumers();

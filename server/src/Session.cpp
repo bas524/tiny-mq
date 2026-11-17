@@ -36,10 +36,6 @@ Session::~Session() {
   }
 }
 
-void Session::ensureOpen() const {
-  if (_closing && SessionDispatch::current != &_dispatch) throw IllegalStateException("session is closed");
-}
-
 void Session::close() {
   if (SessionDispatch::current == &_dispatch) throw IllegalStateException("cannot close session from its callback");
   std::lock_guard lock(_closeMutex);
@@ -268,8 +264,6 @@ ObjectMessage Session::createObjectMessage(BytesVector body, std::string classNa
   return ObjectMessage(createRandomUUID(), std::move(body), std::move(className), reliability);
 }
 
-Session::AcknowledgeMode Session::acknowledgeMode() const { return _mode; }
-
 std::string Session::acknowledgeModeName() const {
   TRACE(_logger);
   return getAcknowledgeModeName(_mode);
@@ -309,13 +303,13 @@ void Session::commit() {
   std::lock_guard brokerLock(exchange._mutex);
 
   auto nextTransaction = createRandomUUID().toString();
-  const auto now = DeliveryClock::now();
+  auto& sends = _transaction._sends;
+  const auto now = sends.empty() ? 0 : DeliveryClock::now();
   const bool durableInputs = std::any_of(_consumers.begin(), _consumers.end(), [](const auto& item) {
     const auto& consumer = *item.second;
     return std::any_of(consumer._transacted.begin(), consumer._transacted.end(),
                        [&](const auto& message) { return consumer.hasStorage(*message); });
   });
-  auto& sends = _transaction._sends;
   if (!durableInputs) {
     if (sends.empty()) {
       finishTransaction(std::move(nextTransaction));
@@ -372,7 +366,7 @@ void Session::commit() {
     }
   }
 
-  const auto publishAt = DeliveryClock::now();
+  const auto publishAt = outputs.empty() ? 0 : DeliveryClock::now();
   const bool immediateBatch = !outputs.empty() && std::all_of(outputs.begin(), outputs.end(), [&](const auto& output) {
     return output.queue == outputs.front().queue && output.message->jmsHeaders.deliveryTime <= publishAt;
   });

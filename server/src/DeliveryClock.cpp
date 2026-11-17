@@ -3,6 +3,9 @@
 #include <atomic>
 #include <chrono>
 #include <limits>
+#ifndef _WIN32
+#include <sys/time.h>
+#endif
 
 namespace tiny_mq {
 #ifdef ENABLE_TESTS
@@ -18,8 +21,15 @@ int64_t DeliveryClock::now() {
   const auto manual = testTime.load(std::memory_order_relaxed);
   if (manual >= 0) return manual;
 #endif
+#ifndef _WIN32
+  // The delivery contract uses integer wall-clock milliseconds. Read them
+  // directly without constructing a system_clock time point on each send.
+  timeval wall;
+  if (gettimeofday(&wall, nullptr) == 0) {
+    return std::max<int64_t>(0, static_cast<int64_t>(wall.tv_sec) * 1000 + wall.tv_usec / 1000);
+  }
+#endif
   using namespace std::chrono;
-
   return std::max<int64_t>(0, duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count());
 }
 

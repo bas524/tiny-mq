@@ -70,7 +70,9 @@ TEST_F(DestinationContractTest, SelectiveQueueClaim) {
       start.arrive_and_wait();
       for (int i = 0; i < count / 2; ++i) {
         auto message = text(consumer, 2'000'000);
-        if (!message) return;
+        if (!message) {
+          return;
+        }
         results[index].push_back(message->text());
         consumer->acknowledgeOn(*message);
       }
@@ -208,10 +210,15 @@ TEST_F(DestinationContractTest, SubscriptionFanout) {
         row("REQ-71-2", label.c_str());
         const auto opts = SendOptions{reliability, 4, 0, 120};
         auto delayed = tx.createTextMessage(label);
-        if (commit) producer->send(delayed, opts);
+        if (commit) {
+          producer->send(delayed, opts);
+        }
         auto atPublication = a.createConsumer(topic);
-        if (commit) tx.commit();
-        else immediate->send(delayed, opts);
+        if (commit) {
+          tx.commit();
+        } else {
+          immediate->send(delayed, opts);
+        }
         auto tooLate = a.createConsumer(topic);
         EXPECT_EQ(unshared->recv(0), nullptr);
         EXPECT_EQ(atPublication->recv(0), nullptr);
@@ -279,7 +286,9 @@ TEST_F(DestinationContractTest, SubscriptionFanout) {
       auto claim = [&](const Consumer::Ptr& consumer, std::vector<std::string>& results) {
         for (int round = 0; round < rounds; ++round) {
           start.arrive_and_wait();
-          if (auto message = text(consumer, 2'000'000)) results.push_back(message->text());
+          if (auto message = text(consumer, 2'000'000)) {
+            results.push_back(message->text());
+          }
         }
       };
       std::jthread first([&] { claim(one, received[0]); });
@@ -365,7 +374,9 @@ TEST_F(DestinationContractTest, DurableIdentityMatrix) {
 
     row("REQ-71-3", "changing only the unshared durable topic replaces its generation and drops the backlog");
     for (const auto& entry : fs::directory_iterator(registry)) {
-      if (entry.is_directory()) original = entry.path();
+      if (entry.is_directory()) {
+        original = entry.path();
+      }
     }
     ASSERT_FALSE(original.empty());
     fs::copy(original, saved, fs::copy_options::recursive);
@@ -380,7 +391,9 @@ TEST_F(DestinationContractTest, DurableIdentityMatrix) {
     fs::copy_file(registry / "registry", preSwapRegistry / "registry.pending");
     int newGenerations = 0;
     for (const auto& entry : fs::directory_iterator(registry)) {
-      if (!entry.is_directory()) continue;
+      if (!entry.is_directory()) {
+        continue;
+      }
       fs::copy(entry.path(), preSwapRegistry / entry.path().filename(), fs::copy_options::recursive);
       ++newGenerations;
     }
@@ -814,7 +827,9 @@ TEST_F(DestinationContractTest, TemporaryReplyLifecycle) {
     ASSERT_FALSE(scheduled.expired());
 
     std::optional<QueueBrowser> browser;
-    if (queue) browser.emplace(ask.createQueueBrowser(address));
+    if (queue) {
+      browser.emplace(ask.createQueueBrowser(address));
+    }
     if (closeOwner) {
       owner.close();
     } else {

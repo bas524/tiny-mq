@@ -6,6 +6,7 @@ project(tiny_mq
 
 
 option(ENABLE_TESTS "Enable tests" ON)
+option(ENABLE_CLANG_TIDY "Check C++ test style with clang-tidy in Debug builds" ON)
 # Force CMake to prefer CONFIG packages (vcpkg) over Find*.cmake
 
 set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)
@@ -53,6 +54,18 @@ if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   # Set the possible values of build type for cmake-gui
   set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS
                "Debug" "Release" "MinSizeRel" "RelWithDebInfo")
+endif ()
+
+if (ENABLE_TESTS AND ENABLE_CLANG_TIDY AND CMAKE_BUILD_TYPE STREQUAL "Debug"
+    AND CMAKE_GENERATOR MATCHES "Ninja|Makefiles")
+  find_program(CLANG_TIDY_EXECUTABLE NAMES clang-tidy
+               HINTS /opt/homebrew/opt/llvm/bin /usr/local/opt/llvm/bin)
+  if (CLANG_TIDY_EXECUTABLE)
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+    message(STATUS "C++ test clang-tidy: ${CLANG_TIDY_EXECUTABLE}")
+  else ()
+    message(STATUS "C++ test clang-tidy: executable not found")
+  endif ()
 endif ()
 
 if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -149,6 +162,33 @@ if (ENABLE_TESTS)
                  tests/DlqTest.cpp
                  tests/DlqTest.h
                  )
+  if (ENABLE_CLANG_TIDY AND CLANG_TIDY_EXECUTABLE AND CMAKE_BUILD_TYPE STREQUAL "Debug"
+      AND CMAKE_GENERATOR MATCHES "Ninja|Makefiles")
+    get_target_property(tiny_mq_test_sources tiny_mq SOURCES)
+    set(tiny_mq_test_headers ${tiny_mq_test_sources})
+    list(FILTER tiny_mq_test_sources INCLUDE REGEX "^tests/.*[.]cpp$")
+    list(FILTER tiny_mq_test_headers INCLUDE REGEX "^tests/.*[.]h$")
+    foreach (tiny_mq_test_source IN LISTS tiny_mq_test_sources)
+      get_filename_component(tiny_mq_test_name "${tiny_mq_test_source}" NAME_WE)
+      set(tiny_mq_test_lint_stamp "${CMAKE_CURRENT_BINARY_DIR}/${tiny_mq_test_name}.clang-tidy.stamp")
+      add_custom_command(
+        OUTPUT "${tiny_mq_test_lint_stamp}"
+        COMMAND "${CLANG_TIDY_EXECUTABLE}"
+                --checks=-*,readability-braces-around-statements
+                --warnings-as-errors=readability-braces-around-statements
+                "--header-filter=(^|/)tests/"
+                -p "${CMAKE_CURRENT_BINARY_DIR}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/${tiny_mq_test_source}"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${tiny_mq_test_lint_stamp}"
+        DEPENDS "${tiny_mq_test_source}" ${tiny_mq_test_headers}
+                "${CMAKE_CURRENT_BINARY_DIR}/compile_commands.json"
+        COMMENT "clang-tidy ${tiny_mq_test_source}"
+        VERBATIM)
+      list(APPEND tiny_mq_test_lint_stamps "${tiny_mq_test_lint_stamp}")
+    endforeach ()
+    add_custom_target(tiny_mq_test_clang_tidy DEPENDS ${tiny_mq_test_lint_stamps})
+    add_dependencies(tiny_mq tiny_mq_test_clang_tidy)
+  endif ()
   configure_file(tests/MessageContract.tsv MessageContract.tsv COPYONLY)
   set_source_files_properties(tests/MessageContractTest.cpp PROPERTIES
       COMPILE_DEFINITIONS "TINY_MQ_MESSAGE_CONTRACT_FIXTURE=\"${CMAKE_CURRENT_BINARY_DIR}/MessageContract.tsv\"")

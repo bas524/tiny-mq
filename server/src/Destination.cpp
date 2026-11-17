@@ -15,6 +15,17 @@
 
 namespace tiny_mq {
 namespace {
+using SteadyClock = std::chrono::steady_clock;
+
+void armReceiveTimeout(int64_t timeout, SteadyClock::time_point& deadline) {
+  if (timeout > 0 && deadline == SteadyClock::time_point{}) {
+    using Micros = std::chrono::microseconds;
+    const auto now = SteadyClock::now();
+    const auto maxWait = std::chrono::duration_cast<Micros>(SteadyClock::time_point::max() - now);
+    deadline = now + std::min(maxWait, Micros(timeout));
+  }
+}
+
 Message::Ptr makeMessageShell(Message::Type type) {
   switch (type) {
     case Message::UNDEFINED: return std::make_shared<Message>();
@@ -33,38 +44,38 @@ void DeliveryState::enqueue(Message::Ptr message) {
   insert(std::move(message), special);
 }
 
-void DeliveryState::insert(Message::Ptr message, bool special) {
-  std::vector<std::shared_ptr<Waiter>> notify;
-  {
-    std::lock_guard lock(_mutex);
-    if (_closed) return;
-    const auto band = std::clamp(message->jmsHeaders.priority, 0, QueueT::kBands - 1);
-    const auto& added = _bands[band].emplace_back(std::move(message));
-    _nonEmpty |= 1u << band;
-    _special += special;
-    if (!_listeners.empty()) notifyListeners();
-    if (!_waiters.empty() && added->jmsHeaders.expiration != 0 && added->isExpired(DeliveryClock::now())) return;
-    for (const auto& waiter : _waiters) {
-      if (!waiter->signalled && (!waiter->selector || waiter->selector->matches(*added))) {
-        notify.push_back(waiter);
-        waiter->signalled = true;
-      }
+void DeliveryState::insert(Message::Ptr&& message, bool special) {
+  std::lock_guard lock(_mutex);
+  if (_closed.load(std::memory_order_relaxed)) return;
+  const auto band = std::clamp(message->jmsHeaders.priority, 0, QueueT::kBands - 1);
+  const auto& added = _bands[band].emplace_back(std::move(message));
+  _nonEmpty |= 1u << band;
+  _special += special;
+  if (!_listeners.empty()) notifyListeners();
+  if (_waiters.empty()) return;
+  if (added->jmsHeaders.expiration != 0 && added->isExpired(DeliveryClock::now())) return;
+  for (const auto& waiter : _waiters) {
+    if (!waiter->signalled && (!waiter->selector || waiter->selector->matches(*added))) {
+      waiter->signalled = true;
+      waiter->condition.notify_one();
     }
   }
-  for (const auto& waiter : notify) waiter->condition.notify_one();
 }
 
 Message::Ptr DeliveryState::take(const Selector* selector,
                                      const std::function<bool(const Message&)>* check, bool& incompatible) {
-  if (!selector && !check && !_special) {
-    if (!_nonEmpty) return {};
-    const auto band = std::bit_width(_nonEmpty) - 1;
-    auto& bandQueue = _bands[band];
-    auto message = std::move(bandQueue.front());
-    bandQueue.pop_front();
-    if (bandQueue.empty()) _nonEmpty &= ~(1u << band);
-    return message;
-  }
+  if (!_nonEmpty) return {};
+  if (selector || check || _special) return takeMatching(selector, check, incompatible);
+  const auto band = std::bit_width(_nonEmpty) - 1;
+  auto& bandQueue = _bands[band];
+  auto message = std::move(bandQueue.front());
+  bandQueue.pop_front();
+  if (bandQueue.empty()) _nonEmpty &= ~(1u << band);
+  return message;
+}
+
+Message::Ptr DeliveryState::takeMatching(const Selector* selector,
+                                         const std::function<bool(const Message&)>* check, bool& incompatible) {
   for (unsigned available = _nonEmpty; available != 0;) {
     const auto band = std::bit_width(available) - 1;
     auto& messages = _bands[band];
@@ -140,41 +151,41 @@ void DeliveryState::notifyListeners() {
   }
 }
 
-Message::Ptr DeliveryState::claim(const Selector* selector, int64_t timeout,
-                                   std::chrono::steady_clock::time_point& deadline,
-                                   const std::atomic_bool& started, const std::atomic_bool& closing,
-                                   const std::function<bool(const Message&)>* check, bool& incompatible) {
-  using Clock = std::chrono::steady_clock;
-  using Micros = std::chrono::microseconds;
-  const auto armTimeout = [&] {
-    if (timeout > 0 && deadline == Clock::time_point{}) {
-      const auto now = Clock::now();
-      const auto maxWait = std::chrono::duration_cast<Micros>(Clock::time_point::max() - now);
-      deadline = now + std::min(maxWait, Micros(timeout));
-    }
-  };
+Message::Ptr DeliveryState::claim(const Consumer& consumer, int64_t timeout,
+                                  SteadyClock::time_point& deadline, const std::atomic_bool& started,
+                                  const std::function<bool(const Message&)>* check, bool& incompatible) {
   std::unique_lock lock(_mutex, std::try_to_lock);
-  if (!lock.owns_lock()) {
-    armTimeout();
+  if (!lock.owns_lock()) [[unlikely]] {
+    armReceiveTimeout(timeout, deadline);
     lock.lock();
   }
-  if (_closed || closing || (deadline != Clock::time_point{} && Clock::now() >= deadline)) return {};
-  auto message = started ? take(selector, check, incompatible) : Message::Ptr{};
-  if (message || incompatible || timeout == 0) {
-    if (message && message->jmsHeaders.expiration != 0) armTimeout();
-    return message;
+  if (_closed.load(std::memory_order_relaxed) || consumer.isClosing() ||
+      (deadline != SteadyClock::time_point{} && SteadyClock::now() >= deadline)) return {};
+  if (started) {
+    if (auto message = take(consumer._selector.get(), check, incompatible)) {
+      if (message->jmsHeaders.expiration != 0) armReceiveTimeout(timeout, deadline);
+      return message;
+    }
   }
-  armTimeout();
+  if (incompatible || timeout == 0) return {};
+  armReceiveTimeout(timeout, deadline);
+  return waitForClaim(lock, consumer, deadline, started, check, incompatible);
+}
 
+Message::Ptr DeliveryState::waitForClaim(std::unique_lock<DestinationMutex>& lock, const Consumer& consumer,
+                                          SteadyClock::time_point deadline, const std::atomic_bool& started,
+                                          const std::function<bool(const Message&)>* check, bool& incompatible) {
+  const auto* selector = consumer._selector.get();
   const auto waiter = std::make_shared<Waiter>(selector);
   _waiters.push_back(waiter);
-  const auto signalled = [&] { return _closed || closing || waiter->signalled; };
+  const auto signalled = [&] { return _closed || consumer.isClosing() || waiter->signalled; };
+  Message::Ptr message;
   try {
-    while (!_closed && !closing) {
+    while (!_closed && !consumer.isClosing()) {
       waiter->signalled = false;
-      if (timeout < 0) waiter->condition.wait(lock, signalled);
+      if (deadline == SteadyClock::time_point{}) waiter->condition.wait(lock, signalled);
       else if (!waiter->condition.wait_until(lock, deadline, signalled)) break;
-      if (!_closed && !closing && started) message = take(selector, check, incompatible);
+      if (!_closed && !consumer.isClosing() && started) message = take(selector, check, incompatible);
       if (message || incompatible) break;
     }
   } catch (...) {
@@ -280,12 +291,6 @@ void Destination::checkBroker(const Connection& connection) const {
 void Destination::checkOwner(const Poco::UUID& owner) const {
   checkLive();
   if (!_owner.isNull() && owner != _owner) throw IllegalStateException("temporary destination belongs to another connection");
-}
-
-void Destination::checkLive() const {
-  if (_deleted.load(std::memory_order_acquire)) {
-    throw IllegalStateException("destination is deleted");
-  }
 }
 
 Consumer::Ptr Destination::createConsumer(Session& session, std::shared_ptr<Selector> selector, bool noLocal) {
@@ -478,7 +483,7 @@ void Destination::replay(const std::shared_ptr<DeliveryState>& queue, Storage& s
     message->_storageTomId = record.tomId;
     message->_storageOffset = record.offset;
     message->_storedAttempt = record.header.attempt != 0;
-    if (message->isExpired(DeliveryClock::now())) {
+    if (message->jmsHeaders.expiration != 0 && message->isExpired(DeliveryClock::now())) {
       if (!storage.removeDelivery(record)) throw Poco::IOException("cannot remove expired delivery");
       continue;
     }
@@ -486,17 +491,16 @@ void Destination::replay(const std::shared_ptr<DeliveryState>& queue, Storage& s
   }
 }
 
-Message::Ptr Destination::prepareCopy(const Producer& producer, Message::Ptr copy, int64_t number) {
-  copy->_cachedStorageBytes.clear();
-  copy->_storageTomId = std::numeric_limits<Poco::UInt32>::max();
-  copy->_nextRedeliveryAt = 0;
-  copy->_attemptSidecar = false;
-  copy->_storedAttempt = false;
-  copy->_recoveryBatch = 0;
-  copy->_publication.reset();
-  copy->_number = number;
-  if (copy->uuid.isNull()) copy->uuid = producer._session.load(std::memory_order_acquire)->createRandomUUID();
-  return copy;
+void Destination::prepareCopy(const Producer& producer, Message& copy, int64_t number) {
+  copy._cachedStorageBytes.clear();
+  copy._storageTomId = std::numeric_limits<Poco::UInt32>::max();
+  copy._nextRedeliveryAt = 0;
+  copy._attemptSidecar = false;
+  copy._storedAttempt = false;
+  copy._recoveryBatch = 0;
+  copy._publication.reset();
+  copy._number = number;
+  if (copy.uuid.isNull()) copy.uuid = producer._session.load(std::memory_order_acquire)->createRandomUUID();
 }
 
 void Destination::save(const Producer& producer, const Message& message, int64_t acceptedAt) {
@@ -504,7 +508,8 @@ void Destination::save(const Producer& producer, const Message& message, int64_t
     publish(producer, message, acceptedAt);
     return;
   }
-  auto copy = prepareCopy(producer, message.copy(), _messageCounter.fetch_add(1, std::memory_order_relaxed));
+  auto copy = message.copy();
+  prepareCopy(producer, *copy, _messageCounter.fetch_add(1, std::memory_order_relaxed));
   if (_storage && copy->isPersistent()) {
     copy->_storageId = storageKey(copy->_number);
     persist(*_storage, *copy);
@@ -529,11 +534,11 @@ void Destination::preparePublication(const Producer& producer, const Message::Pt
   if (message->isExpired(now)) return;
   auto stage = [&](const std::shared_ptr<DeliveryState>& queue, const std::shared_ptr<Storage>& storage,
                    Message::Ptr copy) {
-    if (storage && copy->isPersistent()) {
+    auto persistent = copy->isPersistent() ? storage : nullptr;
+    if (persistent) {
       copy->_storageId = storageKey(copy->_number);
       copy->refreshCachedStorageBytes();
     }
-    auto persistent = copy->isPersistent() ? storage : nullptr;
     const auto priority = copy->jmsHeaders.priority;
     outputs.push_back({this, queue, std::move(persistent), std::move(copy), priority});
   };
@@ -546,7 +551,9 @@ void Destination::preparePublication(const Producer& producer, const Message::Pt
     _messageCounter.store(number + 1, std::memory_order_relaxed);
     for (const auto& sub : _subscriptions) {
       if (matches(*sub, producer, *message)) {
-        stage(sub->deliveries, sub->storage, prepareCopy(producer, message->copy(), number));
+        auto copy = message->copy();
+        prepareCopy(producer, *copy, number);
+        stage(sub->deliveries, sub->storage, std::move(copy));
       }
     }
   }
@@ -570,7 +577,8 @@ void Destination::publish(const Producer& producer, const Message& message, int6
   }
 
   auto dispatch = [&](const Subscription& sub) {
-    auto copy = prepareCopy(producer, message.copy(), number);
+    auto copy = message.copy();
+    prepareCopy(producer, *copy, number);
     if (sub.storage && copy->isPersistent()) {
       copy->_storageId = storageKey(copy->_number);
     }
@@ -621,14 +629,14 @@ RedeliveryPolicy Destination::redeliveryPolicy() const { return _redeliveryPolic
 void Destination::registerAttempt(Storage& storage, Message& message) {
   auto& journal = _exchange._journal;
   const auto& policy = _redeliveryPolicy;
-  LocalTransactionJournal::DeliveryAttempt attempt;
-  attempt.count = std::max(message.jmsHeaders.deliveryCount, message.jmsHeaders.redelivered ? 1 : 0);
   if (!message._attemptSidecar && policy.maxRedeliveries < 0 && !policy.backoffMs && !policy.deadLetterQueue) {
     linear_storage::Record record;
     record.tomId = message._storageTomId;
     record.offset = message._storageOffset;
     if (journal.markInlineAttempt(storage, record)) return;
   }
+  LocalTransactionJournal::DeliveryAttempt attempt;
+  attempt.count = std::max(message.jmsHeaders.deliveryCount, message.jmsHeaders.redelivered ? 1 : 0);
   attempt.limit = policy.maxRedeliveries;
   attempt.backoff = policy.backoffMs;
   attempt.maxBackoff = policy.maxBackoffMs;

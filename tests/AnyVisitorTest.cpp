@@ -34,7 +34,9 @@ void registerVisitors(Poco::AnyVisitor& visitor, std::string& intTag, std::strin
 // intact data. This is what makes the test a reliable UB detector rather than a lucky pass.
 __attribute__((noinline)) void clobberStack() {
   volatile char noise[1024];
-  for (auto& c : noise) c = static_cast<char>(0x5A);
+  for (auto& c : noise) {
+    c = static_cast<char>(0x5A);
+  }
 }
 }  // namespace
 

@@ -28,7 +28,9 @@ class MessageContractTest : public ::testing::Test {
     std::ifstream input(TINY_MQ_MESSAGE_CONTRACT_FIXTURE);
     ASSERT_TRUE(input.good());
     for (std::string line; std::getline(input, line);) {
-      if (line.empty() || line.front() == '#') continue;
+      if (line.empty() || line.front() == '#') {
+        continue;
+      }
       const auto split = line.find('\t');
       const auto value = line.find('\t', split + 1);
       ASSERT_NE(value, std::string::npos);
@@ -136,7 +138,9 @@ TEST_F(MessageContractTest, V03DeliveryAndTransaction) {
         outbound.jmsHeaders.setCorrelationId(bytes("binaryCorrelation"));
         SendOptions options{persistence, integer("priority"), 30000, 5};
         producer->send(outbound, options);
-        if (mode == Session::SESSION_TRANSACTED) session.commit();
+        if (mode == Session::SESSION_TRANSACTED) {
+          session.commit();
+        }
         auto received = consumer->recv(500000);
         ASSERT_NE(received, nullptr);
         EXPECT_EQ(received->jmsHeaders.priority, integer("priority"));
@@ -144,7 +148,9 @@ TEST_F(MessageContractTest, V03DeliveryAndTransaction) {
         EXPECT_EQ(received->jmsHeaders.getCorrelationId(), CorrelationId(bytes("binaryCorrelation")));
         EXPECT_GT(received->jmsHeaders.deliveryTime, 0);
         EXPECT_GT(received->jmsHeaders.expiration, received->jmsHeaders.deliveryTime);
-        if (mode == Session::SESSION_TRANSACTED) session.commit();
+        if (mode == Session::SESSION_TRANSACTED) {
+          session.commit();
+        }
       }
     }
   }

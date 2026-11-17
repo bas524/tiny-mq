@@ -78,7 +78,9 @@ TEST_F(ExpirationTest, testExpiredMessageSweptFromStorage) {
       auto uuid = Poco::UUIDGenerator::defaultGenerator().createRandom();
       TextMessage msg(uuid, body, Message::PERSISTENT);
       msg.jmsHeaders.expiration = expiration;
-      if (extended) msg.jmsHeaders.setCorrelationId(tiny_mq::BytesVector{0, -1});
+      if (extended) {
+        msg.jmsHeaders.setCorrelationId(tiny_mq::BytesVector{0, -1});
+      }
       auto payload = msg.toBytes();
       EXPECT_EQ(payload.front(), extended ? 0x03 : 0x02);
       std::vector<char> data;
@@ -113,7 +115,9 @@ TEST_F(ExpirationTest, testExpiredMessageSweptFromStorage) {
     storage.stop();
   }
   Poco::File dir(basePath);
-  if (dir.exists()) dir.remove(true);
+  if (dir.exists()) {
+    dir.remove(true);
+  }
 }
 
 // m2: the persistent drop path on recv (resolve the storage record, removeAsync)
@@ -175,5 +179,7 @@ TEST_F(ExpirationTest, testSweepFiresUnderContinuousLoad) {
     storage.stop();
   }
   Poco::File dir(basePath);
-  if (dir.exists()) dir.remove(true);
+  if (dir.exists()) {
+    dir.remove(true);
+  }
 }

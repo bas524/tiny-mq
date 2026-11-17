@@ -41,8 +41,9 @@ class Consumer {
   Consumer(Destination& destination, Session& session, std::shared_ptr<DeliveryState> queue,
            std::shared_ptr<linear_storage::ConcurrentLinearStorage> storage,
            std::shared_ptr<Selector> selector = {}, bool durable = false);
-  ReceiveBodyResult receiveImpl(int64_t timeout, const std::function<bool(const Message&)>* predicate,
-                                bool listener);
+  template<bool listener, bool checked>
+  Message::Ptr receiveImpl(int64_t timeout, const std::function<bool(const Message&)>* predicate,
+                           ReceiveBodyDisposition* disposition = nullptr);
   bool dispatchOne();
   void track(const Message::Ptr& message);
   void unlink(const Message& message);
@@ -51,7 +52,12 @@ class Consumer {
   void clearInFlight() noexcept;
   void flushPendingAcks();
   bool hasClaims() const;
-  bool hasStorage(const Message& message) const;
+  bool hasStorage(const Message& message) const {
+    return message._storageTomId != std::numeric_limits<Poco::UInt32>::max();
+  }
+  bool isClosing() const {
+    return _receiveState.load(std::memory_order_acquire) & closing;
+  }
   linear_storage::Record record(const Message& message) const;
   void acknowledge(const Message& message);
 
@@ -65,9 +71,12 @@ class Consumer {
   std::deque<Message::Ptr> _transacted;
   MessageListener _listener;
   std::mutex _listenerMutex;
-  std::atomic_bool _receiving{false};
+  static constexpr uint8_t receiving = 1;
+  static constexpr uint8_t closing = 2;
+  // Close seals the receive gate and waits for the active receive to leave.
+  // Only a receiver leaving a sealed gate has to notify the closer.
+  std::atomic_uint8_t _receiveState{0};
   std::atomic_bool _callbackActive{false};
-  std::atomic_bool _closing{false};
   size_t _pendingAcks = 0;
   // ADR-0005 gives the owning session exclusive access to these delivery links.
   Message::Ptr _inFlightHead;
@@ -76,6 +85,7 @@ class Consumer {
   bool _durable;
 
   friend class Destination;
+  friend class DeliveryState;
   friend class Session;
   friend class SessionDispatch;
 };

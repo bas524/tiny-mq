@@ -412,7 +412,9 @@ BENCHMARK_DEFINE_F(BenchmarkFixture, Destination_ConcurrentClaim)(benchmark::Sta
     auto read = [&](const Consumer::Ptr& consumer) {
         for (;;) {
             batch.arrive_and_wait();
-            if (finished.load(std::memory_order_relaxed)) return;
+            if (finished.load(std::memory_order_relaxed)) {
+              return;
+            }
             for (int i = 0; i < perReader; ++i) {
                 auto delivery = consumer->recv(-1);
                 benchmark::DoNotOptimize(delivery);
@@ -424,7 +426,9 @@ BENCHMARK_DEFINE_F(BenchmarkFixture, Destination_ConcurrentClaim)(benchmark::Sta
     std::jthread second(read, right);
     for (auto _ : state) {
         batch.arrive_and_wait();
-        for (int i = 0; i < perReader * 2; ++i) writer->send(message);
+        for (int i = 0; i < perReader * 2; ++i) {
+          writer->send(message);
+        }
         batch.arrive_and_wait();
     }
     finished.store(true, std::memory_order_relaxed);
@@ -444,7 +448,9 @@ BENCHMARK_DEFINE_F(BenchmarkFixture, Destination_Fanout)(benchmark::State& state
     auto writer = session.createProducer(topic);
     std::vector<Consumer::Ptr> receivers;
     const auto count = state.range(0);
-    for (int64_t i = 0; i < count; ++i) receivers.push_back(session.createConsumer(topic));
+    for (int64_t i = 0; i < count; ++i) {
+      receivers.push_back(session.createConsumer(topic));
+    }
     auto message = session.createTextMessage(kPayload);
     for (auto _ : state) {
         writer->send(message);

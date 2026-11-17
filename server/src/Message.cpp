@@ -39,13 +39,6 @@ void Message::Headers::setType(std::variant<std::monostate, std::string> value) 
   type = text ? std::move(*text) : std::string{};
 }
 
-bool Message::isPersistent() const { return reliability == PERSISTENT; }
-
-bool Message::isExpired(int64_t nowMs) const {
-  // JMSExpiration == 0 means "never expires" (JMS 2.0 § 3.4.9).
-  return jmsHeaders.expiration != 0 && nowMs >= jmsHeaders.expiration;
-}
-
 void Message::patchCachedDeliveryTime(int64_t deliveryTime) {
   // Offset within _cachedStorageBytes (= [1-byte type prefix][toBytes() 0x02
   // payload]): 1 type + 1 magic + 8 number + 16 uuid + 1 reliability +

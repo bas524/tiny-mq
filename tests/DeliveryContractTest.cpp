@@ -24,11 +24,15 @@ constexpr int64_t startTime = 20'000;
 constexpr int crashCode = 72;
 
 void require(bool condition, const char* message) {
-  if (!condition) throw std::runtime_error(message);
+  if (!condition) {
+    throw std::runtime_error(message);
+  }
 }
 
 std::string body(const Message::Ptr& message) {
-  if (auto text = Message::As<TextMessage>(message)) return text->text();
+  if (auto text = Message::As<TextMessage>(message)) {
+    return text->text();
+  }
   return {};
 }
 
@@ -80,7 +84,9 @@ void legacyRecord(const std::string& directory, const std::string& name, int64_t
     TextMessage message(ids.createRandom(), "legacy", Message::PERSISTENT);
     message.jmsHeaders.timestamp = 172;
     message.jmsHeaders.expiration = expiration;
-    if (extended) message.jmsHeaders.setCorrelationId(BytesVector{0, -1});
+    if (extended) {
+      message.jmsHeaders.setCorrelationId(BytesVector{0, -1});
+    }
     auto bytes = message.toBytes();
     EXPECT_EQ(extended ? 0x03 : 0x02, bytes.front());
     bytes.insert(bytes.begin(), Message::TEXT_MESSAGE);
@@ -120,7 +126,9 @@ TEST_F(DeliveryContractTest, SendClockMatrix) {
           EXPECT_FALSE(consumer->receiveNoWait());
           session.commit();
         }
-        if (offset < 10) EXPECT_FALSE(consumer->receiveNoWait());
+        if (offset < 10) {
+          EXPECT_FALSE(consumer->receiveNoWait());
+        }
         DeliveryClock::setTestTime(startTime + std::max(offset, 10));
         auto incoming = consumer->receive(1000);
         ASSERT_TRUE(incoming);
@@ -131,19 +139,25 @@ TEST_F(DeliveryContractTest, SendClockMatrix) {
       }
       auto expired = session.createTextMessage("expired");
       producer->send(expired, {reliability, 4, 10, 10});
-      if (transacted) session.commit();
+      if (transacted) {
+        session.commit();
+      }
       DeliveryClock::setTestTime(expired.jmsHeaders.expiration);
       EXPECT_FALSE(consumer->receive(15));
       auto zero = session.createTextMessage("zero");
       producer->send(zero, {reliability, 4, 0, 0});
-      if (transacted) session.commit();
+      if (transacted) {
+        session.commit();
+      }
       auto incoming = consumer->receiveNoWait();
       ASSERT_TRUE(incoming);
       EXPECT_EQ(zero.jmsHeaders.timestamp, incoming->jmsHeaders.deliveryTime);
       EXPECT_EQ(0, incoming->jmsHeaders.expiration);
 
       producer->send(zero, {reliability, 4, INT64_MAX, INT64_MAX});
-      if (transacted) session.commit();
+      if (transacted) {
+        session.commit();
+      }
       EXPECT_EQ(INT64_MAX, zero.jmsHeaders.expiration);
       EXPECT_EQ(INT64_MAX, zero.jmsHeaders.deliveryTime);
       EXPECT_FALSE(consumer->receiveNoWait());
@@ -295,14 +309,20 @@ TEST_F(DeliveryContractTest, ListenerModeMatrix) {
     EXPECT_EQ(std::future_status::timeout, stop.wait_for(15ms));
     release.count_down();
     stop.get();
-    if (!immediateRetry) send(sender, *producer, "second", Message::NOT_PERSISTENT);
+    if (!immediateRetry) {
+      send(sender, *producer, "second", Message::NOT_PERSISTENT);
+    }
     connection.start();
     ASSERT_EQ(std::future_status::ready, second.get_future().wait_for(2s));
     ASSERT_EQ(std::future_status::ready, sideDelivery.get_future().wait_for(2s));
     connection.stop();
     other->setMessageListener({});
-    if (mode == Session::CLIENT_ACKNOWLEDGE) session.acknowledge();
-    if (mode == Session::SESSION_TRANSACTED) session.commit();
+    if (mode == Session::CLIENT_ACKNOWLEDGE) {
+      session.acknowledge();
+    }
+    if (mode == Session::SESSION_TRANSACTED) {
+      session.commit();
+    }
     session.close();
     sending.start();
     auto inspector = sender.createConsumer(queue);
@@ -331,9 +351,13 @@ TEST_F(DeliveryContractTest, ListenerModeMatrix) {
       FAIL() << "listener did not start";
     }
     auto closing = std::async(std::launch::async, [&] {
-      if (operation == 0) consumer->close();
-      else if (operation == 1) session.close();
-      else connection.close();
+      if (operation == 0) {
+        consumer->close();
+      } else if (operation == 1) {
+        session.close();
+      } else {
+        connection.close();
+      }
     });
     EXPECT_EQ(std::future_status::timeout, closing.wait_for(15ms));
     release.count_down();
@@ -364,7 +388,9 @@ TEST_F(DeliveryContractTest, AsyncSendBarriers) {
       EXPECT_NE(caller, std::this_thread::get_id());
       EXPECT_TRUE(result.headers);
       EXPECT_FALSE(result.error);
-      if (result.headers) EXPECT_EQ(startTime, result.headers->deliveryTime);
+      if (result.headers) {
+        EXPECT_EQ(startTime, result.headers->deliveryTime);
+      }
       EXPECT_THROW(producer->close(), IllegalStateException);
       EXPECT_THROW(session.close(), IllegalStateException);
       EXPECT_THROW(connection.close(), IllegalStateException);
@@ -398,11 +424,16 @@ TEST_F(DeliveryContractTest, AsyncSendBarriers) {
     }
 
     auto barrier = std::async(std::launch::async, [&] {
-      if (transacted) session.commit();
-      else producer->close();
+      if (transacted) {
+        session.commit();
+      } else {
+        producer->close();
+      }
     });
     EXPECT_EQ(std::future_status::timeout, barrier.wait_for(15ms));
-    if (transacted) EXPECT_FALSE(reader->receiveNoWait());
+    if (transacted) {
+      EXPECT_FALSE(reader->receiveNoWait());
+    }
     release.count_down();
     barrier.get();
     other->close();
@@ -424,14 +455,20 @@ TEST_F(DeliveryContractTest, AsyncSendBarriers) {
       FAIL() << "second completion did not start";
     }
     auto closing = std::async(std::launch::async, [&] {
-      if (transacted) session.rollback();
-      else session.close();
+      if (transacted) {
+        session.rollback();
+      } else {
+        session.close();
+      }
     });
     EXPECT_EQ(std::future_status::timeout, closing.wait_for(15ms));
     releaseAgain.count_down();
     closing.get();
-    if (transacted) EXPECT_FALSE(reader->receiveNoWait());
-    else EXPECT_EQ("barrier", body(reader->receiveNoWait()));
+    if (transacted) {
+      EXPECT_FALSE(reader->receiveNoWait());
+    } else {
+      EXPECT_EQ("barrier", body(reader->receiveNoWait()));
+    }
     auto finalProducer = viewer.createProducer(queue);
     std::promise<void> finalEntered;
     std::latch finalRelease(1);
@@ -486,7 +523,9 @@ TEST_F(DeliveryContractTest, AcknowledgeAndRecoverMatrix) {
       ASSERT_TRUE(second);
       EXPECT_EQ(trackedMismatch ? "two" : "one", body(second));
       EXPECT_EQ(1, second->jmsHeaders.jmsDeliveryCount());
-      if (!trackedMismatch) EXPECT_EQ("two", body(left->receiveNoWait()));
+      if (!trackedMismatch) {
+        EXPECT_EQ("two", body(left->receiveNoWait()));
+      }
       EXPECT_EQ("three", body(left->receiveNoWait()));
       EXPECT_EQ("expires", body(right->receiveNoWait()));
       left->close();
@@ -509,12 +548,18 @@ TEST_F(DeliveryContractTest, AcknowledgeAndRecoverMatrix) {
           EXPECT_EQ(2, first->jmsHeaders.jmsDeliveryCount());
         }
         EXPECT_EQ(trackedMismatch ? "two" : "one", body(right->receiveNoWait()));
-        if (trackedMismatch) EXPECT_EQ("three", body(right->receiveNoWait()));
+        if (trackedMismatch) {
+          EXPECT_EQ("three", body(right->receiveNoWait()));
+        }
       }
       EXPECT_FALSE(right->receiveNoWait());
       EXPECT_FALSE(other->receiveNoWait());
-      if (mode == Session::CLIENT_ACKNOWLEDGE) session.acknowledge();
-      if (mode == Session::SESSION_TRANSACTED) session.commit();
+      if (mode == Session::CLIENT_ACKNOWLEDGE) {
+        session.acknowledge();
+      }
+      if (mode == Session::SESSION_TRANSACTED) {
+        session.commit();
+      }
     }
   }
   {
@@ -581,7 +626,9 @@ struct TransactionFixture {
 
   void stage(Message::Reliability inMode, Message::Reliability outMode,
              Message::Reliability fanoutMode, bool seed) {
-    if (seed) send(normal, *normal.createProducer(input), "input", inMode);
+    if (seed) {
+      send(normal, *normal.createProducer(input), "input", inMode);
+    }
     auto consumer = transaction.createConsumer(input);
     require(body(consumer->receiveNoWait()) == "input", "transaction cannot claim input");
     consumer->close();
@@ -671,7 +718,9 @@ TEST_F(DeliveryContractTest, AtomicConsumeAndSend) {
     const auto path = directory + point + "/";
     ASSERT_EQ(crashCode, child(path, "tx-crash", point));
     const bool committed = std::string_view(point) != "commit:before-decision";
-    if (committed) ASSERT_EQ(crashCode, child(path, "tx-check-commit", "replay:apply-1"));
+    if (committed) {
+      ASSERT_EQ(crashCode, child(path, "tx-check-commit", "replay:apply-1"));
+    }
     EXPECT_EQ(0, child(path, committed ? "tx-check-commit" : "tx-check-rollback"));
     EXPECT_EQ(0, child(path, "tx-check-empty"));
   }
@@ -839,7 +888,9 @@ TEST_F(DeliveryContractTest, CrashAndDeadLetterMatrix) {
       ASSERT_TRUE(message);
       EXPECT_EQ(attempt, message->jmsHeaders.jmsDeliveryCount());
       EXPECT_EQ(startTime, message->jmsHeaders.deliveryTime);
-      if (attempt < 10) session.recover();
+      if (attempt < 10) {
+        session.recover();
+      }
     }
     session.acknowledge();
   }

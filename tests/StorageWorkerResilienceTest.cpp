@@ -62,7 +62,9 @@ TEST(StorageWorkerResilienceTest, InvalidOperationIsLoggedNotFatal) {
   const std::string basePath = "./tiny-mq-lp03-resilience";
   {
     Poco::File pre(basePath);
-    if (pre.exists()) pre.remove(true);
+    if (pre.exists()) {
+      pre.remove(true);
+    }
   }
 
   auto storageId = Poco::UUIDGenerator::defaultGenerator().createRandom();
@@ -100,7 +102,9 @@ TEST(StorageWorkerResilienceTest, InvalidOperationIsLoggedNotFatal) {
 
   storage.stop();
   Poco::File dir(basePath);
-  if (dir.exists()) dir.remove(true);
+  if (dir.exists()) {
+    dir.remove(true);
+  }
 }
 
 TEST(StorageWorkerResilienceTest, StopImmediatelyAfterStart) {
@@ -128,7 +132,9 @@ TEST(StorageWorkerResilienceTest, NoWorkerThreadSurvivesExchangeDestruction) {
   const std::string basePath = "./tiny-mq-lp03-shutdown-order";
   {
     Poco::File pre(basePath);
-    if (pre.exists()) pre.remove(true);
+    if (pre.exists()) {
+      pre.remove(true);
+    }
   }
 
   auto exchange = std::make_unique<tiny_mq::Exchange>(basePath);

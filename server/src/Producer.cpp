@@ -7,15 +7,22 @@
 
 namespace tiny_mq {
 namespace {
+const char* deliveryError(Message::Reliability mode, int32_t priority) {
+  if (priority < 0 || priority > 9) {
+    return "priority must be in range 0..9";
+  }
+  if (mode != Message::PERSISTENT && mode != Message::NOT_PERSISTENT) {
+    return "invalid delivery mode";
+  }
+  return nullptr;
+}
+
 void validate(const SendOptions& options) {
-  if (options.priority < 0 || options.priority > 9) {
-    throw std::invalid_argument("priority must be in range 0..9");
+  if (const auto* error = deliveryError(options.deliveryMode, options.priority)) {
+    throw std::invalid_argument(error);
   }
   if (options.timeToLive < 0 || options.deliveryDelay < 0) {
     throw std::invalid_argument("timeToLive and deliveryDelay must be non-negative");
-  }
-  if (options.deliveryMode != Message::PERSISTENT && options.deliveryMode != Message::NOT_PERSISTENT) {
-    throw std::invalid_argument("invalid delivery mode");
   }
 }
 }
@@ -51,8 +58,13 @@ void Producer::setDefault(const SendOptions& options) {
 
 void Producer::send(const Message& message) {
   auto& session = ensureOpen();
-  if (!_default) validate(SendOptions{message.reliability, message.jmsHeaders.priority});
-  dispatch(session, message, _default ? &*_default : nullptr);
+  const auto* options = _default ? &*_default : nullptr;
+  if (!options) {
+    if (const auto* error = deliveryError(message.reliability, message.jmsHeaders.priority)) [[unlikely]] {
+      throw std::invalid_argument(error);
+    }
+  }
+  dispatch(session, message, options);
 }
 
 void Producer::send(const Message& message, const SendOptions& options) {
@@ -113,7 +125,7 @@ void Producer::dispatch(Session& session, const Message& message, const SendOpti
     auto draft = message.copy();
     if (_destination->isQueueFamily()) {
       const auto number = _destination->_messageCounter.fetch_add(1, std::memory_order_relaxed);
-      draft = _destination->prepareCopy(*this, std::move(draft), number);
+      _destination->prepareCopy(*this, *draft, number);
     }
     session._transaction.stage(*this, std::move(draft));
     _staged = true;

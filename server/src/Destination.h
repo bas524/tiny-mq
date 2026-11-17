@@ -50,8 +50,8 @@ class DestinationMutex {
 class DeliveryState {
  public:
   void enqueue(Message::Ptr message);
-  Message::Ptr claim(const Selector* selector, int64_t timeout, std::chrono::steady_clock::time_point& deadline,
-                     const std::atomic_bool& started, const std::atomic_bool& closing,
+  Message::Ptr claim(const Consumer& consumer, int64_t timeout, std::chrono::steady_clock::time_point& deadline,
+                     const std::atomic_bool& started,
                      const std::function<bool(const Message&)>* check, bool& incompatible);
   std::vector<Message::Ptr> snapshot(const Selector* selector);
   void close();
@@ -71,21 +71,26 @@ class DeliveryState {
     bool signalled{false};
   };
 
-  void insert(Message::Ptr message, bool special);
+  void insert(Message::Ptr&& message, bool special);
   Message::Ptr take(const Selector* selector, const std::function<bool(const Message&)>* check,
                     bool& incompatible);
+  Message::Ptr takeMatching(const Selector* selector, const std::function<bool(const Message&)>* check,
+                            bool& incompatible);
+  Message::Ptr waitForClaim(std::unique_lock<DestinationMutex>& lock, const Consumer& consumer,
+                            std::chrono::steady_clock::time_point deadline, const std::atomic_bool& started,
+                            const std::function<bool(const Message&)>* check, bool& incompatible);
   bool followsRecoveredDelivery(const Message& message, const Selector* selector) const;
   template<class Range>
   void enqueueBatch(Range& entries) {
     std::lock_guard lock(_mutex);
     if (_closed) throw IllegalStateException("transaction destination is closed");
-    const auto previousMask = _nonEmpty;
+    auto nonEmpty = _nonEmpty;
     auto next = entries.begin();
     try {
       for (; next != entries.end(); ++next) {
-        const auto band = next->message->jmsHeaders.priority;
+        const auto band = next->priority;
         _bands[band].push_back(std::move(next->message));
-        _nonEmpty |= 1u << band;
+        nonEmpty |= 1u << band;
       }
     } catch (...) {
       while (next != entries.begin()) {
@@ -95,9 +100,9 @@ class DeliveryState {
         next->message = std::move(_bands[band].back());
         _bands[band].pop_back();
       }
-      _nonEmpty = previousMask;
       throw;
     }
+    _nonEmpty = nonEmpty;
     notifyWaiters();
   }
   void wake();
@@ -159,7 +164,11 @@ class Destination : public std::enable_shared_from_this<Destination> {
               Poco::UUID owner = {});
   void checkBroker(const Connection& connection) const;
   void checkOwner(const Poco::UUID& owner) const;
-  void checkLive() const;
+  void checkLive() const {
+    if (_deleted.load(std::memory_order_acquire)) {
+      throw IllegalStateException("destination is deleted");
+    }
+  }
 
   Consumer::Ptr createConsumer(Session& session, std::shared_ptr<Selector> selector = {}, bool noLocal = false);
   Consumer::Ptr createDurableConsumer(Session& session, const std::string& clientId,
@@ -182,7 +191,7 @@ class Destination : public std::enable_shared_from_this<Destination> {
   void preparePublication(const Producer& producer, const Message::Ptr& message,
                           std::vector<Publication>& outputs, int64_t now);
 
-  Message::Ptr prepareCopy(const Producer& producer, Message::Ptr copy, int64_t number);
+  void prepareCopy(const Producer& producer, Message& copy, int64_t number);
   bool matches(const Subscription& sub, const Producer& producer, const Message& message) const;
   void publish(const Producer& producer, const Message& message, int64_t acceptedAt);
   void deliver(const Subscription& subscription, Message::Ptr message, int64_t acceptedAt);

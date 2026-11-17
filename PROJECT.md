@@ -45,6 +45,14 @@
 `ENABLE_TESTS=ON` добавляет GoogleTest в `tiny_mq`. Clang и GCC собираются с
 `-Wall -Werror -Wextra -Wshadow`.
 
+При доступном `clang-tidy` Debug-сборка Ninja или Make проверяет C++ тесты правилом
+`readability-braces-around-statements`. Фигурные скобки вокруг условных
+`EXPECT_*` и `ASSERT_*` обязательны: GCC диагностирует неоднозначный `else`
+в раскрытии макроса GoogleTest. На macOS подходит `brew install llvm`.
+CMake ищет `clang-tidy` также в каталоге LLVM Homebrew. Для диагностики сборки
+используй отдельную цель `cmake --build --preset debug --target tiny_mq_test_clang_tidy`.
+Linux CI проверяет эти же файлы под GCC с `-Werror`.
+
 | Слот | Значение | Что это |
 |---|---|---|
 | `BUILD_CMD` | cmake --build --preset debug --parallel | команда полной сборки в проверочной конфигурации; предупреждения = ошибки, если проект так решил |

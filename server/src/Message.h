@@ -242,9 +242,11 @@ class Message {
   virtual ~Message() = default;
 
   PersistentInfo persistentInfo;
-  bool isPersistent() const;
+  bool isPersistent() const { return reliability == PERSISTENT; }
   // JMSExpiration (spec 44): true when a non-zero expiration lies at or behind nowMs.
-  bool isExpired(int64_t nowMs) const;
+  bool isExpired(int64_t nowMs) const {
+    return jmsHeaders.expiration != 0 && nowMs >= jmsHeaders.expiration;
+  }
 
   int64_t number() const;
 
