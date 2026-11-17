@@ -519,6 +519,11 @@ void Destination::save(const Producer& producer, const Message& message, int64_t
 }
 
 bool Destination::matches(const Subscription& sub, const Producer& producer, const Message& message) const {
+  if (!sub.legacy && !sub.noLocal && !sub.selector) [[likely]] return true;
+  return matchesFiltered(sub, producer, message);
+}
+
+bool Destination::matchesFiltered(const Subscription& sub, const Producer& producer, const Message& message) const {
   if (sub.legacy && sub.active == 0 && !message.isPersistent()) return false;
   if (sub.noLocal) {
     const auto& connection = producer._session.load(std::memory_order_acquire)->connection();
@@ -526,6 +531,13 @@ bool Destination::matches(const Subscription& sub, const Producer& producer, con
         (!sub.clientId.empty() && sub.clientId == connection.clientID())) return false;
   }
   return !sub.selector || sub.selector->matches(message);
+}
+
+int64_t Destination::nextTopicNumber() {
+  // Topic publications reserve their sequence while holding _mutex.
+  const auto number = _messageCounter.load(std::memory_order_relaxed);
+  _messageCounter.store(number + 1, std::memory_order_relaxed);
+  return number;
 }
 
 void Destination::preparePublication(const Producer& producer, const Message::Ptr& message,
@@ -547,8 +559,7 @@ void Destination::preparePublication(const Producer& producer, const Message::Pt
   } else {
     std::lock_guard lock(_mutex);
     checkLive();
-    const auto number = _messageCounter.load(std::memory_order_relaxed);
-    _messageCounter.store(number + 1, std::memory_order_relaxed);
+    const auto number = nextTopicNumber();
     for (const auto& sub : _subscriptions) {
       if (matches(*sub, producer, *message)) {
         auto copy = message->copy();
@@ -560,55 +571,52 @@ void Destination::preparePublication(const Producer& producer, const Message::Pt
 }
 
 void Destination::publish(const Producer& producer, const Message& message, int64_t acceptedAt) {
-  struct Target {
-    std::shared_ptr<DeliveryState> queue;
-    Storage* storage = nullptr;
-  };
-  Target first;
-  std::optional<std::vector<Target>> rest;
-  int64_t number;
-  {
-    std::lock_guard lock(_mutex);
-    checkLive();
-    for (const auto& sub : _subscriptions) {
-      if (!matches(*sub, producer, message)) continue;
-      // Pin the subscription (and its storage) while exposing the ready set
-      // directly. Publishing must run outside the subscription-list mutex.
-      Target target{{sub, sub->deliveries.get()}, sub->storage.get()};
-      if (first.queue) {
-        if (!rest) rest.emplace();
-        rest->push_back(std::move(target));
-      } else {
-        first = std::move(target);
-      }
-    }
-    if (!first.queue) return;
-    number = _messageCounter.load(std::memory_order_relaxed);
-    _messageCounter.store(number + 1, std::memory_order_relaxed);
+  std::unique_lock lock(_mutex);
+  checkLive();
+  // Pin selected subscriptions before releasing the list lock for dispatch.
+  if (_subscriptions.size() == 1) {
+    const auto& sub = _subscriptions.front();
+    if (!matches(*sub, producer, message)) return;
+    auto selected = sub;
+    const auto number = nextTopicNumber();
+    lock.unlock();
+    publishTo(*selected, producer, message, number, acceptedAt);
+    return;
   }
 
-  const auto* target = &first;
-  size_t next = 0;
-  for (;;) {
-    auto copy = message.copy();
-    prepareCopy(producer, *copy, number);
-    const auto enqueue = [&] {
-      if (copy->jmsHeaders.deliveryTime <= acceptedAt) target->queue->insert(std::move(copy), false);
-      else _scheduler.enqueueOrSchedule(target->queue, std::move(copy));
-    };
-    if (target->storage && copy->isPersistent()) [[unlikely]] {
-      copy->_storageId = storageKey(copy->_number);
-      std::lock_guard lock(target->queue->storageMutex);
-      if (!target->queue->retired) {
-        persist(*target->storage, *copy);
-        enqueue();
-      }
-    } else {
-      enqueue();
-    }
-    if (!rest || next == rest->size()) break;
-    target = &(*rest)[next++];
+  std::shared_ptr<Subscription> first;
+  std::vector<std::shared_ptr<Subscription>> rest;
+  for (const auto& sub : _subscriptions) {
+    if (!matches(*sub, producer, message)) continue;
+    if (first) rest.push_back(sub);
+    else first = sub;
   }
+  if (!first) return;
+  const auto number = nextTopicNumber();
+  lock.unlock();
+  publishTo(*first, producer, message, number, acceptedAt);
+  for (const auto& sub : rest) publishTo(*sub, producer, message, number, acceptedAt);
+}
+
+void Destination::publishTo(const Subscription& sub, const Producer& producer, const Message& message,
+                            int64_t number, int64_t acceptedAt) {
+  auto copy = message.copy();
+  prepareCopy(producer, *copy, number);
+  if (sub.storage && copy->isPersistent()) [[unlikely]] {
+    publishStored(sub, std::move(copy), acceptedAt);
+  } else if (copy->jmsHeaders.deliveryTime <= acceptedAt) {
+    sub.deliveries->insert(std::move(copy), false);
+  } else {
+    _scheduler.enqueueOrSchedule(sub.deliveries, std::move(copy));
+  }
+}
+
+void Destination::publishStored(const Subscription& sub, Message::Ptr copy, int64_t acceptedAt) {
+  std::lock_guard lock(sub.deliveries->storageMutex);
+  if (sub.deliveries->retired) return;
+  copy->_storageId = storageKey(copy->_number);
+  persist(*sub.storage, *copy);
+  enqueueOrSchedule(sub.deliveries, std::move(copy), acceptedAt);
 }
 
 void Destination::enqueueOrSchedule(const std::shared_ptr<DeliveryState>& queue, Message::Ptr message) {

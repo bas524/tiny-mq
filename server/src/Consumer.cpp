@@ -98,8 +98,9 @@ Message::Ptr Consumer::receiveImpl(int64_t timeout, const std::function<bool(con
     }
     if (!message) return {};
     const bool expired = message->jmsHeaders.expiration != 0 && message->isExpired(DeliveryClock::now());
+    const bool stored = hasStorage(*message);
     try {
-      if (hasStorage(*message)) [[unlikely]] {
+      if (stored) [[unlikely]] {
         if (!expired) {
           _destination->registerAttempt(*_storage, *message);
           LocalTransactionJournal::point("ack", "before-ack");
@@ -110,6 +111,7 @@ Message::Ptr Consumer::receiveImpl(int64_t timeout, const std::function<bool(con
         message->_receiveSequence = session._receiveSequence++;
         if (mode == Session::SESSION_TRANSACTED) {
           _transacted.push_back(message);
+          if (stored) [[unlikely]] ++_storedTransacted;
           if (_durable) ++_queue->pending;
         } else {
           track(message);
@@ -280,6 +282,7 @@ void Consumer::finishSession() noexcept {
   _session = nullptr;
   if (_durable) _queue->pending -= _transacted.size() + _pendingAcks;
   _transacted.clear();
+  _storedTransacted = 0;
   clearInFlight();
 }
 

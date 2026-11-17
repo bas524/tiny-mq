@@ -16,7 +16,13 @@ class TransactionBuffer {
   };
 
   void stage(Producer& producer, Message::Ptr message);
+  void clear() noexcept;
   std::vector<Send> _sends;
+  // Bounds over the staged copies, compared with the commit time.
+  int64_t _latestDelivery = 0;
+  int64_t _earliestExpiration = 0;
+  bool _hasPersistentSends = false;
+  bool _oneProducer = true;
 };
 }
 #endif

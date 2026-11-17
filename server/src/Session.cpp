@@ -50,7 +50,7 @@ void Session::close() {
       if (!failure) failure = std::current_exception();
     }
   }
-  _transaction._sends.clear();
+  _transaction.clear();
   try {
     returnClaims(_mode == SESSION_TRANSACTED);
   } catch (...) {
@@ -306,30 +306,32 @@ void Session::commit() {
   auto& sends = _transaction._sends;
   const auto now = sends.empty() ? 0 : DeliveryClock::now();
   const bool durableInputs = std::any_of(_consumers.begin(), _consumers.end(), [](const auto& item) {
-    const auto& consumer = *item.second;
-    return std::any_of(consumer._transacted.begin(), consumer._transacted.end(),
-                       [&](const auto& message) { return consumer.hasStorage(*message); });
+    return item.second->_storedTransacted != 0;
   });
   if (!durableInputs) {
     if (sends.empty()) {
       finishTransaction(std::move(nextTransaction));
       return;
     }
-    const auto& target = *sends.front().producer->_destination;
-    if (target.isQueueFamily() && std::all_of(sends.begin(), sends.end(), [&](const auto& send) {
-          return send.producer->_destination.get() == &target && !send.message->isPersistent() &&
-                 send.message->jmsHeaders.deliveryTime <= now && !send.message->isExpired(now);
-        })) {
-      target.checkLive();
-      target._queue->enqueueBatch(sends);
-      finishTransaction(std::move(nextTransaction));
-      return;
+    const auto expiration = _transaction._earliestExpiration;
+    if (!_transaction._hasPersistentSends && _transaction._latestDelivery <= now &&
+        (expiration == 0 || now < expiration)) {
+      const auto& target = *sends.front().producer->_destination;
+      if (target.isQueueFamily() && (_transaction._oneProducer ||
+          std::all_of(sends.begin(), sends.end(), [&](const auto& send) {
+            return send.producer->_destination.get() == &target;
+          }))) {
+        target.checkLive();
+        target._queue->enqueueBatch(sends);
+        finishTransaction(std::move(nextTransaction));
+        return;
+      }
     }
   }
 
   std::vector<Destination::Publication> outputs;
   outputs.reserve(sends.size());
-  for (const auto& send : _transaction._sends) {
+  for (const auto& send : sends) {
     send.producer->_destination->preparePublication(*send.producer, send.message, outputs, now);
   }
 
@@ -351,6 +353,7 @@ void Session::commit() {
   }
 
   for (const auto& [id, consumer] : _consumers) {
+    if (consumer->_storedTransacted == 0) continue;
     for (const auto& message : consumer->_transacted) {
       if (consumer->hasStorage(*message)) {
         auto* storage = consumer->_storage.get();
@@ -407,8 +410,9 @@ void Session::finishTransaction(std::string nextId) {
   for (const auto& [id, consumer] : _consumers) {
     if (consumer->_durable) consumer->_queue->pending -= consumer->_transacted.size();
     consumer->_transacted.clear();
+    consumer->_storedTransacted = 0;
   }
-  _transaction._sends.clear();
+  _transaction.clear();
   _suffix = std::move(nextId);
   for (auto it = _producers.begin(); it != _producers.end();) {
     it->second->_staged = false;
@@ -441,6 +445,7 @@ void Session::returnClaims(bool transacted) {
   for (const auto& [consumer, message] : claims) {
     consumer->redeliver(*message, batch);
     if (transacted) {
+      if (consumer->hasStorage(*message)) --consumer->_storedTransacted;
       consumer->_transacted.pop_front();
       if (consumer->_durable) --consumer->_queue->pending;
     } else {
@@ -453,7 +458,7 @@ void Session::rollback() {
   ensureOpen();
   _dispatch.wait();
   if (_mode != SESSION_TRANSACTED) return;
-  _transaction._sends.clear();
+  _transaction.clear();
   returnClaims(true);
   finishTransaction(createRandomUUID().toString());
 }

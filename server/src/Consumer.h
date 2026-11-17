@@ -72,6 +72,8 @@ class Consumer {
   std::shared_ptr<Selector> _selector;
   std::reference_wrapper<Poco::Logger> _logger;
   std::deque<Message::Ptr> _transacted;
+  // Count of claims backed by storage, including claims from a closed consumer.
+  size_t _storedTransacted = 0;
   MessageListener _listener;
   std::mutex _listenerMutex;
   std::atomic_uint32_t _receiving{0};

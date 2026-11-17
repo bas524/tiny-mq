@@ -193,7 +193,12 @@ class Destination : public std::enable_shared_from_this<Destination> {
 
   void prepareCopy(const Producer& producer, Message& copy, int64_t number);
   bool matches(const Subscription& sub, const Producer& producer, const Message& message) const;
+  bool matchesFiltered(const Subscription& sub, const Producer& producer, const Message& message) const;
   void publish(const Producer& producer, const Message& message, int64_t acceptedAt);
+  void publishTo(const Subscription& sub, const Producer& producer, const Message& message,
+                 int64_t number, int64_t acceptedAt);
+  void publishStored(const Subscription& sub, Message::Ptr copy, int64_t acceptedAt);
+  int64_t nextTopicNumber();
   static void persist(Storage& storage, Message& message);
   Poco::UUID storageKey(int64_t sequence) const;
   static Message::Ptr decodeStored(const std::vector<char>& bytes);
