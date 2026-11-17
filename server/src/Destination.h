@@ -73,6 +73,7 @@ class DeliveryState {
   };
 
   void insert(Message::Ptr&& message, bool special);
+  void notifyInserted(const Message& message);
   using ReceiveDeadline = std::chrono::steady_clock::time_point;
   static void armReceiveTimeout(int64_t timeout, ReceiveDeadline& deadline);
   std::unique_lock<DestinationMutex> lockForClaim(int64_t timeout, ReceiveDeadline& deadline,
@@ -205,6 +206,7 @@ class Destination : public std::enable_shared_from_this<Destination> {
   void deleteTemporary(const Poco::UUID& owner);
 
   void save(const Producer& producer, const Message& message, int64_t acceptedAt);
+  void saveQueue(Message::Ptr&& copy, int64_t acceptedAt);
   struct Publication {
     Destination* destination;
     std::shared_ptr<DeliveryState> queue;

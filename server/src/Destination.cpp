@@ -50,11 +50,15 @@ void DeliveryState::insert(Message::Ptr&& message, bool special) {
   const auto& added = _bands[band].emplace_back(std::move(message));
   _nonEmpty |= 1u << band;
   if (special) [[unlikely]] ++_special;
+  if (!_listeners.empty() || !_waiters.empty()) [[unlikely]] notifyInserted(*added);
+}
+
+[[gnu::noinline]] void DeliveryState::notifyInserted(const Message& message) {
   if (!_listeners.empty()) notifyListeners();
   if (_waiters.empty()) return;
-  if (added->jmsHeaders.expiration != 0 && added->isExpired(DeliveryClock::now())) return;
+  if (message.jmsHeaders.expiration != 0 && message.isExpired(DeliveryClock::now())) return;
   for (const auto& waiter : _waiters) {
-    if (!waiter->signalled && (!waiter->selector || waiter->selector->matches(*added))) {
+    if (!waiter->signalled && (!waiter->selector || waiter->selector->matches(message))) {
       waiter->signalled = true;
       waiter->condition.notify_one();
     }
@@ -499,12 +503,20 @@ void Destination::prepareCopy(const Producer& producer, Message& copy, int64_t n
 }
 
 void Destination::save(const Producer& producer, const Message& message, int64_t acceptedAt) {
-  if (isTopicFamily()) {
+  if (!_queue) {
     publish(producer, message, acceptedAt);
     return;
   }
   auto copy = message.copy();
   prepareCopy(producer, *copy, _messageCounter.fetch_add(1, std::memory_order_relaxed));
+  if ((copy->isPersistent() && _storage) || copy->jmsHeaders.deliveryTime > acceptedAt) [[unlikely]] {
+    saveQueue(std::move(copy), acceptedAt);
+    return;
+  }
+  _queue->insert(std::move(copy), false);
+}
+
+[[gnu::noinline]] void Destination::saveQueue(Message::Ptr&& copy, int64_t acceptedAt) {
   if (_storage && copy->isPersistent()) {
     copy->_storageId = storageKey(copy->_number);
     persist(*_storage, *copy);
@@ -565,7 +577,7 @@ void Destination::preparePublication(const Producer& producer, const Message::Pt
   }
 }
 
-void Destination::publish(const Producer& producer, const Message& message, int64_t acceptedAt) {
+[[gnu::noinline]] void Destination::publish(const Producer& producer, const Message& message, int64_t acceptedAt) {
   std::unique_lock lock(_mutex);
   checkLive();
   // Pin selected subscriptions before releasing the list lock for dispatch.

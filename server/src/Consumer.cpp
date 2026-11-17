@@ -88,6 +88,7 @@ void Consumer::checkReceiveAdmission() const {
 }
 
 template<bool listener, bool checked>
+[[gnu::noinline]]
 Message::Ptr Consumer::receiveImpl(int64_t timeout, std::chrono::steady_clock::time_point deadline,
                                    std::unique_lock<DestinationMutex> lock,
                                    const std::function<bool(const Message&)>* predicate,
