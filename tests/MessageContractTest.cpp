@@ -17,6 +17,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <thread>
 #include <utility>
 
 namespace {
@@ -237,6 +238,39 @@ TEST_F(MessageContractTest, BodyRoundTrip) {
   restoredText.fromBytes(snapshot);
   EXPECT_EQ(restoredText.text(), "before delivery");
   EXPECT_EQ(restoredText.property<property::String>("tag").value(), "fixed");
+
+  const auto& originalText = text.text();
+  for (const auto& value : {std::string("x\0y", 3), std::string(128, 'x')}) {
+    text.setText(value);
+    const auto saved = text.toBytes();
+    for (int pass = 0; pass < 2; ++pass) {
+      auto copy = Message::As<TextMessage>(text.copy());
+      ASSERT_TRUE(copy);
+      text.clearData();
+      EXPECT_TRUE(text.isTextNull());
+      EXPECT_TRUE(originalText.empty());
+      EXPECT_EQ(copy->text(), value);
+      text.fromBytes(saved);
+      copy->setText("");
+      EXPECT_FALSE(copy->isTextNull());
+      EXPECT_EQ(originalText, value);
+    }
+  }
+
+  std::string copiedAtThreadExit;
+  std::thread worker([&] {
+    struct LateCopy {
+      const TextMessage& source;
+      std::string& result;
+      ~LateCopy() { result = Message::As<TextMessage>(source.copy())->text(); }
+    };
+    // Initialize before the long copy so this destructor runs after the cache's.
+    thread_local LateCopy lateCopy{text, copiedAtThreadExit};
+    (void)lateCopy;
+    auto firstCopy = text.copy();
+  });
+  worker.join();
+  EXPECT_EQ(copiedAtThreadExit, originalText);
 }
 
 // REQ-70-4

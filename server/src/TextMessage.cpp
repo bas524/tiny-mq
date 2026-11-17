@@ -5,6 +5,41 @@
 #include "TextMessage.h"
 
 namespace tiny_mq {
+namespace {
+constexpr size_t minReusableText = 64;
+constexpr size_t maxReusableText = 4096;
+
+struct TextCopyBuffer;
+struct TextCopyBufferSlot {
+  TextCopyBuffer* active = nullptr;
+  bool retired = false;
+};
+constinit thread_local TextCopyBufferSlot copyBufferSlot;
+
+// One bounded buffer per thread that copies long text. Destruction never
+// initializes this cache and can still run after the cache has been torn down.
+struct TextCopyBuffer {
+  std::string text;
+  TextCopyBuffer() { copyBufferSlot.active = this; }
+  ~TextCopyBuffer() { copyBufferSlot = {nullptr, true}; }
+};
+
+std::string copyText(const std::string& text) {
+  if (text.size() < minReusableText || text.size() > maxReusableText) return text;
+  auto* buffer = copyBufferSlot.active;
+  if (!buffer) {
+    // Later TLS destructors may still copy a message on this thread.
+    if (copyBufferSlot.retired) return text;
+    thread_local TextCopyBuffer owned;
+    buffer = &owned;
+  }
+  if (buffer->text.capacity() < text.size()) return text;
+  std::string copy = std::move(buffer->text);
+  copy.assign(text);
+  return copy;
+}
+}  // namespace
+
 TextMessage::TextMessage(Poco::UUID uuid_, Reliability reliability_) {
   uuid = std::move(uuid_);
   reliability = reliability_;
@@ -14,6 +49,16 @@ TextMessage::TextMessage(Poco::UUID uuid_, std::string text_, Reliability reliab
   uuid = std::move(uuid_);
   reliability = reliability_;
 }
+TextMessage::TextMessage(const TextMessage& other) : Message(other), _text(copyText(other._text)) {}
+
+TextMessage::~TextMessage() {
+  const auto capacity = _text.capacity();
+  if (capacity < minReusableText || capacity > maxReusableText) return;
+  if (auto* buffer = copyBufferSlot.active; buffer && buffer->text.capacity() < capacity) {
+    buffer->text = std::move(_text);
+  }
+}
+
 const std::string& TextMessage::text() const { return _text; }
 void TextMessage::setText(const std::string& text) {
   _text = text;

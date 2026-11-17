@@ -16,9 +16,9 @@ class TextMessage : public Message {
   TextMessage() { jmsHeaders.nullText = true; }
   TextMessage(Poco::UUID uuid_, Message::Reliability reliability_ = Message::NOT_PERSISTENT);
   explicit TextMessage(Poco::UUID uuid_, std::string text_, Message::Reliability reliability_ = Message::NOT_PERSISTENT);
-  ~TextMessage() override = default;
+  ~TextMessage() override;
 
-  TextMessage(const TextMessage &) = default;
+  TextMessage(const TextMessage &);
   TextMessage(TextMessage &&) = default;
   TextMessage &operator=(const TextMessage &) = default;
   TextMessage &operator=(TextMessage &&) = default;
