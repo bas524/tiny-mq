@@ -28,7 +28,7 @@ Poco::JSON::Object TextMessage::toJSON() const {
   json.set("data", isTextNull() ? Poco::Dynamic::Var{} : Poco::Dynamic::Var(text()));
   return json;
 }
-Message::Ptr TextMessage::copy() const { return tiny_mq::Message::Ptr(new TextMessage(*this)); }
+Message::Ptr TextMessage::copy() const { return std::make_shared<TextMessage>(*this); }
 
 Message::Type TextMessage::type() const { return Message::TEXT_MESSAGE; }
 

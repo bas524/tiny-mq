@@ -38,43 +38,74 @@ Message::Ptr Consumer::receive(int64_t timeout) {
 }
 
 Message::Ptr Consumer::recv(int64_t usec_timeout) {
-  return receiveImpl<false, false>(usec_timeout, nullptr);
+  std::chrono::steady_clock::time_point deadline;
+  auto lock = _queue->lockForClaim(usec_timeout, deadline, this);
+  checkReceiveAdmission();
+  auto& session = *_session;
+  const auto mode = session.acknowledgeMode();
+  // A ready claim with no storage, expiration or user predicate can finish
+  // under the queue lock that serializes it with close and other receives.
+  if (!_selector && _queue->_nonEmpty && !_queue->_special &&
+      !_queue->_closed.load(std::memory_order_relaxed) && deadline == std::chrono::steady_clock::time_point{} &&
+      session._connection.get()._started.load(std::memory_order_acquire) &&
+      (mode == Session::AUTO_ACKNOWLEDGE || mode == Session::CLIENT_ACKNOWLEDGE)) {
+    const auto band = std::bit_width(_queue->_nonEmpty) - 1;
+    const auto& first = *_queue->_bands[band].front();
+    if (first.jmsHeaders.expiration == 0 && !hasStorage(first)) {
+      auto message = _queue->takeFirst(band);
+      if (mode == Session::CLIENT_ACKNOWLEDGE) {
+        message->_receiveSequence = session._receiveSequence++;
+        track(message);
+      }
+      return message;
+    }
+  }
+  return receiveImpl<false, false>(usec_timeout, deadline, std::move(lock), nullptr);
 }
 
 ReceiveBodyResult Consumer::receiveChecked(const std::function<bool(const Message&)>& predicate, int64_t timeout) {
   if (!predicate) throw std::invalid_argument("receive body predicate is empty");
+  std::chrono::steady_clock::time_point deadline;
+  auto lock = _queue->lockForClaim(timeout, deadline, this);
+  checkReceiveAdmission();
   ReceiveBodyResult result;
-  result.message = receiveImpl<false, true>(timeout, &predicate, &result.disposition);
+  result.message = receiveImpl<false, true>(timeout, deadline, std::move(lock), &predicate, &result.disposition);
   return result;
 }
 
+void Consumer::checkReceiveState() const {
+  if (receiveSealed()) [[unlikely]] throw IllegalStateException("consumer is closed");
+  if (_receiving.load(std::memory_order_acquire) != receiveIdle) [[unlikely]] {
+    throw IllegalStateException("receive already active");
+  }
+}
+
+void Consumer::checkReceiveAdmission() const {
+  // Close seals admission, then takes this lock before clearing the session.
+  checkReceiveState();
+  if (_session->_closing.load(std::memory_order_acquire)) [[unlikely]] _session->ensureOpen();
+  if (_session->_dispatch.hasListeners()) [[unlikely]] throw IllegalStateException("session has message listeners");
+}
+
 template<bool listener, bool checked>
-Message::Ptr Consumer::receiveImpl(int64_t timeout, const std::function<bool(const Message&)>* predicate,
+Message::Ptr Consumer::receiveImpl(int64_t timeout, std::chrono::steady_clock::time_point deadline,
+                                   std::unique_lock<DestinationMutex> lock,
+                                   const std::function<bool(const Message&)>* predicate,
                                    ReceiveBodyDisposition* disposition) {
   struct ReceiveGuard {
     std::atomic_uint32_t* active;
     ~ReceiveGuard() {
-      if (active) {
-        active->store(0, std::memory_order_release);
+      if (active && active->exchange(receiveIdle, std::memory_order_release) == closeWaiting) {
         active->notify_one();
       }
     }
   } guard{nullptr};
 
   if constexpr (!listener) {
-    uint32_t idle = 0;
-    if (!_receiving.compare_exchange_strong(idle, 1, std::memory_order_seq_cst)) {
-      if (receiveSealed()) throw IllegalStateException("consumer is closed");
-      throw IllegalStateException("receive already active");
-    }
+    // Only receives that may release the ready-set lock before finishing
+    // need a separate lifetime barrier.
+    _receiving.store(receiveActive, std::memory_order_relaxed);
     guard.active = &_receiving;
-    // Sequentially consistent admission pairs with close's seal and active
-    // load. At least one side observes the other before touching the session.
-    if (_closeState.load(std::memory_order_seq_cst) != CloseState::open) {
-      throw IllegalStateException("consumer is closed");
-    }
-    if (_session->_closing.load(std::memory_order_acquire)) [[unlikely]] _session->ensureOpen();
-    if (_session->_dispatch.hasListeners()) throw IllegalStateException("session has message listeners");
   } else if (receiveSealed()) {
     return {};
   }
@@ -83,13 +114,17 @@ Message::Ptr Consumer::receiveImpl(int64_t timeout, const std::function<bool(con
   const auto mode = session.acknowledgeMode();
   const bool dups = mode == Session::DUPS_OK_ACKNOWLEDGE;
   const bool automatic = mode == Session::AUTO_ACKNOWLEDGE;
-  if (dups && _pendingAcks >= 100) [[unlikely]] flushPendingAcks();
+  auto& started = session._connection.get()._started;
+  if (dups && _pendingAcks >= 100) [[unlikely]] {
+    if (lock.owns_lock()) lock.unlock();
+    flushPendingAcks();
+  }
   const auto* readyCheck = checked && (automatic || dups) ? predicate : nullptr;
-  auto& started = session.connection()._started;
   bool incompatible = false;
-  std::chrono::steady_clock::time_point deadline;
   for (;;) {
-    auto message = _queue->claim(*this, timeout, deadline, started, readyCheck, incompatible);
+    auto message = lock.owns_lock()
+        ? _queue->claimLocked(std::move(lock), *this, timeout, deadline, started, readyCheck, incompatible)
+        : _queue->claim(*this, timeout, deadline, started, readyCheck, incompatible);
     if constexpr (checked) {
       if (incompatible) {
         *disposition = ReceiveBodyDisposition::incompatible;
@@ -157,7 +192,7 @@ bool Consumer::dispatchOne() {
     listener = _listener;
   }
   if (!listener) return false;
-  auto message = receiveImpl<true, false>(0, nullptr);
+  auto message = receiveImpl<true, false>(0, {}, {}, nullptr);
   if (!message) return false;
   const auto mode = _session->acknowledgeMode();
   struct DurableCallback {
@@ -243,16 +278,20 @@ void Consumer::close() {
   const bool self = SessionDispatch::current && !SessionDispatch::inCompletion &&
                     SessionDispatch::current->_activeConsumer == this;
   auto state = CloseState::open;
-  if (!_closeState.compare_exchange_strong(state, CloseState::closing, std::memory_order_seq_cst)) {
+  if (!_closeState.compare_exchange_strong(state, CloseState::closing)) {
     if (self) return;
     _closeState.wait(CloseState::closing);
     if (!isClosed()) close();
     else _callbackActive.wait(true);
     return;
   }
+  // The queue lock held by wake() waits for admission or a ready claim to finish.
+  // A receive still in progress has installed its guard before releasing that lock.
   _queue->wake();
-  if (_receiving.load(std::memory_order_seq_cst) != 0) {
-    _receiving.wait(1, std::memory_order_acquire);
+  // Either the guard has finished, or it will observe this waiter and notify it.
+  uint32_t active = receiveActive;
+  if (_receiving.compare_exchange_strong(active, closeWaiting, std::memory_order_acquire)) {
+    _receiving.wait(closeWaiting, std::memory_order_acquire);
   }
   try {
     auto& dispatch = _session->_dispatch;

@@ -10,6 +10,7 @@
 namespace tiny_mq {
 class DeliveryState;
 class Destination;
+class DestinationMutex;
 class Session;
 
 enum class ReceiveBodyDisposition { empty, compatible, incompatible };
@@ -41,8 +42,11 @@ class Consumer {
   Consumer(Destination& destination, Session& session, std::shared_ptr<DeliveryState> queue,
            std::shared_ptr<linear_storage::ConcurrentLinearStorage> storage,
            std::shared_ptr<Selector> selector = {}, bool durable = false);
+  void checkReceiveState() const;
+  void checkReceiveAdmission() const;
   template<bool listener, bool checked>
-  Message::Ptr receiveImpl(int64_t timeout, const std::function<bool(const Message&)>* predicate,
+  Message::Ptr receiveImpl(int64_t timeout, std::chrono::steady_clock::time_point deadline,
+                           std::unique_lock<DestinationMutex> lock, const std::function<bool(const Message&)>* predicate,
                            ReceiveBodyDisposition* disposition = nullptr);
   bool dispatchOne();
   void track(const Message::Ptr& message) noexcept;
@@ -55,6 +59,7 @@ class Consumer {
   bool hasStorage(const Message& message) const {
     return message._storageTomId != std::numeric_limits<Poco::UInt32>::max();
   }
+  enum ReceiveState : uint32_t { receiveIdle, receiveActive, closeWaiting };
   enum class CloseState : uint8_t { open, closing, closed };
   bool receiveSealed() const { return _closeState.load(std::memory_order_acquire) != CloseState::open; }
   bool isClosed() const { return _closeState.load(std::memory_order_acquire) == CloseState::closed; }
@@ -76,7 +81,7 @@ class Consumer {
   size_t _storedTransacted = 0;
   MessageListener _listener;
   std::mutex _listenerMutex;
-  std::atomic_uint32_t _receiving{0};
+  std::atomic_uint32_t _receiving{receiveIdle};
   std::atomic<CloseState> _closeState{CloseState::open};
   std::atomic_bool _callbackActive{false};
   size_t _pendingAcks = 0;

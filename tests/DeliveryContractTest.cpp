@@ -255,6 +255,38 @@ TEST_F(DeliveryContractTest, ReceiveLifecycle) {
   EXPECT_FALSE(waiting.get());
   EXPECT_THROW(consumer->receiveNoWait(), IllegalStateException);
 
+  // A ready AutoAck receive racing close either claims the message or leaves
+  // it for a different consumer. No receive may enter after close returns.
+  auto ready = session.createConsumer(queue);
+  send(session, *producer, "ready", Message::NOT_PERSISTENT);
+  std::latch startRace(2);
+  auto readyResult = std::async(std::launch::async, [&] {
+    startRace.arrive_and_wait();
+    try {
+      return ready->receiveNoWait();
+    } catch (const IllegalStateException&) {
+      return Message::Ptr{};
+    }
+  });
+  startRace.arrive_and_wait();
+  ready->close();
+  EXPECT_THROW(ready->receiveNoWait(), IllegalStateException);
+  auto received = readyResult.get();
+  auto remaining = session.createConsumer(queue)->receiveNoWait();
+  ASSERT_NE(static_cast<bool>(received), static_cast<bool>(remaining));
+  EXPECT_EQ("ready", body(received ? received : remaining));
+
+  // AutoAck checks the body before taking the ready entry. Reentrant receive
+  // must reject admission before waiting on the predicate's own queue lock.
+  auto automatic = session.createConsumer(queue);
+  send(session, *producer, "auto checked", Message::NOT_PERSISTENT);
+  const auto autoResult = automatic->receiveChecked([&](const Message&) {
+    EXPECT_THROW(automatic->receiveNoWait(), IllegalStateException);
+    ready->close();
+    return true;
+  });
+  EXPECT_EQ("auto checked", body(autoResult.message));
+
   // A checked client receive runs the predicate outside the ready-set lock.
   // Close must still wait for receive to release the session and its claim.
   auto& client = connection.createSession(Session::CLIENT_ACKNOWLEDGE);
@@ -271,6 +303,7 @@ TEST_F(DeliveryContractTest, ReceiveLifecycle) {
     });
   });
   EXPECT_EQ(std::future_status::ready, entered.wait_for(2s));
+  EXPECT_THROW(checked->receiveNoWait(), IllegalStateException);
   std::latch closing(2);
   const auto close = [&] {
     closing.count_down();

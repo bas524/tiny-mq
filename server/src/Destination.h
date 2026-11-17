@@ -2,6 +2,7 @@
 #define TINY_MQ__DESTINATION_H_
 
 #include <array>
+#include <bit>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -72,6 +73,29 @@ class DeliveryState {
   };
 
   void insert(Message::Ptr&& message, bool special);
+  using ReceiveDeadline = std::chrono::steady_clock::time_point;
+  static void armReceiveTimeout(int64_t timeout, ReceiveDeadline& deadline);
+  std::unique_lock<DestinationMutex> lockForClaim(int64_t timeout, ReceiveDeadline& deadline,
+                                                  const Consumer* admitting = nullptr) {
+    std::unique_lock lock(_mutex, std::try_to_lock);
+    if (!lock.owns_lock()) [[unlikely]] {
+      // An active checked receive may be running its predicate under this lock.
+      if (admitting) admitting->checkReceiveState();
+      armReceiveTimeout(timeout, deadline);
+      lock.lock();
+    }
+    return lock;
+  }
+  Message::Ptr claimLocked(std::unique_lock<DestinationMutex> lock, const Consumer& consumer, int64_t timeout,
+                          ReceiveDeadline& deadline, const std::atomic_bool& started,
+                          const std::function<bool(const Message&)>* check, bool& incompatible);
+  Message::Ptr takeFirst(unsigned band) {
+    auto& messages = _bands[band];
+    auto message = std::move(messages.front());
+    messages.pop_front();
+    if (messages.empty()) _nonEmpty &= ~(1u << band);
+    return message;
+  }
   Message::Ptr take(const Selector* selector, const std::function<bool(const Message&)>* check,
                     bool& incompatible);
   Message::Ptr takeMatching(const Selector* selector, const std::function<bool(const Message&)>* check,

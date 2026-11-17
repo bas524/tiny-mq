@@ -8,7 +8,6 @@
 #include <Poco/File.h>
 #include <Poco/Format.h>
 #include <Poco/Timestamp.h>
-#include <bit>
 #include <cstring>
 #include <filesystem>
 #include <cmath>
@@ -16,15 +15,6 @@
 namespace tiny_mq {
 namespace {
 using SteadyClock = std::chrono::steady_clock;
-
-void armReceiveTimeout(int64_t timeout, SteadyClock::time_point& deadline) {
-  if (timeout > 0 && deadline == SteadyClock::time_point{}) {
-    using Micros = std::chrono::microseconds;
-    const auto now = SteadyClock::now();
-    const auto maxWait = std::chrono::duration_cast<Micros>(SteadyClock::time_point::max() - now);
-    deadline = now + std::min(maxWait, Micros(timeout));
-  }
-}
 
 Message::Ptr makeMessageShell(Message::Type type) {
   switch (type) {
@@ -38,6 +28,15 @@ Message::Ptr makeMessageShell(Message::Type type) {
   }
 }
 }  // namespace
+
+void DeliveryState::armReceiveTimeout(int64_t timeout, ReceiveDeadline& deadline) {
+  if (timeout > 0 && deadline == ReceiveDeadline{}) {
+    using Micros = std::chrono::microseconds;
+    const auto now = SteadyClock::now();
+    const auto maxWait = std::chrono::duration_cast<Micros>(ReceiveDeadline::max() - now);
+    deadline = now + std::min(maxWait, Micros(timeout));
+  }
+}
 
 void DeliveryState::enqueue(Message::Ptr message) {
   const bool special = message->_publication || message->_recoveryBatch;
@@ -66,12 +65,7 @@ Message::Ptr DeliveryState::take(const Selector* selector,
                                      const std::function<bool(const Message&)>* check, bool& incompatible) {
   if (!_nonEmpty) return {};
   if (selector || check || _special) return takeMatching(selector, check, incompatible);
-  const auto band = std::bit_width(_nonEmpty) - 1;
-  auto& bandQueue = _bands[band];
-  auto message = std::move(bandQueue.front());
-  bandQueue.pop_front();
-  if (bandQueue.empty()) _nonEmpty &= ~(1u << band);
-  return message;
+  return takeFirst(std::bit_width(_nonEmpty) - 1);
 }
 
 Message::Ptr DeliveryState::takeMatching(const Selector* selector,
@@ -154,11 +148,12 @@ void DeliveryState::notifyListeners() {
 Message::Ptr DeliveryState::claim(const Consumer& consumer, int64_t timeout,
                                   SteadyClock::time_point& deadline, const std::atomic_bool& started,
                                   const std::function<bool(const Message&)>* check, bool& incompatible) {
-  std::unique_lock lock(_mutex, std::try_to_lock);
-  if (!lock.owns_lock()) [[unlikely]] {
-    armReceiveTimeout(timeout, deadline);
-    lock.lock();
-  }
+  return claimLocked(lockForClaim(timeout, deadline), consumer, timeout, deadline, started, check, incompatible);
+}
+
+Message::Ptr DeliveryState::claimLocked(std::unique_lock<DestinationMutex> lock, const Consumer& consumer,
+                                        int64_t timeout, ReceiveDeadline& deadline, const std::atomic_bool& started,
+                                        const std::function<bool(const Message&)>* check, bool& incompatible) {
   if (_closed.load(std::memory_order_relaxed) || consumer.receiveSealed() ||
       (deadline != SteadyClock::time_point{} && SteadyClock::now() >= deadline)) return {};
   if (started) {
