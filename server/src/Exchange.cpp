@@ -238,10 +238,16 @@ std::string decode(const std::string& value) {
 bool isTemporary(destination::Type type) {
   return type == destination::TemporaryQueue || type == destination::TemporaryTopic;
 }
+
+Poco::Path normalizeRoot(Poco::Path path) {
+  // Resolve the configured root before appending any storage components.
+  const auto absolute = std::filesystem::absolute(path.makeDirectory().toString());
+  return Poco::Path(std::filesystem::weakly_canonical(absolute).string()).makeDirectory();
+}
 }  // namespace
 
 Exchange::Exchange(Poco::Path path)
-    : _path(std::move(path).makeDirectory()),
+    : _path(normalizeRoot(std::move(path))),
       _registryPath(Poco::Path(_path).append("subscriptions-71").makeDirectory()),
       _journal(_path),
       _logger(Poco::Logger::get("tiny_mq.exchange")) {

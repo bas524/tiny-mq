@@ -50,7 +50,7 @@ class LocalTransactionJournal {
     std::optional<Address> deadLetter;
   };
 
-  explicit LocalTransactionJournal(const Poco::Path& root);
+  explicit LocalTransactionJournal(const Poco::Path& normalizedRoot);
   ~LocalTransactionJournal() noexcept;
   bool openDecision(bool create);
   void writeDecisionBytes(const void* bytes, size_t size, uint64_t offset);
@@ -76,7 +76,6 @@ class LocalTransactionJournal {
   std::fstream _decisionFile;
 #else
   int openAttemptDirectory(const Poco::Path& storage, bool create = false) const;
-  std::filesystem::path _configuredRoot;
   int _rootFd = -1;
   int _decisionFd = -1;
 #endif

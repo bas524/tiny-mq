@@ -261,12 +261,10 @@ void observeCommitPreparation(const std::function<void()>* observer) { beforeCom
 }
 #endif
 
-LocalTransactionJournal::LocalTransactionJournal(const Poco::Path& root)
-    : _root(fs::weakly_canonical(fs::absolute(root.toString())))
+LocalTransactionJournal::LocalTransactionJournal(const Poco::Path& normalizedRoot)
+    : _root(normalizedRoot.toString())
 #ifdef _WIN32
       , _decisionPath(_root / "delivery-72" / "decision")
-#else
-      , _configuredRoot(fs::absolute(root.toString()).lexically_normal())
 #endif
 {}
 
@@ -301,9 +299,7 @@ bool LocalTransactionJournal::openDecision(bool create) {
 #ifndef _WIN32
 int LocalTransactionJournal::openAttemptDirectory(const Poco::Path& storage, bool create) const {
   const auto path = fs::absolute(storage.toString()).lexically_normal();
-  auto relative = path.lexically_relative(_configuredRoot);
-  // Replay constructs storage from the resolved Exchange root.
-  if (relative.empty() || *relative.begin() == "..") relative = path.lexically_relative(_root);
+  const auto relative = path.lexically_relative(_root);
   if (relative.empty() || relative == ".") invalid();
   Descriptor parent(openDirectoryPath(_rootFd, relative, !create));
   if (parent.get() < 0) return -1;

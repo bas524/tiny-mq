@@ -1372,6 +1372,19 @@ TEST_F(DeliveryContractTest, CrashAndDeadLetterMatrix) {
   EXPECT_EQ(0, child(retry, "retry-check"));
 
 #ifndef _WIN32
+  {
+    SCOPED_TRACE("configured root symlink");
+    const auto root = fs::path(directory) / "retry-root";
+    const auto alias = fs::path(directory) / "retry-root-alias";
+    fs::create_directories(root);
+    fs::create_directory_symlink(root.filename(), alias);
+    ASSERT_EQ(crashCode, child(alias.string(), "retry-crash", "retry:scheduled"));
+    const auto attempts = retryAttempts(root);
+    ASSERT_EQ(1, std::distance(fs::directory_iterator(attempts), fs::directory_iterator{}));
+    ASSERT_EQ(0, child(alias.string(), "retry-check"));
+    fs::remove(alias);
+    EXPECT_EQ(0, std::distance(fs::directory_iterator(attempts), fs::directory_iterator{}));
+  }
   for (bool linkDirectory : {false, true}) {
     SCOPED_TRACE(linkDirectory ? "attempt-72 directory symlink" : "attempt file symlink");
     const auto path = directory + "linked-retry-" + std::to_string(linkDirectory) + "/";
