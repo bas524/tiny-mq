@@ -1,7 +1,7 @@
 # Кэш vcpkg для разных редакций образа ASan (M-02)
 
 - **Класс:** сопровождение, оснастка GitHub Actions.
-- **Статус:** в работе.
+- **Статус:** исправление проверено в PR №13.
 - **Autonomy Level:** R2, слияние R1.
 - **Заведено:** 2026-11-18 по проверке PR №12.
 - **Owner:** Alexander B.
@@ -42,3 +42,8 @@ GitHub сообщает `Cache restored successfully` в обоих прогон
 ## Evidence
 
 - `handoffs/current/M-02/logs/previous-runners.log`
+
+- Локальная проверка YAML и ключей двух редакций: `handoffs/current/M-02/logs/local-verification.log`.
+- GitHub ASan на образе `20261111.196.1` восстановил 18 пакетов по префиксу,
+  прошёл 172 теста и сохранил кэш с суффиксом `ubuntu26-20261111.196.1`.
+  [Журнал ASan PR №13](https://github.com/bas524/tiny-mq/actions/runs/44318685104/job/134851508789)
