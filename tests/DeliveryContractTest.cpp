@@ -20,6 +20,7 @@
 namespace tiny_mq {
 namespace internal {
 void observeCommitPreparation(const std::function<void()>* observer);
+void observeReceiveWait(const std::function<void()>* observer);
 }
 namespace {
 using namespace std::chrono_literals;
@@ -276,9 +277,8 @@ TEST_F(DeliveryContractTest, ReceiveLifecycle) {
   ASSERT_NE(static_cast<bool>(received), static_cast<bool>(remaining));
   EXPECT_EQ("ready", body(received ? received : remaining));
 
-  // AutoAck checks the body before taking the ready entry. Reentrant receive
-  // must reject admission before waiting on the predicate's own queue lock.
-  auto automatic = session.createConsumer(queue);
+  // Reentrant receive must reject admission while the body check is active.
+  auto automatic = connection.createSession().createConsumer(queue);
   send(session, *producer, "auto checked", Message::NOT_PERSISTENT);
   const auto autoResult = automatic->receiveChecked([&](const Message&) {
     EXPECT_THROW(automatic->receiveNoWait(), IllegalStateException);
@@ -289,6 +289,7 @@ TEST_F(DeliveryContractTest, ReceiveLifecycle) {
 
   auto& competing = connection.createSession();
   auto contender = competing.createConsumer(queue);
+  auto competingProducer = competing.createProducer(queue);
   auto closed = competing.createConsumer(queue);
   closed->close();
 
@@ -308,14 +309,178 @@ TEST_F(DeliveryContractTest, ReceiveLifecycle) {
   send(session, *session.createProducer(side), "listener active", Message::NOT_PERSISTENT);
   ASSERT_EQ(std::future_status::ready, listenerEntered.get_future().wait_for(2s));
 
-  for (auto reliability : {Message::NOT_PERSISTENT, Message::PERSISTENT}) {
-    SCOPED_TRACE(reliability);
-    send(session, *producer, "held", reliability);
-    send(session, *producer, "next", reliability);
+  for (auto mode : {Session::AUTO_ACKNOWLEDGE, Session::DUPS_OK_ACKNOWLEDGE}) {
+    auto holdingConsumer = connection.createSession(mode).createConsumer(queue);
+    for (auto reliability : {Message::NOT_PERSISTENT, Message::PERSISTENT}) {
+      SCOPED_TRACE(testing::Message() << mode << "/" << reliability);
+      send(session, *producer, "held", reliability);
+      std::promise<void> predicateEntered;
+      std::future<ReceiveBodyResult> holding;
+      std::future<void> probe;
+      // Destroy the promise before either future so an early exit releases the predicate.
+      std::promise<void> releasePredicate;
+      const auto predicateRelease = releasePredicate.get_future().share();
+      holding = std::async(std::launch::async, [&, predicateRelease] {
+        return holdingConsumer->receiveChecked([&](const Message& message) {
+          EXPECT_EQ(1, message.jmsHeaders.jmsDeliveryCount());
+          predicateEntered.set_value();
+          predicateRelease.wait();
+          return false;
+        }, 0);
+      });
+      ASSERT_EQ(std::future_status::ready, predicateEntered.get_future().wait_for(2s));
+      probe = std::async(std::launch::async, [&] {
+        EXPECT_FALSE(contender->receiveNoWait());
+        EXPECT_FALSE(contender->recv(0));
+        EXPECT_EQ(ReceiveBodyDisposition::empty, contender->receiveChecked([](const Message&) {
+          ADD_FAILURE() << "predicate ran for a reserved message";
+          return true;
+        }, 0).disposition);
+        EXPECT_THROW(closed->receiveNoWait(), IllegalStateException);
+        EXPECT_THROW(holdingConsumer->receiveNoWait(), IllegalStateException);
+        EXPECT_THROW(listenerPeer->receiveNoWait(), IllegalStateException);
+        const auto since = std::chrono::steady_clock::now();
+        EXPECT_FALSE(contender->receive(20));
+        EXPECT_GE(std::chrono::steady_clock::now() - since, 15ms);
+        send(competing, *competingProducer, "next", reliability);
+        send(competing, *competingProducer, "tail", reliability);
+        const auto mismatch = contender->receiveChecked([](const Message& message) {
+          EXPECT_EQ("next", dynamic_cast<const TextMessage&>(message).text());
+          EXPECT_EQ(1, message.jmsHeaders.jmsDeliveryCount());
+          return false;
+        }, 0);
+        EXPECT_EQ(ReceiveBodyDisposition::incompatible, mismatch.disposition);
+        EXPECT_EQ("next", body(contender->receiveNoWait()));
+      });
+      EXPECT_EQ(std::future_status::ready, probe.wait_for(2s));
+      releasePredicate.set_value();
+      probe.get();
+      const auto mismatch = holding.get();
+      EXPECT_EQ(ReceiveBodyDisposition::incompatible, mismatch.disposition);
+      EXPECT_FALSE(mismatch.message);
+      const auto accepted = holdingConsumer->receiveChecked([](const Message&) { return true; }, 0);
+      EXPECT_EQ(ReceiveBodyDisposition::compatible, accepted.disposition);
+      ASSERT_TRUE(accepted.message);
+      EXPECT_EQ("held", body(accepted.message));
+      EXPECT_EQ(1, accepted.message->jmsHeaders.jmsDeliveryCount());
+      EXPECT_EQ("tail", body(contender->recv(0)));
+      EXPECT_FALSE(contender->receiveNoWait());
+    }
+  }
+  releaseListener.set_value();
+  listening.close();
+
+  {
+    // A waiter already inside waitForClaim must be able to relock at its deadline.
+    auto filtered = competing.createConsumer(queue, "receiveKind = 'other'");
+    auto& waking = connection.createSession();
+    auto awakened = waking.createConsumer(queue);
+    send(session, *producer, "restored after exception");
+    std::promise<void> waitingForRelock, predicateEntered, waitingForRestore;
+    auto relock = waitingForRelock.get_future();
+    std::future<Message::Ptr> timed, restored;
+    std::future<void> holding;
+    std::promise<void> releasePredicate;
+    const auto predicateRelease = releasePredicate.get_future().share();
+    holding = std::async(std::launch::async, [&, predicateRelease] {
+      ASSERT_EQ(std::future_status::ready, relock.wait_for(2s));
+      EXPECT_THROW(automatic->receiveChecked([&](const Message&) -> bool {
+        predicateEntered.set_value();
+        predicateRelease.wait();
+        throw std::runtime_error("body check failed");
+      }, 0), std::runtime_error);
+    });
+    timed = std::async(std::launch::async, [&] {
+      const std::function<void()> observing = [&] { waitingForRelock.set_value(); };
+      internal::observeReceiveWait(&observing);
+      return filtered->receive(20);
+    });
+    ASSERT_EQ(std::future_status::ready, predicateEntered.get_future().wait_for(2s));
+    EXPECT_EQ(std::future_status::ready, timed.wait_for(250ms));
+    // A second waiter can take the original entry when exception cleanup releases it.
+    restored = std::async(std::launch::async, [&] {
+      const std::function<void()> observing = [&] { waitingForRestore.set_value(); };
+      internal::observeReceiveWait(&observing);
+      return awakened->receive(1000);
+    });
+    EXPECT_EQ(std::future_status::ready, waitingForRestore.get_future().wait_for(250ms));
+    releasePredicate.set_value();
+    holding.get();
+    EXPECT_FALSE(timed.get());
+    auto original = restored.get();
+    ASSERT_TRUE(original);
+    EXPECT_EQ("restored after exception", body(original));
+    EXPECT_EQ(1, original->jmsHeaders.jmsDeliveryCount());
+  }
+
+  {
+    auto& recovery = connection.createSession(Session::CLIENT_ACKNOWLEDGE);
+    auto recovering = recovery.createConsumer(queue);
+    auto filtered = competing.createConsumer(queue, "receiveKind = 'other'");
+    producer->send(session.createTextMessage("expires while reserved"), {Message::PERSISTENT, 4, 10, 0});
+    ASSERT_TRUE(recovering->receive(1000));
+    auto selected = session.createTextMessage("selected successor", Message::NOT_PERSISTENT);
+    selected.setStringProperty("receiveKind", "other");
+    producer->send(selected, {Message::NOT_PERSISTENT, 8, 0, 0});
+    producer->send(session.createTextMessage("matching successor"), {Message::PERSISTENT, 9, 0, 0});
+    ASSERT_TRUE(recovering->receive(1000));
+    ASSERT_TRUE(recovering->receive(1000));
+    recovery.recover();
+
     std::promise<void> predicateEntered;
     std::future<ReceiveBodyResult> holding;
     std::future<void> probe;
-    // Destroy the promise before either future so an early exit also releases the predicate.
+    std::promise<void> releasePredicate;
+    const auto predicateRelease = releasePredicate.get_future().share();
+    holding = std::async(std::launch::async, [&, predicateRelease] {
+      return automatic->receiveChecked([&](const Message& message) {
+        EXPECT_EQ("expires while reserved", dynamic_cast<const TextMessage&>(message).text());
+        predicateEntered.set_value();
+        predicateRelease.wait();
+        return true;
+      }, 0);
+    });
+    ASSERT_EQ(std::future_status::ready, predicateEntered.get_future().wait_for(2s));
+    probe = std::async(std::launch::async, [&] {
+      EXPECT_FALSE(contender->receiveNoWait());
+      EXPECT_EQ("selected successor", body(filtered->receiveNoWait()));
+      DeliveryClock::setTestTime(startTime + 10);
+      EXPECT_EQ("matching successor", body(contender->receiveNoWait()));
+    });
+    EXPECT_EQ(std::future_status::ready, probe.wait_for(2s));
+    releasePredicate.set_value();
+    probe.get();
+    EXPECT_EQ(ReceiveBodyDisposition::empty, holding.get().disposition);
+    EXPECT_FALSE(contender->receiveNoWait());
+    DeliveryClock::setTestTime(startTime);
+  }
+
+  {
+    std::promise<void> sideEntered, sidePolled;
+    std::promise<Message::Ptr> restored;
+    Connection subscriber(exchange);
+    std::promise<void> releaseSide;
+    const auto sideRelease = releaseSide.get_future().share();
+    auto& listeningSession = subscriber.createSession();
+    listeningSession.createConsumer(queue)->setMessageListener([&](Message::Ptr message) {
+      restored.set_value(std::move(message));
+    });
+    listeningSession.createConsumer(side)->setMessageListener([&, sideRelease](Message::Ptr message) {
+      if (body(message) == "gate") {
+        sideEntered.set_value();
+        sideRelease.wait();
+      } else {
+        sidePolled.set_value();
+      }
+    });
+    subscriber.start();
+    auto sideProducer = session.createProducer(side);
+    send(session, *sideProducer, "gate", Message::NOT_PERSISTENT);
+    ASSERT_EQ(std::future_status::ready, sideEntered.get_future().wait_for(2s));
+    send(session, *producer, "listener after reservation");
+
+    std::promise<void> predicateEntered;
+    std::future<ReceiveBodyResult> holding;
     std::promise<void> releasePredicate;
     const auto predicateRelease = releasePredicate.get_future().share();
     holding = std::async(std::launch::async, [&, predicateRelease] {
@@ -326,27 +491,17 @@ TEST_F(DeliveryContractTest, ReceiveLifecycle) {
       }, 0);
     });
     ASSERT_EQ(std::future_status::ready, predicateEntered.get_future().wait_for(2s));
-    probe = std::async(std::launch::async, [&] {
-      EXPECT_FALSE(contender->receiveNoWait());
-      EXPECT_FALSE(contender->recv(0));
-      EXPECT_EQ(ReceiveBodyDisposition::empty, contender->receiveChecked([](const Message&) {
-        ADD_FAILURE() << "predicate ran while the ready set was held";
-        return true;
-      }, 0).disposition);
-      EXPECT_THROW(closed->receiveNoWait(), IllegalStateException);
-      EXPECT_THROW(automatic->receiveNoWait(), IllegalStateException);
-      EXPECT_THROW(listenerPeer->receiveNoWait(), IllegalStateException);
-    });
-    EXPECT_EQ(std::future_status::ready, probe.wait_for(2s));
+    send(session, *sideProducer, "marker", Message::NOT_PERSISTENT);
+    releaseSide.set_value();
+    EXPECT_EQ(std::future_status::ready, sidePolled.get_future().wait_for(250ms));
+    auto delivered = restored.get_future();
+    EXPECT_EQ(std::future_status::timeout, delivered.wait_for(0ms));
     releasePredicate.set_value();
-    probe.get();
     EXPECT_EQ(ReceiveBodyDisposition::incompatible, holding.get().disposition);
-    EXPECT_EQ("held", body(contender->receiveNoWait()));
-    EXPECT_EQ("next", body(contender->recv(0)));
-    EXPECT_FALSE(contender->receiveNoWait());
+    ASSERT_EQ(std::future_status::ready, delivered.wait_for(2s));
+    EXPECT_EQ("listener after reservation", body(delivered.get()));
+    subscriber.close();
   }
-  releaseListener.set_value();
-  listening.close();
 
   // A checked client receive runs the predicate outside the ready-set lock.
   // Close must still wait for receive to release the session and its claim.

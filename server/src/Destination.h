@@ -71,6 +71,10 @@ class DeliveryState {
     std::condition_variable_any condition;
     bool signalled{false};
   };
+  struct BodyCheck {
+    const Message* message;
+    Message::Ptr recoveryView;
+  };
 
   void insert(Message::Ptr&& message, bool special);
   void notifyInserted(const Message& message);
@@ -86,10 +90,16 @@ class DeliveryState {
     if (messages.empty()) _nonEmpty &= ~(1u << band);
     return message;
   }
-  Message::Ptr take(const Selector* selector, const std::function<bool(const Message&)>* check,
+  Message::Ptr take(std::unique_lock<DestinationMutex>& lock, const Consumer& consumer,
+                    const std::atomic_bool& started, const std::function<bool(const Message&)>* check,
                     bool& incompatible);
-  Message::Ptr takeMatching(const Selector* selector, const std::function<bool(const Message&)>* check,
+  Message::Ptr takeMatching(std::unique_lock<DestinationMutex>& lock, const Consumer& consumer,
+                            const std::atomic_bool& started, const std::function<bool(const Message&)>* check,
                             bool& incompatible);
+  bool checkReserved(std::unique_lock<DestinationMutex>& lock, const Consumer& consumer,
+                     const std::atomic_bool& started, const std::function<bool(const Message&)>& check,
+                     const Message& message, bool& incompatible);
+  const BodyCheck* reservationFor(const Message& message) const;
   Message::Ptr waitForClaim(std::unique_lock<DestinationMutex>& lock, const Consumer& consumer,
                             std::chrono::steady_clock::time_point deadline, const std::atomic_bool& started,
                             const std::function<bool(const Message&)>* check, bool& incompatible);
@@ -132,10 +142,11 @@ class DeliveryState {
   DestinationMutex _mutex;
   std::array<std::deque<Message::Ptr>, QueueT::kBands> _bands;
   unsigned _nonEmpty{0};
-  size_t _special = 0;
+  size_t _special = 0;  // Publications, recovered entries and active body checks.
   std::atomic_bool _closed{false};
   std::vector<std::shared_ptr<Waiter>> _waiters;
   std::vector<std::weak_ptr<std::atomic_uint64_t>> _listeners;
+  std::vector<BodyCheck> _bodyChecks;
   void notifyListeners();
 };
 

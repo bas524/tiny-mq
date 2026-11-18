@@ -85,7 +85,7 @@ ReceiveBodyResult Consumer::receiveChecked(const std::function<bool(const Messag
     checkContendedReceiveAdmission();
     return false;
   }
-  // A checked receive may be holding the ready-set lock while running its predicate.
+  // Include initial contention on the ready set in a timed receive's budget.
   checkReceiveState();
   DeliveryState::armReceiveTimeout(timeout, deadline);
   lock.lock();

@@ -29,6 +29,15 @@ Message::Ptr makeMessageShell(Message::Type type) {
 }
 }  // namespace
 
+#ifdef ENABLE_TESTS
+namespace internal {
+namespace {
+thread_local const std::function<void()>* beforeReceiveWait = nullptr;
+}
+void observeReceiveWait(const std::function<void()>* observer) { beforeReceiveWait = observer; }
+}  // namespace internal
+#endif
+
 void DeliveryState::armReceiveTimeout(int64_t timeout, ReceiveDeadline& deadline) {
   if (timeout > 0 && deadline == ReceiveDeadline{}) {
     using Micros = std::chrono::microseconds;
@@ -65,26 +74,32 @@ void DeliveryState::insert(Message::Ptr&& message, bool special) {
   }
 }
 
-Message::Ptr DeliveryState::take(const Selector* selector,
-                                     const std::function<bool(const Message&)>* check, bool& incompatible) {
+Message::Ptr DeliveryState::take(std::unique_lock<DestinationMutex>& lock, const Consumer& consumer,
+                                 const std::atomic_bool& started, const std::function<bool(const Message&)>* check,
+                                 bool& incompatible) {
   if (!_nonEmpty) return {};
-  if (selector || check || _special) return takeMatching(selector, check, incompatible);
+  if (consumer._selector || check || _special) return takeMatching(lock, consumer, started, check, incompatible);
   return takeFirst(std::bit_width(_nonEmpty) - 1);
 }
 
-Message::Ptr DeliveryState::takeMatching(const Selector* selector,
-                                         const std::function<bool(const Message&)>* check, bool& incompatible) {
+Message::Ptr DeliveryState::takeMatching(std::unique_lock<DestinationMutex>& lock, const Consumer& consumer,
+                                         const std::atomic_bool& started, const std::function<bool(const Message&)>* check,
+                                         bool& incompatible) {
+  const auto* selector = consumer._selector.get();
   for (unsigned available = _nonEmpty; available != 0;) {
     const auto band = std::bit_width(available) - 1;
     auto& messages = _bands[band];
     auto match = messages.begin();
     while (match != messages.end() &&
-           (!(*match)->isPublished() || (selector && !selector->matches(**match)) ||
+           (reservationFor(**match) || !(*match)->isPublished() || (selector && !selector->matches(**match)) ||
             ((*match)->_recoveryBatch && followsRecoveredDelivery(**match, selector)))) ++match;
     if (match != messages.end()) {
-      if (check && !(*match)->isExpired(DeliveryClock::now()) && !(*check)(**match)) {
-        incompatible = true;
-        return {};
+      if (check && !(*match)->isExpired(DeliveryClock::now())) {
+        // Keep the entry in its original slot and pin it even if close clears the band.
+        const auto candidate = *match;
+        if (!checkReserved(lock, consumer, started, *check, *candidate, incompatible)) return {};
+        // Other claims and insertions may have invalidated the iterator.
+        match = std::find(messages.begin(), messages.end(), candidate);
       }
       auto message = std::move(*match);
       if (match == messages.begin()) messages.pop_front();
@@ -99,14 +114,51 @@ Message::Ptr DeliveryState::takeMatching(const Selector* selector,
   return {};
 }
 
+const DeliveryState::BodyCheck* DeliveryState::reservationFor(const Message& message) const {
+  const auto check = std::ranges::find(_bodyChecks, &message, &BodyCheck::message);
+  return check == _bodyChecks.end() ? nullptr : &*check;
+}
+
+bool DeliveryState::checkReserved(std::unique_lock<DestinationMutex>& lock, const Consumer& consumer,
+                                  const std::atomic_bool& started, const std::function<bool(const Message&)>& check,
+                                  const Message& message, bool& incompatible) {
+  // Recovery can inspect a reserved predecessor's selector headers while the
+  // predicate has access to the message's mutable headers. Selectors only
+  // read the base message, so copying the view needs no virtual call.
+  _bodyChecks.push_back({&message, message._recoveryBatch ? Message::Ptr(new Message(message)) : nullptr});
+  ++_special;
+  const auto release = [&] {
+    lock.lock();
+    std::erase_if(_bodyChecks, [&](const auto& active) { return active.message == &message; });
+    if (!_closed) {
+      --_special;
+      notifyWaiters();
+    }
+  };
+  lock.unlock();
+  bool compatible;
+  try {
+    compatible = check(message);
+  } catch (...) {
+    release();
+    throw;
+  }
+  release();
+  if (_closed || consumer.receiveSealed() || !started) return false;
+  incompatible = !compatible;
+  return compatible;
+}
+
 bool DeliveryState::followsRecoveredDelivery(const Message& message, const Selector* selector) const {
   const auto now = DeliveryClock::now();
   if (message.isExpired(now)) return false;
   for (unsigned available = _nonEmpty; available != 0; available &= available - 1) {
     const auto band = std::countr_zero(available);
     for (const auto& prior : _bands[band]) {
-      if (prior->_recoveryBatch == message._recoveryBatch && prior->_receiveSequence < message._receiveSequence &&
-          prior->isPublished() && !prior->isExpired(now) && (!selector || selector->matches(*prior))) {
+      if (prior->_recoveryBatch != message._recoveryBatch || prior->_receiveSequence >= message._receiveSequence) continue;
+      const auto* reserved = reservationFor(*prior);
+      const auto& view = reserved ? *reserved->recoveryView : *prior;
+      if (view.isPublished() && !view.isExpired(now) && (!selector || selector->matches(view))) {
         return true;
       }
     }
@@ -169,7 +221,8 @@ Message::Ptr DeliveryState::claimLocked(std::unique_lock<DestinationMutex> lock,
   if (_closed.load(std::memory_order_relaxed) || consumer.receiveSealed() ||
       (deadline != SteadyClock::time_point{} && SteadyClock::now() >= deadline)) return {};
   if (started) {
-    if (auto message = take(consumer._selector.get(), check, incompatible)) {
+    if (check) armReceiveTimeout(timeout, deadline);
+    if (auto message = take(lock, consumer, started, check, incompatible)) {
       if (message->jmsHeaders.expiration != 0) armReceiveTimeout(timeout, deadline);
       return message;
     }
@@ -188,11 +241,15 @@ Message::Ptr DeliveryState::waitForClaim(std::unique_lock<DestinationMutex>& loc
   const auto signalled = [&] { return _closed || consumer.receiveSealed() || waiter->signalled; };
   Message::Ptr message;
   try {
+#ifdef ENABLE_TESTS
+    if (const auto* observe = std::exchange(internal::beforeReceiveWait, nullptr)) (*observe)();
+#endif
     while (!_closed && !consumer.receiveSealed()) {
-      waiter->signalled = false;
       if (deadline == SteadyClock::time_point{}) waiter->condition.wait(lock, signalled);
       else if (!waiter->condition.wait_until(lock, deadline, signalled)) break;
-      if (!_closed && !consumer.receiveSealed() && started) message = take(selector, check, incompatible);
+      waiter->signalled = false;
+      if (deadline != SteadyClock::time_point{} && SteadyClock::now() >= deadline) break;
+      if (!_closed && !consumer.receiveSealed() && started) message = take(lock, consumer, started, check, incompatible);
       if (message || incompatible) break;
     }
   } catch (...) {
@@ -211,7 +268,8 @@ std::vector<Message::Ptr> DeliveryState::snapshot(const Selector* selector) {
   bool recovered = false;
   for (auto band = _bands.rbegin(); band != _bands.rend(); ++band) {
     for (const auto& message : *band) {
-      if (message->isPublished() && !message->isExpired(now) && (!selector || selector->matches(*message))) {
+      if (!reservationFor(*message) && message->isPublished() && !message->isExpired(now) &&
+          (!selector || selector->matches(*message))) {
         recovered |= message->_recoveryBatch != 0;
         messages.push_back(message->copy());
       }
