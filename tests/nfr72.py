@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """REQ-72-9: NfrGateTest.DeliveryHotPathBudget."""
 import argparse
+import os
 from pathlib import Path
 import statistics
 import subprocess
@@ -23,6 +24,48 @@ PROFILES = (
 )
 
 
+def one_cpu_per_core(inherited, cpu_root):
+    topology = {}
+    for cpu in inherited:
+        siblings = set()
+        path = cpu_root / f"cpu{cpu}" / "topology" / "thread_siblings_list"
+        for span in path.read_text().strip().split(","):
+            first, _, last = span.partition("-")
+            lo, hi = int(first), int(last or first)
+            if lo < 0 or hi < lo:
+                raise ValueError(f"invalid CPU range in {path}")
+            siblings.update(other for other in inherited if lo <= other <= hi)
+        topology[cpu] = frozenset(siblings)
+
+    if any(cpu not in siblings or any(topology[other] != siblings for other in siblings)
+           for cpu, siblings in topology.items()):
+        raise ValueError("inconsistent CPU sibling topology")
+    selected = {min(siblings) for siblings in topology.values()}
+    return selected if len(selected) >= 2 else inherited
+
+
+def configure_cpu_affinity(cpu_root=Path("/sys/devices/system/cpu")):
+    try:
+        inherited = os.sched_getaffinity(0)
+    except (AttributeError, OSError) as error:
+        print(f"CPU affinity: inherited=unavailable effective=unavailable ({error})", flush=True)
+        return
+
+    effective = inherited
+    try:
+        if len(inherited) >= 2:
+            selected = one_cpu_per_core(inherited, cpu_root)
+            if selected != inherited:
+                # Both binaries and their worker threads inherit this mask.
+                os.sched_setaffinity(0, selected)
+                effective = None
+                effective = os.sched_getaffinity(0)
+    except (AttributeError, OSError, ValueError) as error:
+        print(f"CPU affinity: {error}", flush=True)
+    reported = sorted(effective) if effective is not None else "unavailable"
+    print(f"CPU affinity: inherited={sorted(inherited)} effective={reported}", flush=True)
+
+
 def registrations(binary):
     output = subprocess.check_output(
         [str(binary.resolve()), "--gbench", "--benchmark_list_tests"], text=True
@@ -40,6 +83,7 @@ def main():
     if args.baseline.resolve() == args.candidate.resolve():
         parser.error("baseline and candidate must be separate binaries")
     args.out.mkdir(parents=True, exist_ok=True)
+    configure_cpu_affinity()
 
     print("[REQ-71-7] NfrGateTest.DestinationHotPathBudget", flush=True)
     print("[REQ-72-9] NfrGateTest.DeliveryHotPathBudget", flush=True)

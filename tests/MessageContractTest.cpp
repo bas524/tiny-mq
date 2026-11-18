@@ -257,8 +257,17 @@ TEST_F(MessageContractTest, BodyRoundTrip) {
     }
   }
 
+  text.jmsHeaders.messageId = "ID:01234567-89ab-cdef-0123-456789abcdef";
+  auto first = text.copy();
+  std::weak_ptr<Message> expiredCopy = first;
+  first.reset();
+  auto crossThread = text.copy();
+  EXPECT_TRUE(expiredCopy.expired());
+  EXPECT_EQ(crossThread->jmsHeaders.messageId, text.jmsHeaders.messageId);
+
+  std::string copiedAfterWeakRelease;
   std::string copiedAtThreadExit;
-  std::thread worker([&] {
+  std::thread worker([&, crossThread = std::move(crossThread), expiredCopy = std::move(expiredCopy)]() mutable {
     struct LateCopy {
       const TextMessage& source;
       std::string& result;
@@ -268,8 +277,12 @@ TEST_F(MessageContractTest, BodyRoundTrip) {
     thread_local LateCopy lateCopy{text, copiedAtThreadExit};
     (void)lateCopy;
     auto firstCopy = text.copy();
+    expiredCopy.reset();  // Return the first copy's block on a different thread.
+    crossThread.reset();
+    copiedAfterWeakRelease = Message::As<TextMessage>(text.copy())->text();
   });
   worker.join();
+  EXPECT_EQ(copiedAfterWeakRelease, originalText);
   EXPECT_EQ(copiedAtThreadExit, originalText);
 }
 
