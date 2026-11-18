@@ -44,6 +44,9 @@ class Consumer {
            std::shared_ptr<Selector> selector = {}, bool durable = false);
   void checkReceiveState() const;
   void checkReceiveAdmission() const;
+  void checkContendedReceiveAdmission();
+  bool lockContendedReceive(std::unique_lock<DestinationMutex>& lock, int64_t timeout,
+                            std::chrono::steady_clock::time_point& deadline);
   template<bool listener, bool checked>
   Message::Ptr receiveImpl(int64_t timeout, std::chrono::steady_clock::time_point deadline,
                            std::unique_lock<DestinationMutex> lock, const std::function<bool(const Message&)>* predicate,
@@ -53,6 +56,7 @@ class Consumer {
   void unlink(const Message& message);
   void redeliver(const Message& message, uint64_t batch = 0);
   void finishSession() noexcept;
+  void clearSession() noexcept;
   void clearInFlight() noexcept;
   void flushPendingAcks();
   bool hasClaims() const;
@@ -61,6 +65,7 @@ class Consumer {
   }
   enum ReceiveState : uint32_t { receiveIdle, receiveActive, closeWaiting };
   enum class CloseState : uint8_t { open, closing, closed };
+  static constexpr uint32_t admissionSealed = uint32_t{1} << 31;
   bool receiveSealed() const { return _closeState.load(std::memory_order_acquire) != CloseState::open; }
   bool isClosed() const { return _closeState.load(std::memory_order_acquire) == CloseState::closed; }
   linear_storage::Record record(const Message& message) const;
@@ -90,6 +95,7 @@ class Consumer {
   Message* _inFlightTail{nullptr};
   bool _durable;
   bool _countClaims;
+  std::atomic_uint32_t _receiveAdmissionPins{0};
 
   friend class Destination;
   friend class DeliveryState;

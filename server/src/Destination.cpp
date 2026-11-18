@@ -151,8 +151,16 @@ void DeliveryState::notifyListeners() {
 
 Message::Ptr DeliveryState::claim(const Consumer& consumer, int64_t timeout,
                                   SteadyClock::time_point& deadline, const std::atomic_bool& started,
-                                  const std::function<bool(const Message&)>* check, bool& incompatible) {
-  return claimLocked(lockForClaim(timeout, deadline), consumer, timeout, deadline, started, check, incompatible);
+                                  const std::function<bool(const Message&)>* check, bool& incompatible,
+                                  bool noWaitForLock) {
+  std::unique_lock lock(_mutex, std::try_to_lock);
+  if (!lock.owns_lock()) [[unlikely]] {
+    // Listener dispatch must inspect readiness after a notification even when the lock is busy.
+    if (noWaitForLock) return {};
+    armReceiveTimeout(timeout, deadline);
+    lock.lock();
+  }
+  return claimLocked(std::move(lock), consumer, timeout, deadline, started, check, incompatible);
 }
 
 Message::Ptr DeliveryState::claimLocked(std::unique_lock<DestinationMutex> lock, const Consumer& consumer,

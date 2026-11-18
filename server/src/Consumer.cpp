@@ -39,7 +39,10 @@ Message::Ptr Consumer::receive(int64_t timeout) {
 
 Message::Ptr Consumer::recv(int64_t usec_timeout) {
   std::chrono::steady_clock::time_point deadline;
-  auto lock = _queue->lockForClaim(usec_timeout, deadline, this);
+  std::unique_lock lock(_queue->_mutex, std::try_to_lock);
+  if (!lock.owns_lock()) [[unlikely]] {
+    if (!lockContendedReceive(lock, usec_timeout, deadline)) return {};
+  }
   checkReceiveAdmission();
   auto& session = *_session;
   const auto mode = session.acknowledgeMode();
@@ -66,11 +69,43 @@ Message::Ptr Consumer::recv(int64_t usec_timeout) {
 ReceiveBodyResult Consumer::receiveChecked(const std::function<bool(const Message&)>& predicate, int64_t timeout) {
   if (!predicate) throw std::invalid_argument("receive body predicate is empty");
   std::chrono::steady_clock::time_point deadline;
-  auto lock = _queue->lockForClaim(timeout, deadline, this);
+  std::unique_lock lock(_queue->_mutex, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    if (!lockContendedReceive(lock, timeout, deadline)) return {};
+  }
   checkReceiveAdmission();
   ReceiveBodyResult result;
   result.message = receiveImpl<false, true>(timeout, deadline, std::move(lock), &predicate, &result.disposition);
   return result;
+}
+
+[[gnu::noinline]] bool Consumer::lockContendedReceive(std::unique_lock<DestinationMutex>& lock, int64_t timeout,
+                                                      std::chrono::steady_clock::time_point& deadline) {
+  if (timeout == 0) {
+    checkContendedReceiveAdmission();
+    return false;
+  }
+  // A checked receive may be holding the ready-set lock while running its predicate.
+  checkReceiveState();
+  DeliveryState::armReceiveTimeout(timeout, deadline);
+  lock.lock();
+  return true;
+}
+
+void Consumer::checkContendedReceiveAdmission() {
+  // Pin the session pointer for the admission check when the ready-set lock is busy.
+  auto pins = _receiveAdmissionPins.load(std::memory_order_relaxed);
+  do {
+    if (pins & admissionSealed) throw IllegalStateException("consumer is closed");
+  } while (!_receiveAdmissionPins.compare_exchange_weak(pins, pins + 1, std::memory_order_acquire,
+                                                        std::memory_order_relaxed));
+  struct AdmissionPin {
+    std::atomic_uint32_t& pins;
+    ~AdmissionPin() {
+      if (pins.fetch_sub(1, std::memory_order_release) == (admissionSealed | 1)) pins.notify_one();
+    }
+  } pin{_receiveAdmissionPins};
+  checkReceiveAdmission();
 }
 
 void Consumer::checkReceiveState() const {
@@ -81,7 +116,7 @@ void Consumer::checkReceiveState() const {
 }
 
 void Consumer::checkReceiveAdmission() const {
-  // Close seals admission, then takes this lock before clearing the session.
+  // Callers hold the ready-set lock or an admission pin.
   checkReceiveState();
   if (_session->_closing.load(std::memory_order_acquire)) [[unlikely]] _session->ensureOpen();
   if (_session->_dispatch.hasListeners()) [[unlikely]] throw IllegalStateException("session has message listeners");
@@ -125,7 +160,7 @@ Message::Ptr Consumer::receiveImpl(int64_t timeout, std::chrono::steady_clock::t
   for (;;) {
     auto message = lock.owns_lock()
         ? _queue->claimLocked(std::move(lock), *this, timeout, deadline, started, readyCheck, incompatible)
-        : _queue->claim(*this, timeout, deadline, started, readyCheck, incompatible);
+        : _queue->claim(*this, timeout, deadline, started, readyCheck, incompatible, !listener && timeout == 0);
     if constexpr (checked) {
       if (incompatible) {
         *disposition = ReceiveBodyDisposition::incompatible;
@@ -319,11 +354,20 @@ void Consumer::finishSession() noexcept {
     poco_error(_logger.get(), "consumer teardown failed");
   }
   _closeState.store(CloseState::closed);
-  _session = nullptr;
+  clearSession();
   if (_durable) _queue->pending -= _transacted.size() + _pendingAcks;
   _transacted.clear();
   _storedTransacted = 0;
   clearInFlight();
+}
+
+void Consumer::clearSession() noexcept {
+  auto pins = _receiveAdmissionPins.fetch_or(admissionSealed, std::memory_order_acq_rel) | admissionSealed;
+  while (pins != admissionSealed) {
+    _receiveAdmissionPins.wait(pins, std::memory_order_acquire);
+    pins = _receiveAdmissionPins.load(std::memory_order_acquire);
+  }
+  _session = nullptr;
 }
 
 void Consumer::clearInFlight() noexcept {

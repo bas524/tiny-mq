@@ -672,7 +672,7 @@ TEST_F(DestinationContractTest, BrowseWithoutClaim) {
   });
   std::jthread consuming([&] {
     start.arrive_and_wait();
-    auto removed = text(excluded);
+    auto removed = text(excluded, 1'000'000);
     ASSERT_NE(removed, nullptr);
     EXPECT_EQ(removed->text(), "unmatched");
     excluded->acknowledgeOn(*removed);

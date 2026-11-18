@@ -287,6 +287,67 @@ TEST_F(DeliveryContractTest, ReceiveLifecycle) {
   });
   EXPECT_EQ("auto checked", body(autoResult.message));
 
+  auto& competing = connection.createSession();
+  auto contender = competing.createConsumer(queue);
+  auto closed = competing.createConsumer(queue);
+  closed->close();
+
+  std::promise<void> listenerEntered;
+  Connection listening(exchange);
+  std::promise<void> releaseListener;
+  auto& listenerSession = listening.createSession();
+  auto listenerPeer = listenerSession.createConsumer(queue);
+  auto side = session.createDestination(destination::Queue, "receive-listener");
+  auto listener = listenerSession.createConsumer(side);
+  const auto listenerRelease = releaseListener.get_future().share();
+  listener->setMessageListener([&listenerEntered, listenerRelease](Message::Ptr) {
+    listenerEntered.set_value();
+    listenerRelease.wait();
+  });
+  listening.start();
+  send(session, *session.createProducer(side), "listener active", Message::NOT_PERSISTENT);
+  ASSERT_EQ(std::future_status::ready, listenerEntered.get_future().wait_for(2s));
+
+  for (auto reliability : {Message::NOT_PERSISTENT, Message::PERSISTENT}) {
+    SCOPED_TRACE(reliability);
+    send(session, *producer, "held", reliability);
+    send(session, *producer, "next", reliability);
+    std::promise<void> predicateEntered;
+    std::future<ReceiveBodyResult> holding;
+    std::future<void> probe;
+    // Destroy the promise before either future so an early exit also releases the predicate.
+    std::promise<void> releasePredicate;
+    const auto predicateRelease = releasePredicate.get_future().share();
+    holding = std::async(std::launch::async, [&, predicateRelease] {
+      return automatic->receiveChecked([&](const Message&) {
+        predicateEntered.set_value();
+        predicateRelease.wait();
+        return false;
+      }, 0);
+    });
+    ASSERT_EQ(std::future_status::ready, predicateEntered.get_future().wait_for(2s));
+    probe = std::async(std::launch::async, [&] {
+      EXPECT_FALSE(contender->receiveNoWait());
+      EXPECT_FALSE(contender->recv(0));
+      EXPECT_EQ(ReceiveBodyDisposition::empty, contender->receiveChecked([](const Message&) {
+        ADD_FAILURE() << "predicate ran while the ready set was held";
+        return true;
+      }, 0).disposition);
+      EXPECT_THROW(closed->receiveNoWait(), IllegalStateException);
+      EXPECT_THROW(automatic->receiveNoWait(), IllegalStateException);
+      EXPECT_THROW(listenerPeer->receiveNoWait(), IllegalStateException);
+    });
+    EXPECT_EQ(std::future_status::ready, probe.wait_for(2s));
+    releasePredicate.set_value();
+    probe.get();
+    EXPECT_EQ(ReceiveBodyDisposition::incompatible, holding.get().disposition);
+    EXPECT_EQ("held", body(contender->receiveNoWait()));
+    EXPECT_EQ("next", body(contender->recv(0)));
+    EXPECT_FALSE(contender->receiveNoWait());
+  }
+  releaseListener.set_value();
+  listening.close();
+
   // A checked client receive runs the predicate outside the ready-set lock.
   // Close must still wait for receive to release the session and its claim.
   auto& client = connection.createSession(Session::CLIENT_ACKNOWLEDGE);
@@ -412,6 +473,50 @@ TEST_F(DeliveryContractTest, ListenerModeMatrix) {
     EXPECT_FALSE(inspector->receiveNoWait());
   }
 
+  for (auto mode : {Session::AUTO_ACKNOWLEDGE, Session::DUPS_OK_ACKNOWLEDGE}) {
+    for (auto reliability : {Message::PERSISTENT, Message::NOT_PERSISTENT}) {
+      SCOPED_TRACE(testing::Message() << mode << "/" << reliability);
+      DeliveryClock::setTestTime(startTime);
+      std::promise<void> first, retried;
+      auto firstCall = first.get_future();
+      auto retryCall = retried.get_future();
+      int calls = 0;
+      Exchange exchange(directory);
+      Connection connection(exchange);
+      auto& session = connection.createSession(mode);
+      auto& sender = connection.createSession();
+      auto queue = session.createDestination(destination::Queue, "listener-backoff-" + std::to_string(mode));
+      queue->setRedeliveryPolicy({1, 50, 50, {}});
+      auto consumer = session.createConsumer(queue);
+      consumer->setMessageListener([&](Message::Ptr message) {
+        EXPECT_EQ("configured retry", body(message));
+        EXPECT_EQ(reliability, message->reliability);
+        if (++calls == 1) {
+          EXPECT_FALSE(message->jmsHeaders.redelivered);
+          EXPECT_EQ(1, message->jmsHeaders.jmsDeliveryCount());
+          first.set_value();
+          throw std::runtime_error("retry with configured backoff");
+        }
+        EXPECT_TRUE(message->jmsHeaders.redelivered);
+        EXPECT_EQ(2, message->jmsHeaders.jmsDeliveryCount());
+        retried.set_value();
+      });
+      connection.start();
+      send(sender, *sender.createProducer(queue), "configured retry", reliability);
+      ASSERT_EQ(std::future_status::ready, firstCall.wait_for(2s));
+      connection.stop();
+      DeliveryClock::setTestTime(startTime + 49);
+      connection.start();
+      EXPECT_EQ(std::future_status::timeout, retryCall.wait_for(15ms));
+      DeliveryClock::setTestTime(startTime + 50);
+      ASSERT_EQ(std::future_status::ready, retryCall.wait_for(2s));
+      session.close();
+      EXPECT_EQ(2, calls);
+      EXPECT_FALSE(sender.createConsumer(queue)->receiveNoWait());
+    }
+  }
+  DeliveryClock::setTestTime(startTime);
+
   for (int operation : {0, 1, 2}) {
     Exchange exchange(directory);
     Connection connection(exchange);
@@ -452,7 +557,14 @@ TEST_F(DeliveryContractTest, ListenerModeMatrix) {
 
 // REQ-72-4
 TEST_F(DeliveryContractTest, AsyncSendBarriers) {
-  for (bool transacted : {false, true}) {
+  for (const auto& [transacted, reliability] : {std::pair{false, Message::PERSISTENT},
+                                                std::pair{false, Message::NOT_PERSISTENT},
+                                                std::pair{true, Message::PERSISTENT},
+                                                std::pair{true, Message::NOT_PERSISTENT}}) {
+    SCOPED_TRACE(testing::Message() << transacted << "/" << reliability);
+    DeliveryClock::setTestTime(startTime);
+    std::promise<void> entered;
+    std::vector<int> completions;
     Exchange exchange(directory);
     Connection connection(exchange);
     connection.start();
@@ -462,12 +574,12 @@ TEST_F(DeliveryContractTest, AsyncSendBarriers) {
     auto producer = session.createProducer(queue);
     auto other = session.createProducer(queue);
     auto reader = viewer.createConsumer(queue);
-    std::promise<void> entered;
-    std::latch release(1);
-    std::vector<int> completions;
-    auto first = session.createTextMessage("first", Message::PERSISTENT);
+    std::future<void> barrier;
+    std::promise<void> release;
+    const auto completionRelease = release.get_future().share();
+    auto first = session.createTextMessage("first", reliability);
     const auto caller = std::this_thread::get_id();
-    producer->sendAsync(first, [&](const SendCompletion& result) {
+    producer->sendAsync(first, [&, caller, completionRelease, producer](const SendCompletion& result) {
       EXPECT_NE(caller, std::this_thread::get_id());
       EXPECT_TRUE(result.headers);
       EXPECT_FALSE(result.error);
@@ -481,15 +593,41 @@ TEST_F(DeliveryContractTest, AsyncSendBarriers) {
       EXPECT_THROW(session.rollback(), IllegalStateException);
       completions.push_back(1);
       entered.set_value();
-      release.wait();
+      completionRelease.wait();
       throw std::runtime_error("ignored by completion executor");
     });
-    send(session, *other, "sync", Message::PERSISTENT);
-    auto last = session.createTextMessage("last", Message::PERSISTENT);
-    producer->sendAsync(last, [&](const SendCompletion& result) {
-      EXPECT_TRUE(result.headers);
+    send(session, *other, "sync", reliability);
+    const auto differentMode = reliability == Message::PERSISTENT ? Message::NOT_PERSISTENT : Message::PERSISTENT;
+    auto last = session.createTextMessage("last", differentMode);
+    last.jmsHeaders.setCorrelationId(std::string("accepted"));
+    const auto acceptedId = "ID:" + last.uuid.toString();
+    const auto checkSnapshot = [acceptedId](const Message::Headers& headers) {
+      EXPECT_EQ(acceptedId, headers.messageId);
+      EXPECT_EQ(startTime, headers.timestamp);
+      EXPECT_EQ(startTime + 80, headers.expiration);
+      EXPECT_EQ(startTime + 20, headers.deliveryTime);
+      EXPECT_EQ(8, headers.priority);
+      EXPECT_EQ("accepted", headers.correlationId);
+      EXPECT_FALSE(headers.redelivered);
+      EXPECT_EQ(1, headers.jmsDeliveryCount());
+    };
+    producer->setDefault({differentMode, 2, 15, 0});
+    producer->sendAsync(last, {reliability, 8, 80, 20}, [&, checkSnapshot](const SendCompletion& result) {
+      EXPECT_FALSE(result.error);
+      if (result.headers) {
+        checkSnapshot(*result.headers);
+      } else {
+        ADD_FAILURE() << "accepted explicit options send has no header snapshot";
+      }
       completions.push_back(2);
     });
+    last.jmsHeaders.messageId = "changed after acceptance";
+    last.jmsHeaders.setCorrelationId(std::string("changed"));
+    last.jmsHeaders.timestamp = startTime + 1;
+    last.jmsHeaders.expiration = startTime + 1;
+    last.jmsHeaders.deliveryTime = startTime + 1;
+    last.jmsHeaders.priority = 1;
+    last.reliability = differentMode;
     {
       Injection inject("TINY_MQ_TEST_SEND_ERROR");
       other->sendAsync(session.createTextMessage("late"), [&](const SendCompletion& result) {
@@ -501,12 +639,9 @@ TEST_F(DeliveryContractTest, AsyncSendBarriers) {
     EXPECT_THROW(other->sendAsync(last, {Message::PERSISTENT, -1, 0, 0},
                                  [&](const auto&) { ADD_FAILURE() << "unexpected callback"; }),
                  std::invalid_argument);
-    if (entered.get_future().wait_for(2s) != std::future_status::ready) {
-      release.count_down();
-      FAIL() << "completion did not start";
-    }
+    ASSERT_EQ(std::future_status::ready, entered.get_future().wait_for(2s));
 
-    auto barrier = std::async(std::launch::async, [&] {
+    barrier = std::async(std::launch::async, [&] {
       if (transacted) {
         session.commit();
       } else {
@@ -517,13 +652,20 @@ TEST_F(DeliveryContractTest, AsyncSendBarriers) {
     if (transacted) {
       EXPECT_FALSE(reader->receiveNoWait());
     }
-    release.count_down();
+    DeliveryClock::setTestTime(startTime + 19);
+    release.set_value();
     barrier.get();
     other->close();
     EXPECT_EQ((std::vector<int>{1, 2, 3}), completions);
     EXPECT_EQ("first", body(reader->receiveNoWait()));
     EXPECT_EQ("sync", body(reader->receiveNoWait()));
-    EXPECT_EQ("last", body(reader->receiveNoWait()));
+    EXPECT_FALSE(reader->receiveNoWait());
+    DeliveryClock::setTestTime(startTime + 20);
+    const auto delivered = reader->receive(1000);
+    ASSERT_TRUE(delivered);
+    EXPECT_EQ("last", body(delivered));
+    EXPECT_EQ(reliability, delivered->reliability);
+    checkSnapshot(delivered->jmsHeaders);
     EXPECT_FALSE(reader->receiveNoWait());
 
     auto pending = session.createProducer(queue);
@@ -687,6 +829,14 @@ TEST_F(DeliveryContractTest, AcknowledgeAndRecoverMatrix) {
   EXPECT_EQ(2, headers.jmsDeliveryCount());
   headers.deliveryCount = INT32_MAX;
   EXPECT_EQ(INT32_MAX, headers.jmsDeliveryCount());
+
+  for (const auto* mode : {"client", "dups-ok", "transacted"}) {
+    SCOPED_TRACE(mode);
+    const auto path = directory + mode + "/";
+    ASSERT_EQ(crashCode, child(path, std::string("ack-mode-") + mode, "ack:after-claim"));
+    ASSERT_EQ(0, child(path, "ack-mode-replay"));
+    EXPECT_EQ(0, child(path, "ack-mode-empty"));
+  }
 }
 
 struct TransactionFixture {
@@ -892,11 +1042,62 @@ TEST_F(DeliveryContractTest, AtomicConsumeAndSend) {
 #endif
 }
 
+void ackModeCrash(Connection& connection, Session& sender, const Destination::Ptr& queue,
+                  std::string_view scenario) {
+  if (scenario == "replay" || scenario == "empty") {
+    auto consumer = sender.createConsumer(queue);
+    if (scenario == "replay") {
+      const auto replayed = consumer->receiveNoWait();
+      require(body(replayed) == "unconfirmed persistent", "wrong delivery replayed after claim crash");
+      require(replayed->isPersistent() && replayed->jmsHeaders.redelivered &&
+              replayed->jmsHeaders.jmsDeliveryCount() == 2, "wrong persistent replay attempt");
+    }
+    require(!consumer->receiveNoWait(), "confirmed, non-persistent or duplicate delivery replayed");
+    return;
+  }
+
+  const bool client = scenario == "client";
+  const bool dups = scenario == "dups-ok";
+  require(client || dups || scenario == "transacted", "unknown acknowledgment crash mode");
+  auto& session = connection.createSession(client ? Session::CLIENT_ACKNOWLEDGE :
+                                          dups ? Session::DUPS_OK_ACKNOWLEDGE : Session::SESSION_TRANSACTED);
+  auto consumer = session.createConsumer(queue);
+  auto producer = sender.createProducer(queue);
+  send(sender, *producer, "confirmed", Message::PERSISTENT);
+  require(body(consumer->receiveNoWait()) == "confirmed", "cannot claim baseline delivery");
+  if (client) {
+    session.acknowledge();
+  } else if (dups) {
+    consumer->close();
+    consumer = session.createConsumer(queue);
+  } else {
+    session.commit();
+  }
+
+  send(sender, *producer, "unconfirmed persistent", Message::PERSISTENT);
+  send(sender, *producer, "unconfirmed volatile", Message::NOT_PERSISTENT);
+  const auto claimed = consumer->receiveNoWait();
+  require(body(claimed) == "unconfirmed persistent" && claimed->isPersistent() &&
+          !claimed->jmsHeaders.redelivered && claimed->jmsHeaders.jmsDeliveryCount() == 1,
+          "cannot claim first persistent attempt before crash");
+  const auto volatileClaim = session.createConsumer(queue)->receiveNoWait();
+  require(body(volatileClaim) == "unconfirmed volatile" && !volatileClaim->isPersistent() &&
+          !volatileClaim->jmsHeaders.redelivered && volatileClaim->jmsHeaders.jmsDeliveryCount() == 1,
+          "cannot claim first non-persistent attempt before crash");
+  require(Poco::Environment::get("TINY_MQ_TEST_CRASH", "") == "ack:after-claim", "missing after-claim crash point");
+  std::_Exit(crashCode);
+}
+
 void ackCrash(const std::string& directory, std::string_view scenario) {
   Exchange exchange(directory);
   Connection connection(exchange);
   auto& session = connection.createSession();
   const auto queue = session.createDestination(destination::Queue, "ack");
+  if (scenario.starts_with("ack-mode-")) {
+    connection.start();
+    ackModeCrash(connection, session, queue, scenario.substr(std::string_view("ack-mode-").size()));
+    return;
+  }
   const auto topic = session.createDestination(destination::Topic, "ack-topic");
   auto durable = session.createSharedDurableConsumer(topic, "ack-durable");
   auto consumer = session.createConsumer(queue);

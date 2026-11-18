@@ -53,7 +53,7 @@ class DeliveryState {
   void enqueue(Message::Ptr message);
   Message::Ptr claim(const Consumer& consumer, int64_t timeout, std::chrono::steady_clock::time_point& deadline,
                      const std::atomic_bool& started,
-                     const std::function<bool(const Message&)>* check, bool& incompatible);
+                     const std::function<bool(const Message&)>* check, bool& incompatible, bool noWaitForLock);
   std::vector<Message::Ptr> snapshot(const Selector* selector);
   void close();
   bool isClosed() const { return _closed.load(std::memory_order_acquire); }
@@ -76,17 +76,6 @@ class DeliveryState {
   void notifyInserted(const Message& message);
   using ReceiveDeadline = std::chrono::steady_clock::time_point;
   static void armReceiveTimeout(int64_t timeout, ReceiveDeadline& deadline);
-  std::unique_lock<DestinationMutex> lockForClaim(int64_t timeout, ReceiveDeadline& deadline,
-                                                  const Consumer* admitting = nullptr) {
-    std::unique_lock lock(_mutex, std::try_to_lock);
-    if (!lock.owns_lock()) [[unlikely]] {
-      // An active checked receive may be running its predicate under this lock.
-      if (admitting) admitting->checkReceiveState();
-      armReceiveTimeout(timeout, deadline);
-      lock.lock();
-    }
-    return lock;
-  }
   Message::Ptr claimLocked(std::unique_lock<DestinationMutex> lock, const Consumer& consumer, int64_t timeout,
                           ReceiveDeadline& deadline, const std::atomic_bool& started,
                           const std::function<bool(const Message&)>* check, bool& incompatible);

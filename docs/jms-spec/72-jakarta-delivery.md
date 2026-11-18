@@ -2,8 +2,8 @@
 
 Класс K1. Предложение к обсуждению и критике; критерии ниже описывают будущую реализацию.
 
-Version: 0.4
-Review Date: 2026-11-16
+Version: 0.5
+Review Date: 2026-11-18
 Examples: `DeliveryContractTest.SendClockMatrix` в критериях приёмки.
 Machine Readability: Markdown, ID требований, Scenario, Test и таблица Entity inventory.
 Cross References: [INT-01](../../requirements/intents/INT-01-jakarta-messaging.md), [Jakarta Messaging 3.1](https://jakarta.ee/specifications/messaging/3.1/jakarta-messaging-spec-3.1.html), [Javadoc 3.1](https://jakarta.ee/specifications/platform/10/apidocs/jakarta/jms/package-summary.html).
@@ -110,6 +110,8 @@ durable-подписки, и не воскрешает подтверждённ�
 | E26 | method | `Consumer::receiveChecked` | Результат проверки тела, REQ-72-5 |
 | E27 | type | `ReceiveBodyResult` | Исход проверки и сообщение при успехе, REQ-72-5 |
 | E28 | method | `Session::acknowledge()` | Доступ адаптера к квитированию сессии, REQ-72-5 |
+| E29 | storage-field | `linear_storage::Header::attempt` | Фаза первой persistent попытки в помеченном томе, REQ-72-5 и REQ-72-7, ADR-0010 |
+| E30 | storage-field | `<номер тома>.delivery-72` | Признак использования E29 в соответствующем томе, REQ-72-7, ADR-0010 |
 
 ## Acceptance Criteria
 
