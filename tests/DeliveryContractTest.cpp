@@ -548,9 +548,18 @@ TEST_F(DeliveryContractTest, ReceiveLifecycle) {
 
 // REQ-72-3
 TEST_F(DeliveryContractTest, ListenerModeMatrix) {
-  for (auto mode : {Session::AUTO_ACKNOWLEDGE, Session::CLIENT_ACKNOWLEDGE,
-                   Session::DUPS_OK_ACKNOWLEDGE, Session::SESSION_TRANSACTED}) {
-    SCOPED_TRACE(mode);
+  for (const auto& [mode, reliability] : {std::pair{Session::AUTO_ACKNOWLEDGE, Message::PERSISTENT},
+                                          std::pair{Session::DUPS_OK_ACKNOWLEDGE, Message::PERSISTENT},
+                                          std::pair{Session::CLIENT_ACKNOWLEDGE, Message::PERSISTENT},
+                                          std::pair{Session::CLIENT_ACKNOWLEDGE, Message::NOT_PERSISTENT},
+                                          std::pair{Session::SESSION_TRANSACTED, Message::PERSISTENT},
+                                          std::pair{Session::SESSION_TRANSACTED, Message::NOT_PERSISTENT}}) {
+    SCOPED_TRACE(testing::Message() << mode << "/" << reliability);
+    std::promise<void> began, second, sideDelivery;
+    std::latch release(1);
+    std::atomic<int> active = 0;
+    std::atomic<int> calls = 0;
+    const bool immediateRetry = mode == Session::AUTO_ACKNOWLEDGE || mode == Session::DUPS_OK_ACKNOWLEDGE;
     Exchange exchange(directory);
     Connection connection(exchange);
     auto& session = connection.createSession(mode);
@@ -562,16 +571,14 @@ TEST_F(DeliveryContractTest, ListenerModeMatrix) {
     auto companion = sender.createProducer(side);
     auto consumer = session.createConsumer(queue);
     auto other = session.createConsumer(side);
-    std::promise<void> began, second, sideDelivery;
-    std::latch release(1);
-    std::atomic<int> active = 0;
-    std::atomic<int> calls = 0;
-    const bool immediateRetry = mode == Session::AUTO_ACKNOWLEDGE || mode == Session::DUPS_OK_ACKNOWLEDGE;
     consumer->setMessageListener([&](Message::Ptr message) {
       const auto concurrent = active.fetch_add(1);
       EXPECT_EQ(0, concurrent);
       const auto call = ++calls;
       if (call == 1) {
+        EXPECT_EQ("first", body(message));
+        EXPECT_EQ(reliability, message->reliability);
+        EXPECT_FALSE(message->jmsHeaders.redelivered);
         EXPECT_EQ(1, message->jmsHeaders.jmsDeliveryCount());
         EXPECT_THROW(connection.stop(), IllegalStateException);
         EXPECT_THROW(connection.close(), IllegalStateException);
@@ -583,6 +590,9 @@ TEST_F(DeliveryContractTest, ListenerModeMatrix) {
       }
       EXPECT_EQ(immediateRetry ? "first" : "second", body(message));
       EXPECT_EQ(immediateRetry ? 2 : 1, message->jmsHeaders.jmsDeliveryCount());
+      if (!immediateRetry) {
+        EXPECT_NO_THROW(consumer->setMessageListener({}));
+      }
       EXPECT_NO_THROW(consumer->close());
       EXPECT_NO_THROW(session.createTextMessage("service inside callback"));
       --active;
@@ -594,7 +604,7 @@ TEST_F(DeliveryContractTest, ListenerModeMatrix) {
       --active;
       sideDelivery.set_value();
     });
-    send(sender, *producer, "first");
+    send(sender, *producer, "first", reliability);
     auto firstCalled = began.get_future();
     EXPECT_EQ(std::future_status::timeout, firstCalled.wait_for(15ms));
     EXPECT_THROW(other->receiveNoWait(), IllegalStateException);
@@ -616,11 +626,31 @@ TEST_F(DeliveryContractTest, ListenerModeMatrix) {
     ASSERT_EQ(std::future_status::ready, sideDelivery.get_future().wait_for(2s));
     connection.stop();
     other->setMessageListener({});
-    if (mode == Session::CLIENT_ACKNOWLEDGE) {
-      session.acknowledge();
-    }
-    if (mode == Session::SESSION_TRANSACTED) {
-      session.commit();
+    if (!immediateRetry) {
+      // Wait for dispatch to retire both callbacks before switching to synchronous receive.
+      consumer->close();
+      other->close();
+      auto retry = session.createConsumer(queue);
+      connection.start();
+      EXPECT_FALSE(retry->receiveNoWait());
+      if (mode == Session::CLIENT_ACKNOWLEDGE) {
+        session.recover();
+      } else {
+        session.rollback();
+      }
+      const auto repeated = retry->receiveNoWait();
+      ASSERT_TRUE(repeated);
+      EXPECT_EQ("first", body(repeated));
+      EXPECT_EQ(reliability, repeated->reliability);
+      EXPECT_TRUE(repeated->jmsHeaders.redelivered);
+      EXPECT_EQ(2, repeated->jmsHeaders.jmsDeliveryCount());
+      ASSERT_EQ("second", body(retry->receiveNoWait()));
+      ASSERT_EQ("other", body(session.createConsumer(side)->receiveNoWait()));
+      if (mode == Session::CLIENT_ACKNOWLEDGE) {
+        session.acknowledge();
+      } else {
+        session.commit();
+      }
     }
     session.close();
     sending.start();
@@ -1031,10 +1061,15 @@ struct TransactionFixture {
   void check(bool committed, bool empty = false, bool queueOutput = true) {
     auto in = normal.createConsumer(input);
     auto out = normal.createConsumer(output);
-    require(body(in->receiveNoWait()) == (!committed && !empty ? "input" : ""), "transaction input outcome");
-    require(body(out->receiveNoWait()) == (committed && !empty && queueOutput ? "queue output" : ""), "transaction queue output outcome");
+    const auto inputMessage = in->receiveNoWait();
+    const auto outputMessage = out->receiveNoWait();
+    require(!committed && !empty ? body(inputMessage) == "input" : !inputMessage, "transaction input outcome");
+    require(committed && !empty && queueOutput ? body(outputMessage) == "queue output" : !outputMessage,
+            "transaction queue output outcome");
     for (const auto& copy : {first, second}) {
-      require(body(copy->receiveNoWait()) == (committed && !empty ? "topic output" : ""), "transaction fan-out outcome");
+      const auto fanoutMessage = copy->receiveNoWait();
+      require(committed && !empty ? body(fanoutMessage) == "topic output" : !fanoutMessage,
+              "transaction fan-out outcome");
       require(!copy->receiveNoWait(), "duplicate fan-out");
     }
     require(!in->receiveNoWait() && !out->receiveNoWait(), "duplicate input or output");
@@ -1046,10 +1081,10 @@ TEST_F(DeliveryContractTest, AtomicConsumeAndSend) {
   for (auto modes : {std::array{Message::PERSISTENT, Message::PERSISTENT, Message::PERSISTENT},
                      std::array{Message::NOT_PERSISTENT, Message::NOT_PERSISTENT, Message::NOT_PERSISTENT},
                      std::array{Message::PERSISTENT, Message::NOT_PERSISTENT, Message::PERSISTENT}}) {
+    const auto path = directory + std::to_string(modes[0]) + "-" + std::to_string(modes[1]) + "-";
+    SCOPED_TRACE(path);
     for (bool commit : {false, true}) {
-      const auto path = directory + std::to_string(modes[0]) + "-" + std::to_string(modes[1]) +
-                        "-" + std::to_string(commit) + "/";
-      TransactionFixture broker(path);
+      TransactionFixture broker(path + std::to_string(commit) + "/");
       broker.stage(modes[0], modes[1], modes[2], true);
       auto browser = broker.normal.createQueueBrowser(broker.output);
       EXPECT_TRUE(browser.enumerate().empty());
@@ -1061,11 +1096,27 @@ TEST_F(DeliveryContractTest, AtomicConsumeAndSend) {
           EXPECT_FALSE(broker.first->receiveNoWait());
           EXPECT_FALSE(broker.second->receiveNoWait());
         }
+        auto matching = broker.normal.createSharedDurableConsumer(broker.topic, "before-commit-match", "copies = 2");
+        auto excluded = broker.normal.createSharedDurableConsumer(broker.topic, "before-commit-miss", "copies = 3");
+        EXPECT_FALSE(matching->receiveNoWait());
         broker.transaction.commit();
+        auto late = broker.normal.createSharedDurableConsumer(broker.topic, "after-commit", "copies = 2");
+        EXPECT_EQ("topic output", body(matching->receiveNoWait()));
+        EXPECT_FALSE(matching->receiveNoWait());
+        EXPECT_FALSE(excluded->receiveNoWait());
+        EXPECT_FALSE(late->receiveNoWait());
       } else {
         broker.transaction.rollback();
       }
       EXPECT_NO_THROW(broker.check(commit));
+    }
+    {
+      SCOPED_TRACE("close with an active transaction");
+      TransactionFixture broker(path + "close/");
+      broker.stage(modes[0], modes[1], modes[2], true);
+      EXPECT_FALSE(broker.normal.createConsumer(broker.input)->receiveNoWait());
+      broker.transaction.close();
+      EXPECT_NO_THROW(broker.check(false));
     }
   }
   {
@@ -1284,6 +1335,9 @@ void ackCrash(const std::string& directory, std::string_view scenario) {
     require(body(message) == "queue" && body(copy) == "durable", "missing durable delivery");
     require(message->jmsHeaders.jmsDeliveryCount() == (expectQueueRetry ? 2 : 1), "queue attempt count");
     require(copy->jmsHeaders.jmsDeliveryCount() == (expectDurableRetry ? 2 : 1), "durable attempt count");
+    if (expectDurableRetry) {
+      require(copy->jmsHeaders.redelivered, "durable redelivery flag missing after restart");
+    }
   }
 }
 
