@@ -193,12 +193,18 @@ jobs:
           path: vcpkg
           fetch-depth: 1
 
+      - name: Определить образ runner для кэша vcpkg
+        id: runner-image
+        run: |
+          printf 'os=%s\nversion=%s\n' "$ImageOS" "$ImageVersion" >> "$GITHUB_OUTPUT"
+
       - name: Кэш собранных пакетов vcpkg
         uses: actions/cache@v4
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-${{ runner.os }}-asan-${{ env.VCPKG_TAG }}-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-${{ runner.os }}-asan-${{ env.VCPKG_TAG }}-${{ hashFiles('vcpkg.json') }}-${{ steps.runner-image.outputs.os }}-${{ steps.runner-image.outputs.version }}
           restore-keys: |
+            vcpkg-${{ runner.os }}-asan-${{ env.VCPKG_TAG }}-${{ hashFiles('vcpkg.json') }}-
             vcpkg-${{ runner.os }}-asan-${{ env.VCPKG_TAG }}-
 
       - name: Подготовить vcpkg
