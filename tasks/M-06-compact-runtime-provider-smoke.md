@@ -103,3 +103,16 @@ F2 audit_location совпадает у связанных worktrees одног�
 Добавлены четыре программные регрессии реализации при неизменных SDD и телах
 25 принятых критериев (proof в regression-extension-proof.json). Никаких новых
 требований/изменений архитектуры/повышения лимита критики.
+
+## Исправление 4: операторская проверка
+Четыре регрессии исправлены в workflow_runtime.py; исходные25 тестовых методов
+и пять канонических файлов change79 побайтно сохранены. Проверки оператора:
+workflow26 (два opt-in skipped), policy3 и legacy2 — exit0; trace tests и
+OpenSpec validate — exit0. Свидетельства: handoffs/current/79/logs/operator-r4/checks.json.
+Реальные защищённые OpenAI/directDeepSeekPro QA повторены для изменённых восьми
+source hashes: logs/real-probes-20261119T180733Z/result.json — passed,
+source_unchanged=true, private_contexts_remaining=[]. Это отдельные синтетические
+проверки транспорта/изоляции; ими не подменяются независимые роли или приёмка.
+M06 остаётся OPEN: прежние review/security относятся к предыдущему снимку,
+а conformance rejected требует свежей проверки после исправления. Потолок
+12 переходов достигнут, запрос разового18 для change79 ожидает Owner.

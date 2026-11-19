@@ -288,6 +288,10 @@ class Runtime:
     def _dir(self, change):
         return self.control / self._name(change)
 
+    def _audit_directory(self, change):
+        # Same worktree namespace as control; bundles remain outside the worktree.
+        return self.common / 'aef-audit' / self.control.name / self._name(change)
+
     def _proposal(self, change):
         return self.root / 'openspec/changes' / self._name(change) / 'proposal.md'
 
@@ -331,8 +335,12 @@ class Runtime:
         path = Path(value)
         if path.is_absolute() or '..' in path.parts or not path.parts:
             raise ValueError('target outside scope: ' + value)
-        if path.parts[0] in ('.git','openspec','requirements','handoffs') or 'tests' in path.parts or path.name in ('chain.env','AGENTS.md','PROJECT.md'):
-            raise ValueError('protected target: ' + value)
+        parts=tuple(part.casefold() for part in path.parts)
+        if (parts[0] in ('.git','.codex','openspec','requirements','handoffs')
+                or 'tests' in parts
+                or parts[:2] in (('.claude','agents'),('.claude','skills'))
+                or parts[-1] in ('chain.env','agents.md','skill.md','project.md','calibration.md','handoff.md')):
+            raise ValueError('protected canonical input target: ' + value)
         target = self.root / path
         if target.is_dir():raise ValueError('target must name an exact file')
         if any(p.is_symlink() for p in [target,*target.parents] if p.is_relative_to(self.root)):
@@ -372,7 +380,7 @@ class Runtime:
                      'attempts':[], 'events':[], 'decisions':[], 'receipts':[], 'probes':[],
                      'dispatches':0,'rounds':1,'stage':'critic','checkpoint':None,'wait_reason':'owner',
                      'pending_decision':None,'acceptance_verified':False,'transition_kinds':['substantive','infrastructure','mechanical'],
-                     'unknown_cost':True,'gpt_units':'credits','output':str(output),'audit_location':str(self.common/'aef-audit'/change),
+                     'unknown_cost':True,'gpt_units':'credits','output':str(output),'audit_location':str(self._audit_directory(change)),
                      'test_only':self.injected}
             state['observer_snapshot']=self._install_observer(change)
             state['pending_decision'] = self._pending(state,'business')
@@ -382,6 +390,10 @@ class Runtime:
 
     def _public(self, state):
         result={k:v for k,v in state.items() if k not in ('decisions',)}
+        location=str(self._audit_directory(state['change']))
+        if state.get('audit_location')!=location:
+            result['previous_audit_location']=state.get('audit_location')
+        result['audit_location']=location
         result['owner_interventions']=len(state['decisions'])
         result['technical_verdict']=state.get('technical_verdict','unobserved')
         result['transition']='owner_required' if state.get('pending_decision') else 'allowed' if state['state'] in ('ready','archive_ready','complete') else 'blocked'
@@ -399,6 +411,8 @@ class Runtime:
             return self._public(state)
 
     def _fresh(self, state):
+        for target in state['targets']:
+            self._safe_target(str(Path(target).relative_to(self.root)))
         contract = load_contract(self._proposal(state['change']))
         if contract['contract_hash'] != state['contract_hash'] or sha(self.registry_path) != state['registry_hash']:
             raise ValueError('pinned contract/check policy changed')
@@ -466,8 +480,16 @@ class Runtime:
         text=path.read_text()
         if not re.search(r'^## Spec ref\s*$',text,re.M):
             raise ValueError('debt lacks Spec ref')
-        status=re.search(r'^(?:Status|Состояние|Статус):\s*(.+)$',text,re.M)
-        return {'status':'open' if status and status[1].strip().lower() in ('open','открыта','открыто') else 'closed',
+        labels=r'(?:Status|Состояние|Статус)'
+        candidates=[line for line in text.splitlines()
+                    if re.match(r'^[ \t]*(?:[-*][ \t]+)?(?:\*\*)?'+labels+r'\b',line,re.I)]
+        status=None
+        if len(candidates)==1:
+            status=re.fullmatch(r'[ \t]*(?:[-*][ \t]+)?(?:\*\*'+labels+r':\*\*|'+labels+r':)[ \t]*(.*?)[ \t]*',candidates[0],re.I)
+        # Only a complete status token (optionally followed by a sentence) is open.
+        # Duplicate declarations and malformed/unknown values remain closed.
+        opened=bool(status and re.fullmatch(r'(?:open|открыта|открыто)(?:\.(?:[ \t]+.*)?)?',status[1],re.I))
+        return {'status':'open' if opened else 'closed',
                 'revision':sha(path),'requirement_ids':sorted(set(re.findall(r'REQ-[0-9]+-[0-9]+',text)))}
 
     def request_exception(self, change, binding):
@@ -585,18 +607,24 @@ class Runtime:
                     if stage=='producer':self._check_source_scope(state)
                     if stage!='producer' and state['checkpoint']['subject']!=self._subject():
                         raise ValueError('read-only stage changed source scope')
-                    if result.get('wait_reason'):
-                        state.update(state='waiting',wait_reason=result['wait_reason']); attempt['kind']='infrastructure'; break
-                    verdict=result.get('technical_verdict','unobserved')
+                    # Apply the same dominance rule on the execution path. A
+                    # positive claim or wait flag never waives a negative result.
+                    verdict=evaluate_gate({**result,'gate':stage},{})['technical_verdict']
                     if result.get('questions'):
                         verdict='rejected'
+                    if result.get('wait_reason') and verdict!='rejected':
+                        state.update(state='waiting',wait_reason=result['wait_reason']); attempt['kind']='infrastructure'; break
                     receipt=None
                     if stage in ('reviewer','conformance','nfr','security'):
                         receipt=self._verify(change,stage,state)
                         if receipt['technical_verdict']=='rejected':verdict='rejected'
                     state['technical_verdict']=verdict
-                    state.setdefault('gate_results',{})[stage]={'technical_verdict':verdict,'execution':execution,'receipt_hash':receipt['receipt_hash'] if receipt else None}
                     permitted_na=(verdict=='not_applicable' and self.profile.get('gate_applicability',{}).get(stage)=='not_applicable')
+                    state.setdefault('gate_results',{})[stage]={'technical_verdict':verdict,
+                        'transition':'allowed' if verdict=='passed' or permitted_na else 'blocked',
+                        'execution':execution,'receipt_hash':receipt['receipt_hash'] if receipt else None}
+                    if 'performance_verdict' in result:
+                        state['gate_results'][stage]['performance_verdict']=result['performance_verdict']
                     if verdict!='passed' and not permitted_na:
                         state.update(state='waiting',wait_reason='no_progress')
                         if verdict=='rejected':
@@ -754,7 +782,7 @@ class Runtime:
         if producer.startswith('deepseek')==reviewer.startswith('deepseek'):
             raise ValueError('producer/reviewer provider independence violated')
         output=Path(state['output'])/actor
-        writes=state['targets'] if actor=='producer' else []
+        writes=[self._safe_target(str(Path(target).relative_to(self.root))) for target in state['targets']] if actor=='producer' else []
         return {'actor':actor,'model':model,'provider':provider,'base_url':'https://api.deepseek.com/' if provider=='deepseek' else 'https://api.openai.com/v1/',
                 'profile':'deepseek-pro' if provider=='deepseek' and model!='deepseek-flash' else 'deepseek' if provider=='deepseek' else None,
                 'write_paths':writes+[str(output)], 'write_source_paths':writes,'output':str(output),
@@ -1084,12 +1112,14 @@ print('''+repr('NATIVE_DENIALS_VERIFIED '+marker)+''')
         if state['test_only'] or self.injected or not self._smokes_current(state):
             return False
         for gate in self.profile['gates']:
+            if state.get('gate_results',{}).get(gate,{}).get('transition')=='blocked':
+                return False
             if not any(r['actor']==gate and not r['test_only'] and r['technical_verdict'] in ('passed','not_applicable') and self.receipt_current(state['change'],r) for r in state['receipts']):
                 return False
         return True
 
     def audit(self, change):
-        directory=self.common/'aef-audit'/self._name(change)
+        directory=self._audit_directory(change)
         manifest=json.loads((directory/'manifest.json').read_text())
         for name, expected in manifest.items():
             path=directory/name
@@ -1116,7 +1146,9 @@ print('''+repr('NATIVE_DENIALS_VERIFIED '+marker)+''')
                 raise ValueError('archive destination exists')
             converted=rebase_archive_links(source,destination)
             # Stable audit lies in git-common-dir, outside this temporary worktree; never just a symlink.
-            audit=Path(state['audit_location']);audit.mkdir(parents=True,exist_ok=False)
+            audit=self._audit_directory(change)
+            state['audit_location']=str(audit)
+            audit.mkdir(parents=True,exist_ok=False)
             if any(p.is_symlink() for p in Path(state['output']).rglob('*')):
                 raise ValueError('audit refuses model-created symlinks')
             shutil.copytree(state['output'],audit/'logs',symlinks=False)
