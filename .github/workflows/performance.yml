@@ -21,10 +21,11 @@ jobs:
   broker:
     name: Broker hot paths
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     env:
-      CC: gcc-14
-      CXX: g++-14
+      CC: clang-18
+      CXX: clang++-18
+      LDFLAGS: -fuse-ld=lld-18
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,6 +55,25 @@ jobs:
             build-essential cmake ninja-build pkg-config curl zip unzip tar git python3 \
             autoconf automake libtool uuid-dev
 
+      - name: Check the stock compiler and LTO linker
+        id: toolchain
+        if: steps.comparison.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          "$CC" --version
+          "$CXX" --version
+          ld.lld-18 --version
+          probe=$(mktemp -d "$RUNNER_TEMP/perf-toolchain.XXXXXX")
+          trap 'rm -rf "$probe"' EXIT
+          printf 'int main(void) { return 0; }\n' > "$probe/main.c"
+          "$CC" -Wall -Werror -Wextra -Wshadow -O2 -flto "$LDFLAGS" \
+            "$probe/main.c" -o "$probe/check-c"
+          "$CXX" -x c++ -std=c++20 -Wall -Werror -Wextra -Wshadow -O2 -flto "$LDFLAGS" \
+            "$probe/main.c" -o "$probe/check-cxx"
+          "$probe/check-c"
+          "$probe/check-cxx"
+          printf 'image-os=%s\nimage-version=%s\n' "$ImageOS" "$ImageVersion" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         if: steps.comparison.outputs.run == 'true'
         with:
@@ -66,8 +86,8 @@ jobs:
         if: steps.comparison.outputs.run == 'true'
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-${{ runner.os }}-${{ env.VCPKG_TAG }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: vcpkg-${{ runner.os }}-${{ env.VCPKG_TAG }}-
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ env.CXX }}-${{ env.VCPKG_TAG }}-${{ steps.toolchain.outputs.image-os }}-${{ steps.toolchain.outputs.image-version }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ env.CXX }}-${{ env.VCPKG_TAG }}-
 
       - name: Build the baseline and candidate
         if: steps.comparison.outputs.run == 'true'
@@ -129,6 +149,12 @@ jobs:
           {
             printf 'Baseline %s\n' "$BASE_SHA"
             printf 'Candidate %s\n' "$(git rev-parse HEAD)"
+            printf 'CC=%s\n' "$CC"
+            "$CC" --version
+            printf 'CXX=%s\n' "$CXX"
+            "$CXX" --version
+            printf 'LDFLAGS=%s\n' "$LDFLAGS"
+            ld.lld-18 --version
             printf 'Runner image %s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
             if [ -f "$RUNNER_TEMP/perf-legacy-base" ]; then
               echo 'The pre-SDD 71 baseline receives persistent messages without removing their stored records.'
