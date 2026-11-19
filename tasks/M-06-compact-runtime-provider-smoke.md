@@ -86,3 +86,20 @@ REQ79-4. Критерии фиксируются до зависимого ис�
 source hashes unchanged, private auth contexts remaining=[]; все raw logs и
 receipt находятся в сохраняемой fixture. Это не Owner acceptance и не закрытие
 M06 до свежих независимых review/security. Порог/модели/источники не ослаблены.
+
+## Возврат после ee33050
+Reviewer r2 approved, Security r2 approved; Conformance rejected:
+F1 next пропускает performance_verdict=rejected при technical passed,
+F2 audit_location совпадает у связанных worktrees одного change.
+Репродукции conformance-output/probes.py и evidence/additional-probes.log.
+Оператор дополнительно воспроизвёл разрешение producer на запись канонической
+.claude/agents/reviewer.md через declared targets: logs/operator-role-input-scope.json.
+Это нарушение существующих REQ79-3/4/6, а не новые требования. Нужен ещё один
+кодовый проход и свежие review/security/conformance. Регрессионные случаи
+добавляются до исправления, исходные25 принятых тестовых методов не меняются.
+
+Совместимость _debt с каноническим markdown-статусом M05 тоже проверяется:
+'- **Статус:** открыта.' должен распознаваться как open, closed/unknown не open.
+Добавлены четыре программные регрессии реализации при неизменных SDD и телах
+25 принятых критериев (proof в regression-extension-proof.json). Никаких новых
+требований/изменений архитектуры/повышения лимита критики.

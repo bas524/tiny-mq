@@ -140,4 +140,62 @@ class WorkflowRuntimeTest(unittest.TestCase):
         self.assertEqual(set(before['transition_kinds']), {'substantive', 'infrastructure', 'mechanical'})
         self.assertIn('unknown_cost', before); self.assertNotEqual(before['gpt_units'], 'USD')
 
+    def test_regression_role_inputs_are_not_outputs(self):
+        """REQ-79-4: declared outputs cannot overlap canonical role/skill inputs."""
+        module=importlib.import_module('workflow_runtime')
+        for name in ('.claude/agents/reviewer.md','.claude/agents/producer.md',
+                     '.claude/skills/verify/SKILL.md'):
+            with self.subTest(target=name):
+                f=WorkflowFixture()
+                try:
+                    path=f.root/name;path.parent.mkdir(parents=True,exist_ok=True)
+                    path.write_text('Trusted control input\n')
+                    f.git('add','.');f.git('commit','-qm','pin canonical role input')
+                    runtime=module.Runtime(f.root)
+                    with self.assertRaisesRegex(ValueError,'protected|canonical|control'):
+                        runtime.prepare('79-demo',targets=[name])
+                finally:f.close()
+        self.assertEqual(self.calls,[])
+
+    def test_regression_next_preserves_rejected_performance(self):
+        """REQ-79-3: real next applies the verdict rule, not only evaluate_gate."""
+        def contradictory(stage,request):
+            self.calls.append(stage)
+            if stage=='reviewer':
+                return {'technical_verdict':'passed','status':'approved','performance_verdict':'rejected'}
+            return {'technical_verdict':'passed','questions':[]}
+        self.runtime.executor=contradictory
+        self.approve_pending();self.runtime.next(self.change)
+        self.approve_pending();state=self.runtime.next(self.change)
+        self.assertIn('reviewer',self.calls)
+        self.assertFalse(set(self.calls)&{'conformance','security','docwriter','explainer'})
+        gate=state['gate_results']['reviewer']
+        self.assertEqual(gate['technical_verdict'],'rejected')
+        self.assertNotEqual(gate['transition'],'allowed')
+
+    def test_regression_audit_namespace_for_linked_worktrees(self):
+        """REQ-79-6: a shared Git common dir cannot alias separate audit bundles."""
+        import tempfile
+        tmp=tempfile.TemporaryDirectory(prefix='aef-linked-audit-');self.addCleanup(tmp.cleanup)
+        linked=Path(tmp.name)/'linked'
+        self.f.git('worktree','add','--detach',str(linked),'HEAD')
+        module=importlib.import_module('workflow_runtime')
+        other=module.Runtime(linked,executor=self.execute,source_reader=lambda ref:self.source)
+        other.prepare(self.change)
+        first=self.runtime.status(self.change);second=other.status(self.change)
+        self.assertNotEqual(self.runtime.control,other.control)
+        self.assertNotEqual(first['audit_location'],second['audit_location'])
+
+    def test_regression_debt_accepts_canonical_markdown_status(self):
+        """REQ-79-3: canonical maintenance status is parsed conservatively."""
+        path=self.f.root/'tasks/M-test.md';path.parent.mkdir(exist_ok=True)
+        text='# Debt\n- **Статус:** открыта. Ночной job не настроен.\n## Spec ref\ntiny-mq/79:REQ-79-1@'+self.f.revision+'\n'
+        path.write_text(text)
+        debt=self.runtime._debt({'path':'tasks/M-test.md'})
+        self.assertEqual(debt['status'],'open');self.assertEqual(debt['requirement_ids'],['REQ-79-1'])
+        path.write_text(text.replace('открыта.','закрыта.'))
+        self.assertNotEqual(self.runtime._debt({'path':'tasks/M-test.md'})['status'],'open')
+        path.write_text('# Unknown\n## Spec ref\nREQ-79-1\n')
+        self.assertNotEqual(self.runtime._debt({'path':'tasks/M-test.md'})['status'],'open')
+
 if __name__ == '__main__': unittest.main()
