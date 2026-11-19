@@ -56,3 +56,13 @@ trace.py уже входит в утверждённые восемь файло
 сообщение legacy archive guard. Полный пакет history/security-r1/output/result.json.
 Reviewer approved относится к коду и не отменяет перечисленные красные проверки.
 После исправления нужны свежие read-only review/security и полный real smoke.
+
+## Дополнительный дефект control plane
+Оператор воспроизвёл выполнение изменяемого workflow_runtime.py как host exit
+observer между модельными стадиями. На безопасной fixture замена объявленного
+source target записала marker вне reviewer output до появления exit-receipt.
+Модели/секреты/реальный пользовательский root не затрагивались; API calls=0.
+Evidence handoffs/current/79/logs/operator-mutable-observer-repro.json.
+REQ79-4: waiter обязан быть неизменным снимком control plane, недоступным модели,
+не импортировать изменяемые project-модули и сохранять подлинные exit/cleanup.
+Нужен постоянный регрессионный тест до исправления и независимая критика критерия.

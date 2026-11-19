@@ -1060,6 +1060,12 @@ def known_ids(sdd_path):
     """IDs of every SDD next to this one, every main spec and every open delta."""
     ids = set()
     files = list(Path(sdd_path).resolve().parent.glob("*.md"))
+    from workflow_contract import native
+    if native(sdd_path):
+        spec_dir = chain_env_value("SPEC_DIR") or "docs/jms-spec"
+        if not safe_path(spec_dir):
+            raise ValueError("SPEC_DIR must remain inside component")
+        files += list((ROOT / spec_dir).glob("*.md"))
     openspec = ROOT / openspec_dir()
     if openspec.is_dir():
         files += [p for p in openspec.glob("specs/*/spec.md")]

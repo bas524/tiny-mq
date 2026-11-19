@@ -1,5 +1,7 @@
 """Trusted local AEF coordinator; model output has no control-plane authority."""
 import contextlib
+import ast
+import tempfile
 import datetime
 import fcntl
 import hashlib
@@ -301,6 +303,18 @@ class Runtime:
                 observed=json.loads(observation.read_text())
                 if observed.get('execution')!=execution or observed.get('subject')!=checkpoint['subject']:
                     raise ValueError('exit observer binding mismatch')
+                if checkpoint.get('stage')=='provider_probe':
+                    # A completed QA child is not a Critic/Producer result. Record
+                    # reconciliation without manufacturing its guard receipt.
+                    if not observed.get('infrastructure_error') and (
+                            sha(observed['raw_log'])!=observed['log_sha256']
+                            or sha(Path(observed['argv'][0]).resolve())!=observed['binary_sha256']):
+                        raise ValueError('provider QA observation changed')
+                    state['attempts'][-1].update(finished_at=observed['completed_at'],reconciled_exit_code=observed['exit_code'])
+                    state.update(state='waiting',wait_reason='environment',checkpoint=None)
+                    self._event(state,'infrastructure','provider_qa_reconciled_without_admission',execution=execution,reason=reason)
+                    self._save(change,state)
+                    return self._public(state)
                 state['recovered_result']=self._observed_result(observed)
                 self._event(state,'infrastructure','execution_reconciled',execution=execution,reason=reason)
             if state.get('wait_reason') == 'budget_limit' and (state['dispatches']>=12 or state['rounds']>5):
@@ -549,6 +563,154 @@ class Runtime:
             raise ValueError('codex unavailable; sandbox cannot be widened')
         return [binary,'sandbox','--include-managed-config','-P','aef_stage','-c',self._permissions(change,actor),'-C',str(self.root),'--',*argv]
 
+    @staticmethod
+    def _provider_value(value):
+        value=value.strip()
+        if value.startswith('{') and value.endswith('}'):
+            parts=[];start=0;depth=0;quote=None;escaped=False
+            for i,char in enumerate(value[1:-1]):
+                if quote:
+                    if char==quote and not escaped:quote=None
+                    escaped=(char=='\\' and not escaped) if quote=='"' else False
+                elif char in ('"',"'"):quote=char
+                elif char in '[{':depth+=1
+                elif char in ']}':depth-=1
+                elif char==',' and depth==0:
+                    parts.append(value[1:-1][start:i]);start=i+1
+            parts.append(value[1:-1][start:])
+            result={}
+            for part in parts:
+                if not part.strip():continue
+                key,scalar=part.split('=',1);key=key.strip()
+                if not re.fullmatch('[a-z_]+',key) or key in result:raise ValueError()
+                result[key]=Runtime._provider_value(scalar)
+            return result
+        if value.startswith("'") and value.endswith("'") and "'" not in value[1:-1]:
+            return value[1:-1]
+        return ast.literal_eval(value)
+
+    @staticmethod
+    def _provider_tables(path):
+        """Read only supported provider/auth scalars; never evaluate config code.
+
+        The narrow parser also works with the project's Python 3.9. Unsupported
+        provider TOML fails closed rather than importing unrelated user settings.
+        """
+        tables={}; section=''; pending=''
+        try:
+            lines=Path(path).read_text(encoding='utf-8').splitlines()
+            for line in lines:
+                stripped=line.strip()
+                if not pending and stripped.startswith('['):
+                    if not re.fullmatch(r'\[[A-Za-z0-9_.-]+\]',stripped):
+                        section='';continue
+                    section=stripped[1:-1];continue
+                if section not in ('model_providers.deepseek','model_providers.deepseek.auth'):
+                    continue
+                if not stripped or stripped.startswith('#'):continue
+                pending=(pending+'\n'+stripped).strip()
+                if '=' not in pending:raise ValueError()
+                key, value=pending.split('=',1);key=key.strip()
+                if key not in ('name','base_url','wire_api','command','args','auth','auth.command','auth.args'):
+                    # Credential/env/proxy/custom header sources are not inferred.
+                    raise ValueError()
+                try:
+                    parsed=Runtime._provider_value(value.strip())
+                except (SyntaxError,ValueError):
+                    if value.strip().startswith(('[','{')) and not value.rstrip().endswith((']','}')):
+                        continue
+                    raise ValueError()
+                table=tables.setdefault(section,{})
+                if key in table:raise ValueError()
+                if key.startswith('auth.'):
+                    table=tables.setdefault('model_providers.deepseek.auth',{});key=key[5:]
+                    if key in table:raise ValueError()
+                if not isinstance(parsed,(str,list,dict)) or isinstance(parsed,list) and not all(isinstance(x,str) for x in parsed):
+                    raise ValueError()
+                table[key]=parsed;pending=''
+            if pending:raise ValueError()
+        except (OSError,ValueError,SyntaxError):
+            # Never expose source lines or auth helper arguments in errors.
+            raise ValueError('trusted provider/auth configuration unavailable or unsupported') from None
+        return tables
+
+    def _load_provider_layer(self, profile, config_home=None):
+        if profile not in ('deepseek','deepseek-pro'):
+            raise ValueError('unapproved direct provider profile')
+        home=Path(config_home) if config_home is not None else Path(os.environ.get('CODEX_HOME',str(Path.home()/'.codex')))
+        provider={};auth={}
+        # Layer only these two whitelisted tables, not MCP/plugins/hooks/permissions.
+        paths=[home/'config.toml',home/(profile+'.config.toml')]
+        if not paths[1].is_file():
+            raise ValueError('trusted direct provider profile unavailable')
+        for path in paths:
+            if not path.is_file():continue
+            tables=self._provider_tables(path)
+            current=dict(tables.get('model_providers.deepseek',{}))
+            inline=current.pop('auth',{})
+            if not isinstance(inline,dict):raise ValueError('invalid provider authentication table')
+            provider.update(current);auth.update(inline)
+            auth.update(tables.get('model_providers.deepseek.auth',{}))
+        if (provider.get('base_url','').rstrip('/')!='https://api.deepseek.com'
+                or provider.get('wire_api')!='responses'
+                or set(provider)-{'name','base_url','wire_api'}
+                or set(auth)!={'command','args'} or not isinstance(auth['command'],str)
+                or not auth['command'] or not isinstance(auth['args'],list)
+                or not all(isinstance(x,str) for x in auth['args'])):
+            raise ValueError('unsupported direct provider/auth policy')
+        command=auth['command']
+        executable=command if Path(command).is_absolute() else shutil.which(command)
+        if not executable or not Path(executable).is_file():
+            raise ValueError('configured provider auth executable unavailable')
+        auth['command']=str(Path(executable).resolve())
+        return {'provider':provider,'auth':auth}
+
+    @staticmethod
+    def _private_file(path, text, mode=0o600):
+        fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,mode)
+        with os.fdopen(fd,'w') as stream:
+            stream.write(text);stream.flush();os.fsync(stream.fileno())
+
+    @contextlib.contextmanager
+    def _provider_launch(self, change, actor, command, env):
+        """Trusted host only. Private auth material never enters argv or tool env.
+
+        A fresh CODEX_HOME contains only the sanitized named profile. System and
+        inherited managed restrictions are not disabled. A managed-policy refusal
+        remains a refusal; there is no fallback to the user's full configuration.
+        """
+        policy=self.policy(change,actor)
+        if policy['provider']=='openai':
+            yield command,env,{'provider':'openai','profile':None}
+            return
+        layer=self._load_provider_layer(policy['profile'])
+        parent=self._dir(change)/'private';parent.mkdir(mode=0o700,exist_ok=True)
+        if parent.is_symlink():raise ValueError('private provider control path is a symlink')
+        with tempfile.TemporaryDirectory(prefix='provider-',dir=parent) as temporary:
+            private=Path(temporary);os.chmod(private,0o700)
+            spec=private/'auth.json';bridge=private/'auth-bridge.py'
+            self._private_file(spec,json.dumps({**layer['auth'],'codex_home':os.environ.get('CODEX_HOME',str(Path.home()/'.codex'))}))
+            # The helper inherits host auth context; the model tool environment is
+            # separately reset by shell_environment_policy, with no secret vars.
+            self._private_file(bridge,
+                'import json,os,sys\nfrom pathlib import Path\n'
+                'try:\n'
+                ' d=json.loads(Path(__file__).with_name("auth.json").read_text())\n'
+                ' os.environ["CODEX_HOME"]=d["codex_home"]\n'
+                ' fd=os.open(os.devnull,os.O_WRONLY);os.dup2(fd,2);os.close(fd)\n'
+                ' os.execv(d["command"],[d["command"],*d["args"]])\n'
+                'except Exception:\n'
+                ' sys.stderr.write("provider authentication helper failed\\n");sys.exit(1)\n',0o700)
+            provider='model_providers.deepseek={name="Direct DeepSeek",base_url="https://api.deepseek.com/",wire_api="responses",auth={command='+json.dumps(sys.executable)+',args=['+json.dumps(str(bridge))+']}}'
+            # No original profile/auth args are copied into this public command.
+            launch=list(command[:-1])+['-c',provider,'-']
+            self._private_file(private/(policy['profile']+'.config.toml'),'# Minimal trusted direct provider profile.\n')
+            host_env=dict(env,CODEX_HOME=str(private))
+            metadata={'provider':'deepseek','profile':policy['profile'],'wire_api':'responses',
+                      'base_url':'https://api.deepseek.com/','provider_layer_hash':digest(layer),
+                      'auth_executable_sha256':sha(layer['auth']['command'])}
+            yield launch,host_env,metadata
+
     def _codex_command(self, change, actor, last_message):
         binary=shutil.which('codex')
         if not binary:
@@ -558,13 +720,15 @@ class Runtime:
             raise ValueError('native permissions require validated Codex 0.170.0')
         policy=self.policy(change,actor)
         command=[binary,'exec','--ignore-user-config','--ignore-rules','--json','--model',policy['model'],'-C',str(self.root),'-o',str(last_message)]
-        # No -p file is inherited: direct profiles are fully specified here.
+        if policy['profile']:
+            command+=['-p',policy['profile']]
+        # Real launch uses a minimal private profile, never the arbitrary user profile.
         settings=['default_permissions="aef_stage"', self._permissions(change,actor), 'approval_policy="never"',
                   'features.hooks=false','web_search="disabled"','mcp_servers={}','shell_environment_policy.inherit="none"',
                   'model_provider='+json.dumps(policy['provider'])]
         if policy['provider']=='deepseek':
             # Provider auth stays in the parent/native provider layer; model tools cannot read it.
-            settings+=['model_providers.deepseek={name="Direct DeepSeek",base_url="https://api.deepseek.com/",env_key="DEEPSEEK_API_KEY",wire_api="chat"}']
+            settings+=['model_providers.deepseek={name="Direct DeepSeek",base_url="https://api.deepseek.com/",wire_api="responses"}']
         tool_env=self._tool_env(self._read(change),actor)
         # Never propagate provider credentials to the tool subprocess environment.
         settings+=['shell_environment_policy.set={'+','.join(json.dumps(k)+'='+json.dumps(v) for k,v in tool_env.items() if k!='CODEX_HOME')+'}']
@@ -595,30 +759,41 @@ class Runtime:
         last=observer/(request['execution']+'-last.json'); raw=observer/(request['execution']+'.jsonl')
         command=self._codex_command(change,actor,last)
         env=self._tool_env(state,actor)
-        # Native provider transport can authenticate separately from tools. Never read secret bytes here.
-        if policy['provider']=='deepseek' and os.environ.get('DEEPSEEK_API_KEY'):
-            env['DEEPSEEK_API_KEY']=os.environ['DEEPSEEK_API_KEY']
+        observation=self._run_observed(change,actor,request['execution'],command,env,prompt,raw,last,
+                                       observer/(request['execution']+'.stderr'))
+        return self._observed_result(observation)
+
+    def _run_observed(self, change, actor, execution, command, env, prompt, raw, last, stderr, timeout=None):
         observations=self._dir(change)/'observations';observations.mkdir(exist_ok=True)
-        plan={'execution':request['execution'],'subject':state['checkpoint']['subject'],'argv':command,
+        state=self._read(change)
+        plan={'execution':execution,'subject':state['checkpoint']['subject'],'argv':command,
               'binary_sha256':sha(Path(command[0]).resolve()),'cwd':str(self.root),'prompt':prompt,
-              'raw_log':str(raw),'stderr':str(observer/(request['execution']+'.stderr')),'last':str(last),
-              'provider':policy['provider'],'outcome':str(observations/(request['execution']+'.json'))}
-        plan_path=observations/(request['execution']+'-plan.json');plan_path.write_text(json.dumps(plan))
-        # A separate trusted waiter survives loss of this coordinator and records actual process exit.
+              'raw_log':str(raw),'stderr':str(stderr),'last':str(last),'timeout':timeout,
+              'provider':self.policy(change,actor)['provider'],'actor':actor,'change':change,
+              'outcome':str(observations/(execution+'.json'))}
+        plan_path=observations/(execution+'-plan.json');self._private_file(plan_path,json.dumps(plan))
+        # The trusted waiter owns auth cleanup and process exit for both normal
+        # stages and QA, even if the calling coordinator disappears.
         waiter=subprocess.Popen([sys.executable,'-B',str(Path(__file__).resolve()),'observe',str(plan_path)],
                                 cwd=self.root,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL,start_new_session=True)
         waiter.wait()
         if waiter.returncode or not Path(plan['outcome']).is_file():
             raise InterruptedError('native exit observer did not publish a completion')
-        return self._observed_result(json.loads(Path(plan['outcome']).read_text()))
+        observed=json.loads(Path(plan['outcome']).read_text())
+        if observed.get('execution')!=execution or observed.get('subject')!=plan['subject']:
+            raise ValueError('exit observer execution/subject mismatch')
+        return observed
 
     def _observed_result(self, observed):
+        if observed.get('infrastructure_error'):
+            return {'technical_verdict':'unobserved','wait_reason':'environment','error_type':observed['infrastructure_error'],'exit_code':observed.get('exit_code')}
         if (observed.get('binary_sha256')!=sha(Path(observed['argv'][0]).resolve())
                 or sha(observed['raw_log'])!=observed['log_sha256']):
             raise ValueError('native observation changed')
         events=[json.loads(line) for line in Path(observed['raw_log']).read_text().splitlines() if line.strip()]
         actual={k:observed[k] for k in ('argv','exit_code','raw_log','log_sha256','binary_sha256','provider')}
+        actual['provider_metadata']=observed.get('provider_metadata',{})
         actual.update(fresh_session=any(e.get('type')=='thread.started' for e in events),
                       usage=[e.get('usage') for e in events if e.get('type')=='turn.completed'])
         if observed['exit_code']:
@@ -660,7 +835,7 @@ for op in ('symlink','replace'):
  else:raise SystemExit('protected '+op+' allowed')
  finally:
   if local.is_symlink() or local.exists():local.unlink()
-print('NATIVE_DENIALS_VERIFIED '''+marker+''')
+print('''+repr('NATIVE_DENIALS_VERIFIED '+marker)+''')
 '''
 
     @staticmethod
@@ -688,41 +863,72 @@ print('NATIVE_DENIALS_VERIFIED '''+marker+''')
             state['attempts'].append(probe_attempt)
             state.update(state='running',checkpoint={'subject':self._subject(),'execution':uuid.uuid4().hex,'stage':'provider_probe','time':now()})
             self._save(change,state)
-            policy=self.policy(change,actor);output=Path(policy['output']);output.mkdir(parents=True,exist_ok=True)
-            observer=Path(state['output'])/'observer';observer.mkdir(exist_ok=True)
-            marker=uuid.uuid4().hex;guard=observer/('guard-'+marker+'.py');guard.write_text(self._guard_script(change,actor,marker))
-            argv=[sys.executable,'-B',str(guard)]
-            # Own OS observation precedes model smoke; refusal cannot fall back to unconfined execution.
-            native=subprocess.run(self.sandbox_command(change,actor,argv),env=self._tool_env(state,actor),cwd=self.root,capture_output=True,text=True,timeout=30)
-            native_log=observer/(marker+'-native.json');native_log.write_text(json.dumps({'argv':argv,'exit':native.returncode,'stdout':native.stdout,'stderr':native.stderr}))
-            if native.returncode or 'NATIVE_DENIALS_VERIFIED '+marker not in native.stdout:
-                raise ValueError('native denial probe failed: '+str(native_log))
-            raw=observer/(marker+'.jsonl');last=observer/(marker+'-last.json');command=self._codex_command(change,actor,last)
-            prompt='Synthetic QA only. Execute exactly this fixed guard command with the terminal tool, then report its exit: '+shlex.join(argv)+'. Do not read other files or invoke any service.'
-            env=self._tool_env(state,actor)
-            if policy['provider']=='deepseek' and os.environ.get('DEEPSEEK_API_KEY'):
-                env['DEEPSEEK_API_KEY']=os.environ['DEEPSEEK_API_KEY']
-            with raw.open('x') as stdout,(observer/(marker+'.stderr')).open('x') as stderr:
-                result=subprocess.run(command,input=prompt,text=True,env=env,cwd=self.root,stdout=stdout,stderr=stderr,timeout=180)
-            events=[json.loads(line) for line in raw.read_text().splitlines() if line.strip()]
-            observed=False
-            for event in events:
-                item=event.get('item',{})
-                if (event.get('type')=='item.completed' and item.get('type')=='command_execution'
-                        and item.get('exit_code')==0 and self._exact_command(item.get('command',''),argv)
-                        and 'NATIVE_DENIALS_VERIFIED '+marker in item.get('aggregated_output','')):
-                    observed=True
-            receipt={'provider':policy['provider'],'fresh_session':any(e.get('type')=='thread.started' for e in events),
-                     'guard_command_observed':observed,'native_denials_verified':True,'exit_code':result.returncode,
-                     'raw_log':str(raw),'log_sha256':sha(raw),'binary_sha256':sha(Path(command[0]).resolve()),
-                     'argv':command,'native_log':str(native_log),'native_log_sha256':sha(native_log),
-                     'policy_hash':digest(self._permissions(change,actor)), 'actor':actor,'observed_at':now(),'test_only':False}
-            if result.returncode or not observed or not receipt['fresh_session'] or not any(e.get('type')=='turn.completed' for e in events):
-                raise ValueError('provider execution not confirmed by JSONL exit observer: '+str(raw))
-            probe_attempt.update(finished_at=now(),exit_code=result.returncode,receipt=receipt)
-            state.update(state=prior_state,checkpoint=None)
-            state['probes'].append(receipt); self._event(state,'infrastructure','provider_probe',provider=policy['provider']);self._save(change,state)
-            return receipt
+            failure_reason='environment'
+            try:
+                policy=self.policy(change,actor);output=Path(policy['output']);output.mkdir(parents=True,exist_ok=True)
+                observer=Path(state['output'])/'observer';observer.mkdir(exist_ok=True)
+                marker=uuid.uuid4().hex;guard=observer/('guard-'+marker+'.py')
+                script=self._guard_script(change,actor,marker);compile(script,str(guard),'exec');guard.write_text(script)
+                argv=[sys.executable,'-B',str(guard)]
+                # Own OS observation precedes model smoke; refusal cannot fall back to unconfined execution.
+                native_command=self.sandbox_command(change,actor,argv)
+                native=subprocess.run(native_command,env=self._tool_env(state,actor),cwd=self.root,capture_output=True,text=True,timeout=30)
+                probe_attempt['native_exit_code']=native.returncode
+                native_log=observer/(marker+'-native.json');native_log.write_text(json.dumps({'argv':native_command,'guard_argv':argv,'exit':native.returncode,'stdout':native.stdout,'stderr':native.stderr}))
+                if native.returncode or 'NATIVE_DENIALS_VERIFIED '+marker not in native.stdout:
+                    raise ValueError('native denial probe failed: '+str(native_log))
+                raw=observer/(marker+'.jsonl');last=observer/(marker+'-last.json');command=self._codex_command(change,actor,last)
+                prompt='Synthetic QA only. Execute exactly this fixed guard command with the terminal tool, then report its exit: '+shlex.join(argv)+'. Do not read other files or invoke any service.'
+                env=self._tool_env(state,actor)
+                completion=self._run_observed(change,actor,state['checkpoint']['execution'],command,env,prompt,raw,last,observer/(marker+'.stderr'),timeout=180)
+                probe_attempt['provider_exit_code']=completion['exit_code']
+                if completion.get('infrastructure_error'):
+                    probe_attempt['observer_error']=completion['infrastructure_error']
+                    raise ValueError('provider exit observer reported infrastructure failure')
+                if sha(raw)!=completion['log_sha256'] or sha(Path(command[0]).resolve())!=completion['binary_sha256']:
+                    raise ValueError('provider observer binding changed')
+                command=completion['argv'];provider_metadata=completion['provider_metadata']
+                provider_exit=completion['exit_code']
+                events=[json.loads(line) for line in raw.read_text().splitlines() if line.strip()]
+                if any('429' in json.dumps(e) for e in events):failure_reason='rate_limited'
+                elif provider_exit==0 and any(e.get('type')=='turn.completed' for e in events):failure_reason='no_progress'
+                probe_attempt['usage']=[e.get('usage') for e in events if e.get('type')=='turn.completed']
+                probe_attempt['raw_log']=str(raw);probe_attempt['log_sha256']=sha(raw)
+                probe_attempt['argv']=command;probe_attempt['provider_metadata']=provider_metadata
+                observed=False
+                for event in events:
+                    item=event.get('item',{})
+                    if (event.get('type')=='item.completed' and item.get('type')=='command_execution'
+                            and item.get('exit_code')==0 and self._exact_command(item.get('command',''),argv)
+                            and 'NATIVE_DENIALS_VERIFIED '+marker in item.get('aggregated_output','')):
+                        observed=True
+                receipt={'provider':policy['provider'],'fresh_session':any(e.get('type')=='thread.started' for e in events),
+                         'guard_command_observed':observed,'native_denials_verified':True,'exit_code':provider_exit,
+                         'raw_log':str(raw),'log_sha256':sha(raw),'binary_sha256':sha(Path(command[0]).resolve()),
+                         'argv':command,'provider_metadata':provider_metadata,'usage':[e.get('usage') for e in events if e.get('type')=='turn.completed'],'native_log':str(native_log),'native_log_sha256':sha(native_log),
+                         'policy_hash':digest(self._permissions(change,actor)), 'actor':actor,'observed_at':now(),'test_only':False}
+                if provider_exit or not observed or not receipt['fresh_session'] or not any(e.get('type')=='turn.completed' for e in events):
+                    raise ValueError('provider execution not confirmed by JSONL exit observer: '+str(raw))
+                probe_attempt.update(finished_at=now(),exit_code=provider_exit,receipt=receipt)
+                state.update(state=prior_state,checkpoint=None)
+                state['probes'].append(receipt); self._event(state,'infrastructure','provider_probe',provider=policy['provider']);self._save(change,state)
+                return receipt
+            except Exception as error:
+                probe_attempt.update(finished_at=now(),error_type=type(error).__name__)
+                state.update(state='interrupted' if isinstance(error,InterruptedError) else 'waiting',wait_reason=failure_reason)
+                self._event(state,'infrastructure','provider_probe_failed',error_type=type(error).__name__)
+                self._save(change,state)
+                raise ValueError('provider probe failed closed; see protected attempt and observer logs') from None
+
+    def _provider_metadata_current(self, receipt, change):
+        metadata=receipt.get('provider_metadata',{})
+        policy=self.policy(change,receipt['actor'])
+        if metadata.get('provider')!=policy['provider']:return False
+        if policy['provider']=='openai':return metadata.get('profile') is None
+        layer=self._load_provider_layer(policy['profile'])
+        return (metadata.get('profile')==policy['profile']
+                and metadata.get('provider_layer_hash')==digest(layer)
+                and metadata.get('auth_executable_sha256')==sha(layer['auth']['command']))
 
     def _smokes_current(self, state):
         providers=set()
@@ -731,10 +937,11 @@ print('NATIVE_DENIALS_VERIFIED '''+marker+''')
                 if (not receipt['test_only'] and receipt['exit_code']==0 and receipt['guard_command_observed']
                         and receipt['native_denials_verified'] and receipt['fresh_session']
                         and receipt['policy_hash']==digest(self._permissions(state['change'],receipt['actor']))
+                        and self._provider_metadata_current(receipt,state['change'])
                         and receipt['binary_sha256']==sha(Path(shutil.which('codex')).resolve())
                         and sha(receipt['raw_log'])==receipt['log_sha256'] and sha(receipt['native_log'])==receipt['native_log_sha256']):
                     providers.add(receipt['provider'])
-            except (OSError,TypeError,KeyError):
+            except (OSError,TypeError,KeyError,ValueError):
                 pass
         return providers=={'openai','deepseek'}
 
@@ -824,10 +1031,20 @@ def observe(plan_path):
         raise ValueError('invalid observer control directory')
     if sha(Path(plan['argv'][0]).resolve())!=plan['binary_sha256']:
         raise ValueError('native binary changed before dispatch')
-    with Path(plan['raw_log']).open('x') as stdout,Path(plan['stderr']).open('x') as stderr:
-        result=subprocess.run(plan['argv'],input=plan['prompt'],text=True,cwd=plan['cwd'],stdout=stdout,stderr=stderr)
+    runtime=Runtime(plan['cwd'])
     record={k:v for k,v in plan.items() if k!='prompt'}
-    record.update(after_subject=Runtime(plan['cwd'])._subject(),exit_code=result.returncode,completed_at=now(),log_sha256=sha(plan['raw_log']),
+    record.update(exit_code=None,completed_at=None)
+    try:
+        launch=runtime._provider_launch(plan['change'],plan['actor'],plan['argv'],dict(os.environ)) if 'actor' in plan else contextlib.nullcontext((plan['argv'],dict(os.environ),{}))
+        with launch as (argv,env,provider_metadata):
+            record.update(argv=argv,provider_metadata=provider_metadata)
+            with Path(plan['raw_log']).open('x') as stdout,Path(plan['stderr']).open('x') as stderr:
+                result=subprocess.run(argv,input=plan['prompt'],text=True,cwd=plan['cwd'],env=env,stdout=stdout,stderr=stderr,timeout=plan.get('timeout'))
+                record['exit_code']=result.returncode
+    except Exception as error:
+        record['infrastructure_error']=type(error).__name__
+    record.update(after_subject=runtime._subject(),completed_at=now(),
+                  log_sha256=sha(plan['raw_log']) if Path(plan['raw_log']).is_file() else None,
                   last_sha256=sha(plan['last']) if Path(plan['last']).is_file() else None)
     temporary=Path(plan['outcome']+'.tmp')
     with temporary.open('x') as stream:
