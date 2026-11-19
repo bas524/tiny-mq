@@ -1,6 +1,12 @@
 # 72 Jakarta delivery
 
-Класс K2. Дельта принятого локального C++ контракта SDD72 v0.5: REQ-72-1…8.
+Класс K4. Исторический proposal дельты SDD72 v0.5: REQ-72-1…8.
+
+Архивная пометка 19.11.2026: изменение принято в
+[PR №12](https://github.com/bas524/tiny-mq/pull/12), факт перенесён в
+[openspec/specs](../../../../openspec/specs). ADR-0010 теперь accepted,
+а M-05 остаётся открытой. Указания ниже о proposed/R1 и ещё не выполненном
+archive описывают состояние подготовки дельты, а не текущее состояние проекта.
 Основание — функциональный source/tests `2b3c536`, Reviewer и шлюзы iteration 4.
 Conformance подтверждает восемь функциональных требований, Security approved.
 NFR допущен по `approval_basis=owner-approved-deferral`; технический
@@ -19,12 +25,12 @@ REUSE > EXTEND: время заголовков расширяет message contr
 Прежние правила default=6, сброса состояния при рестарте, подавления backoff при close
 и подмены JMSDeliveryTime отменяются. Действующие ID не меняются.
 
-Основания: [SDD72](../../../docs/jms-spec/72-jakarta-delivery.md), зависимости SDD70/71,
-четыре openspec/specs и [ADR-0010](../../../arch/0010-atomic-local-delivery.md)
+Основания: [SDD72](../../../../docs/jms-spec/72-jakarta-delivery.md), зависимости SDD70/71,
+четыре openspec/specs и [ADR-0010](../../../../arch/0010-atomic-local-delivery.md)
 (статус proposed сохраняется). Приёмка:
-[review](../../../docs/reviews/72-jakarta-delivery.review.md),
-[gates](../../../docs/reviews/72-jakarta-delivery.gates.md),
-[NFR](../../../docs/reviews/72-jakarta-delivery.nfr.md).
+[review](../../../../docs/reviews/72-jakarta-delivery.review.md),
+[gates](../../../../docs/reviews/72-jakarta-delivery.gates.md),
+[NFR](../../../../docs/reviews/72-jakarta-delivery.nfr.md).
 Формальные пакеты: `handoffs/current/72/{reviewer,nfr,conformance,security}.json`.
 
 Новых продуктовых KB-доменных сущностей нет: `product_delta=null`.
@@ -49,7 +55,7 @@ ID: `REQ-72-9`
 Источник: `repo:tasks/UNIFIED-PLAN.md@9f7983c0054636a6686f9928831c8c53dfbd3679#сквозные-требования-на-всех-майлстонах`
 Статус долга: открыта; результат измерения — failure; выполненным требованием spec-факт не является.
 Задача: `M-05-local-nightly-performance`.
-Подготовленный документ: [logs/M-05-local-nightly-performance.md](../../../handoffs/current/72/logs/M-05-local-nightly-performance.md).
+Подготовленный документ: [M-05](../../../../tasks/M-05-local-nightly-performance.md).
 Путь при финализации: `tasks/M-05-local-nightly-performance.md`; статус останется «открыта».
 Test: `NfrGateTest.DeliveryHotPathBudget`; runner `tests/nfr72.py` (исходный критерий долга).
 

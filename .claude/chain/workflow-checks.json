@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "default_profile": "harness",
+  "profiles": {
+    "harness": {
+      "code_paths": [".claude/chain"],
+      "gates": ["reviewer", "nfr", "conformance", "security"],
+      "gate_applicability": {"nfr": "not_applicable"},
+      "checks": [
+        {"id": "workflow", "argv": ["python3", "-B", "-m", "unittest", "discover", "-s", ".claude/chain/tests", "-p", "test_workflow_*.py"], "inputs": [".claude/chain"], "environment": [["python3", "--version"], ["git", "--version"]]},
+        {"id": "decisions", "argv": ["python3", "-B", "-m", "unittest", "discover", "-s", ".claude/chain/tests", "-p", "test_gate_decisions.py"], "inputs": [".claude/chain"], "environment": []},
+        {"id": "legacy-stage", "argv": ["python3", "-B", ".claude/chain/tests/codex_stage.py"], "inputs": [".claude/chain"], "environment": []},
+        {"id": "legacy-trace", "argv": ["python3", "-B", ".claude/chain/trace.py", "sdd", "docs/jms-spec/72-jakarta-delivery.md"], "inputs": [".claude/chain", "docs/jms-spec/72-jakarta-delivery.md"], "environment": []},
+        {"id": "openspec", "argv": ["python3", "-B", ".claude/chain/openspec.py", "validate"], "inputs": ["openspec", ".claude/chain"], "environment": []}
+      ]
+    }
+  }
+}

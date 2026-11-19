@@ -24,6 +24,7 @@ import re
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 import time
 
 # Python 3.9 or newer is required. The check comes first, and the module keeps a grammar Python 3.6 parses,
@@ -1573,6 +1574,9 @@ def main():
     lock = None
     try:
         ctx.cfg, ctx.child_env = load_env(os.path.join(ctx.root, ".claude", "chain", "chain.env"), dict(os.environ))
+        if ctx.cfg.get("COMPACT_RUNTIME") == "1":
+            print("compact runtime active: use python3 -B .claude/chain/aef.py status <change>", file=sys.stderr)
+            return 1
         chain_dir = ctx.cfg.get("CHAIN_DIR") or f"{ctx.root}/{ctx.cfg.get('HANDOFF_DIR') or 'handoffs'}"
         if not os.path.isdir(chain_dir):
             return 0
@@ -1588,6 +1592,15 @@ def main():
             return 0
         # The bytes checked against the markers are the ones parsed and marked: no second read (M-27).
         pkg, raw = chosen
+        migration = Path(ctx.root) / "openspec/changes/79-aef-journey-harness/proposal.md"
+        try:
+            candidate = json.loads(raw)
+        except (ValueError, TypeError):
+            candidate = {}
+        spec = str(candidate.get("spec", ""))
+        if migration.is_file() and spec.isdigit() and int(spec) not in (72, 79):
+            print("new product waits for compact runtime: use python3 -B .claude/chain/aef.py status <change>", file=sys.stderr)
+            return 1
         ctx.pkg, ctx.outdir, ctx.phase = pkg, os.path.dirname(pkg), "check"
         ctx.raw, ctx.digest = raw, hashlib.sha256(raw).hexdigest()
         route(ctx)
