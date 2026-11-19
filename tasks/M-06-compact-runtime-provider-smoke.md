@@ -76,3 +76,13 @@ Observer regression усилен по round4 и принят round5 content-clea
 child nonce/exit7, subject/execution/binary/log hash и cleanup private context.
 Proposal/design и бизнес-архитектура Owner не изменялись; это критерий исходного
 REQ79-4. Критерии фиксируются до зависимого исправления control plane.
+
+## Проверка исправления перед повторными review/security
+Кандидат fix3: standalone observer snapshot без mutable imports; stdlib TOML
+с supports_websockets=false. Обязательные25 criteria (два платных/native opt-in
+в базовом прогоне skipped) и10 дополнительных проверок прошли у автора.
+Оператор затем реально выполнил ОБА provider smoke OpenAI/directDeepSeek Pro:
+`handoffs/current/79/operator-real-probes-latest.json`, technical_verdict=passed,
+source hashes unchanged, private auth contexts remaining=[]; все raw logs и
+receipt находятся в сохраняемой fixture. Это не Owner acceptance и не закрытие
+M06 до свежих независимых review/security. Порог/модели/источники не ослаблены.

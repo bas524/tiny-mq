@@ -1,7 +1,5 @@
 """Trusted local AEF coordinator; model output has no control-plane authority."""
 import contextlib
-import ast
-import tempfile
 import datetime
 import fcntl
 import hashlib
@@ -18,6 +16,229 @@ from workflow_contract import load_contract, digest, validate_links, rebase_arch
 from workflow_policy import resolve_codex_source, valid_source, evaluate_gate
 
 ROLES = ('critic','producer','reviewer','conformance','nfr','security','docwriter','explainer')
+
+# Captured during trusted module load, never reread from candidate files.
+_OBSERVER_SOURCE = r'''"""Trusted standalone waiter. Imports only Python standard library, never candidate code."""
+import contextlib
+import datetime
+import hashlib
+import json
+import os
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def private_file(path, text, mode=0o600):
+    fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,mode)
+    with os.fdopen(fd,'w') as stream:
+        stream.write(text);stream.flush();os.fsync(stream.fileno())
+
+
+def load_provider_layer(profile, config_home=None):
+    if sys.version_info<(3,11):
+        raise ValueError('provider/auth transport requires Python >=3.11 with stdlib tomllib')
+    import tomllib
+    if profile not in ('deepseek','deepseek-pro'):
+        raise ValueError('unapproved direct provider profile')
+    home=Path(config_home) if config_home is not None else Path(os.environ.get('CODEX_HOME',str(Path.home()/'.codex')))
+    provider={};auth={}
+    try:
+        paths=[home/'config.toml',home/(profile+'.config.toml')]
+        if not paths[1].is_file():raise ValueError()
+        for path in paths:
+            if not path.is_file():continue
+            with path.open('rb') as stream:document=tomllib.load(stream)
+            current=document.get('model_providers',{}).get('deepseek',{})
+            if not isinstance(current,dict):raise ValueError()
+            current=dict(current);inline=current.pop('auth',{})
+            if not isinstance(inline,dict):raise ValueError()
+            provider.update(current);auth.update(inline)
+        if (set(provider)-{'name','base_url','wire_api','supports_websockets'}
+                or not isinstance(provider.get('name','Direct DeepSeek'),str)
+                or not isinstance(provider.get('base_url'),str)
+                or provider['base_url'].rstrip('/')!='https://api.deepseek.com'
+                or provider.get('wire_api')!='responses'
+                or ('supports_websockets' in provider and provider['supports_websockets'] is not False)
+                or set(auth)!={'command','args'} or not isinstance(auth['command'],str)
+                or not auth['command'] or not isinstance(auth['args'],list)
+                or not all(isinstance(value,str) for value in auth['args'])):
+            raise ValueError()
+        executable=auth['command'] if Path(auth['command']).is_absolute() else shutil.which(auth['command'])
+        if not executable or not Path(executable).is_file():raise ValueError()
+        auth['command']=str(Path(executable).resolve())
+    except (OSError,ValueError,TypeError,KeyError,AttributeError):
+        # TOML exceptions may contain source text; never leak auth args/keys.
+        raise ValueError('trusted direct provider/auth configuration unavailable or unsupported') from None
+    return {'provider':provider,'auth':auth}
+
+
+@contextlib.contextmanager
+def provider_launch(control, policy, command, env):
+    if policy['provider']=='openai':
+        yield command,env,{'provider':'openai','profile':None}
+        return
+    layer=load_provider_layer(policy['profile'])
+    parent=Path(control)/'private'
+    if parent.is_symlink():raise ValueError('private provider control path is a symlink')
+    parent.mkdir(mode=0o700,exist_ok=True);os.chmod(parent,0o700)
+    with tempfile.TemporaryDirectory(prefix='provider-',dir=parent) as temporary:
+        private=Path(temporary);os.chmod(private,0o700)
+        spec=private/'auth.json';bridge=private/'auth-bridge.py'
+        private_file(spec,json.dumps({**layer['auth'],'codex_home':os.environ.get('CODEX_HOME',str(Path.home()/'.codex'))}))
+        private_file(bridge,
+            'import json,os,sys\nfrom pathlib import Path\n'
+            'try:\n'
+            ' d=json.loads(Path(__file__).with_name("auth.json").read_text())\n'
+            ' os.environ["CODEX_HOME"]=d["codex_home"]\n'
+            ' fd=os.open(os.devnull,os.O_WRONLY);os.dup2(fd,2);os.close(fd)\n'
+            ' os.execv(d["command"],[d["command"],*d["args"]])\n'
+            'except Exception:\n'
+            ' sys.stderr.write("provider authentication helper failed\\n");sys.exit(1)\n',0o700)
+        effective={**layer['provider'],'auth':{'command':sys.executable,'args':['-I','-S','-B',str(bridge)]}}
+        # Only known scalar provider fields and the private bridge are emitted.
+        fields=[]
+        for key in ('name','base_url','wire_api','supports_websockets'):
+            if key in effective:fields.append(key+'='+json.dumps(effective[key]))
+        fields.append('auth={command='+json.dumps(sys.executable)+',args=["-I","-S","-B",'+json.dumps(str(bridge))+']}')
+        setting='model_providers.deepseek={'+','.join(fields)+'}'
+        launch=list(command[:-1])+['-c',setting,'-']
+        private_file(private/(policy['profile']+'.config.toml'),'# Minimal trusted direct provider profile.\n')
+        metadata={'provider':'deepseek','profile':policy['profile'],'wire_api':layer['provider']['wire_api'],
+                  'base_url':layer['provider']['base_url'],'provider_layer_hash':digest(layer),
+                  'auth_executable_sha256':sha(layer['auth']['command'])}
+        if 'supports_websockets' in layer['provider']:
+            metadata['supports_websockets']=layer['provider']['supports_websockets']
+        yield launch,dict(env,CODEX_HOME=str(private)),metadata
+
+
+def subject(root, git_binary, git_sha256):
+    if sha(git_binary)!=git_sha256:raise ValueError('trusted Git binary changed')
+    def git(*args):
+        result=subprocess.run([git_binary,'-c','core.hooksPath=/dev/null',*args],cwd=root,
+            env={**os.environ,'GIT_OPTIONAL_LOCKS':'0','GIT_CONFIG_GLOBAL':'/dev/null','GIT_CONFIG_NOSYSTEM':'1'},
+            capture_output=True,text=True,timeout=30)
+        if result.returncode:raise ValueError('subject Git query failed')
+        return result.stdout
+    names=git('ls-files','-co','--exclude-standard','-z').split('\0')
+    data={}
+    for name in sorted(set(names)-{''}):
+        if name.startswith('handoffs/') or name.endswith('/acceptance.md'):continue
+        path=Path(root)/name
+        data[name]=[path.lstat().st_mode,os.readlink(path) if path.is_symlink() else sha(path)] if path.exists() or path.is_symlink() else None
+    return digest({'base':git('rev-parse','HEAD').strip(),'files':data})
+
+
+def regular_control_file(path):
+    path=Path(path)
+    if path.is_symlink() or not stat.S_ISREG(path.stat().st_mode):raise ValueError('invalid control file')
+    if path.stat().st_uid!=os.getuid() or stat.S_IMODE(path.stat().st_mode)&0o022:
+        raise ValueError('unsafe control file permissions')
+    return path
+
+
+def validate_plan(plan_path, snapshot_path=None):
+    plan_path=regular_control_file(plan_path).resolve()
+    if plan_path.parent.name!='observations':raise ValueError('invalid observer plan directory')
+    control=plan_path.parent.parent
+    state=json.loads(regular_control_file(control/'state.json').read_text())
+    frozen=state['observer_snapshot']
+    snapshot=regular_control_file(snapshot_path or frozen['path']).resolve()
+    if (snapshot!=Path(frozen['path']) or snapshot.parent!=control
+            or sha(snapshot)!=frozen['sha256'] or stat.S_IMODE(snapshot.stat().st_mode)&0o222
+            or sha(Path(sys.executable).resolve())!=frozen['python_sha256']):
+        raise ValueError('trusted observer snapshot/interpreter changed')
+    plan=json.loads(plan_path.read_text())
+    execution=plan['execution']
+    if not isinstance(execution,str) or not re.fullmatch('[A-Za-z0-9_-]{1,128}',execution):
+        raise ValueError('invalid observer execution id')
+    if (plan_path.name!=execution+'-plan.json' or Path(plan['outcome'])!=control/'observations'/(execution+'.json')
+            or plan['cwd']!=frozen['root'] or plan['control']!=str(control)
+            or plan['snapshot_sha256']!=frozen['sha256']
+            or plan['subject']!=state['checkpoint']['subject']
+            or state['checkpoint'].get('execution',execution)!=execution):
+        raise ValueError('observer plan/checkpoint binding mismatch')
+    actor=plan['actor'];model=state['models'][actor]
+    provider='deepseek' if model.startswith('deepseek-') else 'openai' if model.startswith('gpt-') else None
+    profile=('deepseek' if model=='deepseek-flash' else 'deepseek-pro') if provider=='deepseek' else None
+    policy={'provider':provider,'profile':profile,'model':model}
+    if provider is None or plan['provider']!=provider or plan['policy']!=policy:
+        raise ValueError('observer role/provider binding mismatch')
+    paths=[];output=Path(state['output'])
+    for key in ('raw_log','last','stderr'):
+        path=Path(plan[key])
+        if path.parent not in (output,output/'observer') or path.is_symlink():
+            raise ValueError('observer output outside protected log scope')
+        if any(parent.is_symlink() for parent in (path.parent,output)):
+            raise ValueError('observer output symlink')
+        paths.append(str(path))
+    if len(set(paths))!=3:raise ValueError('observer outputs overlap')
+    command=plan['argv']
+    if not isinstance(command,list) or not command or not all(isinstance(x,str) for x in command):
+        raise ValueError('invalid observer client argv')
+    if not Path(command[0]).is_absolute() or sha(Path(command[0]).resolve())!=plan['binary_sha256']:
+        raise ValueError('native binary changed before dispatch')
+    timeout=plan.get('timeout',600)
+    if not isinstance(timeout,(int,float)) or isinstance(timeout,bool) or not 0<timeout<=1800:
+        raise ValueError('invalid bounded observer timeout')
+    return plan,control,frozen,policy
+
+
+def observe(plan_path, snapshot_path=None):
+    plan,control,frozen,policy=validate_plan(plan_path,snapshot_path)
+    record={key:value for key,value in plan.items() if key!='prompt'}
+    record.update(exit_code=None,completed_at=None)
+    try:
+        with provider_launch(control,policy,plan['argv'],dict(os.environ)) as (argv,env,metadata):
+            record.update(argv=argv,provider_metadata=metadata)
+            with Path(plan['raw_log']).open('x') as stdout,Path(plan['stderr']).open('x') as stderr:
+                child=subprocess.Popen(argv,cwd=plan['cwd'],env=env,stdin=subprocess.PIPE,
+                    stdout=stdout,stderr=stderr,text=True,start_new_session=True)
+                try:
+                    child.communicate(plan['prompt'],timeout=plan['timeout'])
+                except subprocess.TimeoutExpired:
+                    os.killpg(child.pid,signal.SIGKILL)
+                    child.communicate(timeout=5)
+                    record['infrastructure_error']='TimeoutExpired'
+                record['exit_code']=child.returncode
+    except Exception as error:
+        record['infrastructure_error']=type(error).__name__
+    try:
+        record['after_subject']=subject(plan['cwd'],frozen['git_binary'],frozen['git_sha256'])
+    except Exception as error:
+        record['infrastructure_error']=type(error).__name__
+    record.update(completed_at=now(),
+        log_sha256=sha(plan['raw_log']) if Path(plan['raw_log']).is_file() else None,
+        last_sha256=sha(plan['last']) if Path(plan['last']).is_file() else None)
+    temporary=Path(plan['outcome']+'.tmp')
+    private_file(temporary,json.dumps(record))
+    os.replace(temporary,plan['outcome'])
+
+
+if __name__=='__main__':
+    if len(sys.argv)!=2:raise SystemExit('trusted observer requires one protected plan')
+    observe(sys.argv[1],Path(__file__))
+'''
+_OBSERVER_SHA256 = hashlib.sha256(_OBSERVER_SOURCE.encode()).hexdigest()
+_FROZEN_HOST = {'__name__':'_aef_trusted_observer'}
+exec(compile(_OBSERVER_SOURCE, '<trusted-aef-observer>', 'exec'), _FROZEN_HOST)
 
 
 def sha(path):
@@ -137,6 +358,7 @@ class Runtime:
                 state = self._read(change)
                 if state['contract_hash'] != contract['contract_hash'] or state['targets'] != safe_targets:
                     raise ValueError('prepare would replace pinned checkpoint')
+                self._observer_snapshot(change,state)
                 return self._public(state)
             # Real repositories must have a clean Git base. Fixture injection is never admission.
             if not self.injected and self.git('status','--porcelain','--untracked-files=all').strip():
@@ -152,6 +374,7 @@ class Runtime:
                      'pending_decision':None,'acceptance_verified':False,'transition_kinds':['substantive','infrastructure','mechanical'],
                      'unknown_cost':True,'gpt_units':'credits','output':str(output),'audit_location':str(self.common/'aef-audit'/change),
                      'test_only':self.injected}
+            state['observer_snapshot']=self._install_observer(change)
             state['pending_decision'] = self._pending(state,'business')
             self._event(state,'mechanical','prepared')
             self._save(change,state)
@@ -563,107 +786,8 @@ class Runtime:
             raise ValueError('codex unavailable; sandbox cannot be widened')
         return [binary,'sandbox','--include-managed-config','-P','aef_stage','-c',self._permissions(change,actor),'-C',str(self.root),'--',*argv]
 
-    @staticmethod
-    def _provider_value(value):
-        value=value.strip()
-        if value.startswith('{') and value.endswith('}'):
-            parts=[];start=0;depth=0;quote=None;escaped=False
-            for i,char in enumerate(value[1:-1]):
-                if quote:
-                    if char==quote and not escaped:quote=None
-                    escaped=(char=='\\' and not escaped) if quote=='"' else False
-                elif char in ('"',"'"):quote=char
-                elif char in '[{':depth+=1
-                elif char in ']}':depth-=1
-                elif char==',' and depth==0:
-                    parts.append(value[1:-1][start:i]);start=i+1
-            parts.append(value[1:-1][start:])
-            result={}
-            for part in parts:
-                if not part.strip():continue
-                key,scalar=part.split('=',1);key=key.strip()
-                if not re.fullmatch('[a-z_]+',key) or key in result:raise ValueError()
-                result[key]=Runtime._provider_value(scalar)
-            return result
-        if value.startswith("'") and value.endswith("'") and "'" not in value[1:-1]:
-            return value[1:-1]
-        return ast.literal_eval(value)
-
-    @staticmethod
-    def _provider_tables(path):
-        """Read only supported provider/auth scalars; never evaluate config code.
-
-        The narrow parser also works with the project's Python 3.9. Unsupported
-        provider TOML fails closed rather than importing unrelated user settings.
-        """
-        tables={}; section=''; pending=''
-        try:
-            lines=Path(path).read_text(encoding='utf-8').splitlines()
-            for line in lines:
-                stripped=line.strip()
-                if not pending and stripped.startswith('['):
-                    if not re.fullmatch(r'\[[A-Za-z0-9_.-]+\]',stripped):
-                        section='';continue
-                    section=stripped[1:-1];continue
-                if section not in ('model_providers.deepseek','model_providers.deepseek.auth'):
-                    continue
-                if not stripped or stripped.startswith('#'):continue
-                pending=(pending+'\n'+stripped).strip()
-                if '=' not in pending:raise ValueError()
-                key, value=pending.split('=',1);key=key.strip()
-                if key not in ('name','base_url','wire_api','command','args','auth','auth.command','auth.args'):
-                    # Credential/env/proxy/custom header sources are not inferred.
-                    raise ValueError()
-                try:
-                    parsed=Runtime._provider_value(value.strip())
-                except (SyntaxError,ValueError):
-                    if value.strip().startswith(('[','{')) and not value.rstrip().endswith((']','}')):
-                        continue
-                    raise ValueError()
-                table=tables.setdefault(section,{})
-                if key in table:raise ValueError()
-                if key.startswith('auth.'):
-                    table=tables.setdefault('model_providers.deepseek.auth',{});key=key[5:]
-                    if key in table:raise ValueError()
-                if not isinstance(parsed,(str,list,dict)) or isinstance(parsed,list) and not all(isinstance(x,str) for x in parsed):
-                    raise ValueError()
-                table[key]=parsed;pending=''
-            if pending:raise ValueError()
-        except (OSError,ValueError,SyntaxError):
-            # Never expose source lines or auth helper arguments in errors.
-            raise ValueError('trusted provider/auth configuration unavailable or unsupported') from None
-        return tables
-
     def _load_provider_layer(self, profile, config_home=None):
-        if profile not in ('deepseek','deepseek-pro'):
-            raise ValueError('unapproved direct provider profile')
-        home=Path(config_home) if config_home is not None else Path(os.environ.get('CODEX_HOME',str(Path.home()/'.codex')))
-        provider={};auth={}
-        # Layer only these two whitelisted tables, not MCP/plugins/hooks/permissions.
-        paths=[home/'config.toml',home/(profile+'.config.toml')]
-        if not paths[1].is_file():
-            raise ValueError('trusted direct provider profile unavailable')
-        for path in paths:
-            if not path.is_file():continue
-            tables=self._provider_tables(path)
-            current=dict(tables.get('model_providers.deepseek',{}))
-            inline=current.pop('auth',{})
-            if not isinstance(inline,dict):raise ValueError('invalid provider authentication table')
-            provider.update(current);auth.update(inline)
-            auth.update(tables.get('model_providers.deepseek.auth',{}))
-        if (provider.get('base_url','').rstrip('/')!='https://api.deepseek.com'
-                or provider.get('wire_api')!='responses'
-                or set(provider)-{'name','base_url','wire_api'}
-                or set(auth)!={'command','args'} or not isinstance(auth['command'],str)
-                or not auth['command'] or not isinstance(auth['args'],list)
-                or not all(isinstance(x,str) for x in auth['args'])):
-            raise ValueError('unsupported direct provider/auth policy')
-        command=auth['command']
-        executable=command if Path(command).is_absolute() else shutil.which(command)
-        if not executable or not Path(executable).is_file():
-            raise ValueError('configured provider auth executable unavailable')
-        auth['command']=str(Path(executable).resolve())
-        return {'provider':provider,'auth':auth}
+        return _FROZEN_HOST['load_provider_layer'](profile,config_home)
 
     @staticmethod
     def _private_file(path, text, mode=0o600):
@@ -673,43 +797,10 @@ class Runtime:
 
     @contextlib.contextmanager
     def _provider_launch(self, change, actor, command, env):
-        """Trusted host only. Private auth material never enters argv or tool env.
-
-        A fresh CODEX_HOME contains only the sanitized named profile. System and
-        inherited managed restrictions are not disabled. A managed-policy refusal
-        remains a refusal; there is no fallback to the user's full configuration.
-        """
-        policy=self.policy(change,actor)
-        if policy['provider']=='openai':
-            yield command,env,{'provider':'openai','profile':None}
-            return
-        layer=self._load_provider_layer(policy['profile'])
-        parent=self._dir(change)/'private';parent.mkdir(mode=0o700,exist_ok=True)
-        if parent.is_symlink():raise ValueError('private provider control path is a symlink')
-        with tempfile.TemporaryDirectory(prefix='provider-',dir=parent) as temporary:
-            private=Path(temporary);os.chmod(private,0o700)
-            spec=private/'auth.json';bridge=private/'auth-bridge.py'
-            self._private_file(spec,json.dumps({**layer['auth'],'codex_home':os.environ.get('CODEX_HOME',str(Path.home()/'.codex'))}))
-            # The helper inherits host auth context; the model tool environment is
-            # separately reset by shell_environment_policy, with no secret vars.
-            self._private_file(bridge,
-                'import json,os,sys\nfrom pathlib import Path\n'
-                'try:\n'
-                ' d=json.loads(Path(__file__).with_name("auth.json").read_text())\n'
-                ' os.environ["CODEX_HOME"]=d["codex_home"]\n'
-                ' fd=os.open(os.devnull,os.O_WRONLY);os.dup2(fd,2);os.close(fd)\n'
-                ' os.execv(d["command"],[d["command"],*d["args"]])\n'
-                'except Exception:\n'
-                ' sys.stderr.write("provider authentication helper failed\\n");sys.exit(1)\n',0o700)
-            provider='model_providers.deepseek={name="Direct DeepSeek",base_url="https://api.deepseek.com/",wire_api="responses",auth={command='+json.dumps(sys.executable)+',args=['+json.dumps(str(bridge))+']}}'
-            # No original profile/auth args are copied into this public command.
-            launch=list(command[:-1])+['-c',provider,'-']
-            self._private_file(private/(policy['profile']+'.config.toml'),'# Minimal trusted direct provider profile.\n')
-            host_env=dict(env,CODEX_HOME=str(private))
-            metadata={'provider':'deepseek','profile':policy['profile'],'wire_api':'responses',
-                      'base_url':'https://api.deepseek.com/','provider_layer_hash':digest(layer),
-                      'auth_executable_sha256':sha(layer['auth']['command'])}
-            yield launch,host_env,metadata
+        # Programmatic host helper; privileged callbacks use the frozen standalone
+        # implementation as well, not a new import of this Runtime module.
+        with _FROZEN_HOST['provider_launch'](self._dir(change),self.policy(change,actor),command,env) as launch:
+            yield launch
 
     def _codex_command(self, change, actor, last_message):
         binary=shutil.which('codex')
@@ -763,26 +854,66 @@ class Runtime:
                                        observer/(request['execution']+'.stderr'))
         return self._observed_result(observation)
 
+    def _install_observer(self, change):
+        if sys.version_info<(3,11):
+            raise ValueError('trusted observer transport requires Python >=3.11 (stdlib tomllib)')
+        directory=self._dir(change)
+        path=directory/('observer-'+_OBSERVER_SHA256+'.py')
+        if not path.exists():
+            self._private_file(path,_OBSERVER_SOURCE,0o500)
+        if path.is_symlink() or sha(path)!=_OBSERVER_SHA256 or path.stat().st_mode&0o222:
+            raise ValueError('trusted observer snapshot is not immutable')
+        python=str(Path(sys.executable).resolve())
+        git=shutil.which('git')
+        if not git:raise ValueError('trusted observer requires Git')
+        git=str(Path(git).resolve())
+        return {'path':str(path),'sha256':_OBSERVER_SHA256,'python':python,'python_sha256':sha(python),
+                'git_binary':git,'git_sha256':sha(git),'root':str(self.root)}
+
+    def _observer_snapshot(self, change, state):
+        frozen=state.get('observer_snapshot')
+        if not frozen or frozen.get('sha256')!=_OBSERVER_SHA256 or frozen.get('root')!=str(self.root):
+            raise ValueError('checkpoint lacks this trusted observer; no candidate-based replacement allowed')
+        path=Path(frozen['path'])
+        if path!=self._dir(change)/('observer-'+_OBSERVER_SHA256+'.py') or path.is_symlink():
+            raise ValueError('observer outside protected control scope')
+        _FROZEN_HOST['regular_control_file'](path)
+        if sha(path)!=frozen['sha256'] or path.stat().st_mode&0o222 or sha(frozen['python'])!=frozen['python_sha256']:
+            raise ValueError('trusted observer snapshot/interpreter changed')
+        return frozen
+
     def _run_observed(self, change, actor, execution, command, env, prompt, raw, last, stderr, timeout=None):
+        if not re.fullmatch('[A-Za-z0-9_-]{1,128}',execution):raise ValueError('invalid execution id')
+        state=self._read(change);frozen=self._observer_snapshot(change,state)
         observations=self._dir(change)/'observations';observations.mkdir(exist_ok=True)
-        state=self._read(change)
+        policy=self.policy(change,actor)
+        limit=600 if timeout is None else timeout
+        if not isinstance(limit,(int,float)) or isinstance(limit,bool) or not 0<limit<=1800:
+            raise ValueError('invalid bounded observer timeout')
         plan={'execution':execution,'subject':state['checkpoint']['subject'],'argv':command,
               'binary_sha256':sha(Path(command[0]).resolve()),'cwd':str(self.root),'prompt':prompt,
-              'raw_log':str(raw),'stderr':str(stderr),'last':str(last),'timeout':timeout,
-              'provider':self.policy(change,actor)['provider'],'actor':actor,'change':change,
+              'raw_log':str(raw),'stderr':str(stderr),'last':str(last),'timeout':limit,
+              'provider':policy['provider'],'actor':actor,'change':change,
+              'policy':{key:policy[key] for key in ('provider','profile','model')},
+              'snapshot_sha256':frozen['sha256'],'control':str(self._dir(change)),
               'outcome':str(observations/(execution+'.json'))}
         plan_path=observations/(execution+'-plan.json');self._private_file(plan_path,json.dumps(plan))
-        # The trusted waiter owns auth cleanup and process exit for both normal
-        # stages and QA, even if the calling coordinator disappears.
-        waiter=subprocess.Popen([sys.executable,'-B',str(Path(__file__).resolve()),'observe',str(plan_path)],
-                                cwd=self.root,env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL,start_new_session=True)
-        waiter.wait()
+        # -I -S excludes candidate imports, user site, PYTHONPATH and startup hooks.
+        # The protected snapshot contains the complete native/auth bootstrap.
+        waiter=subprocess.Popen([frozen['python'],'-I','-S','-B',frozen['path'],str(plan_path)],
+                                cwd=self._dir(change),env=env,stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+        try:
+            waiter.wait(timeout=limit+45)
+        except subprocess.TimeoutExpired:
+            # Leave the independent observer to finish cleanup. No second dispatch.
+            raise InterruptedError('trusted observer reconciliation required') from None
         if waiter.returncode or not Path(plan['outcome']).is_file():
             raise InterruptedError('native exit observer did not publish a completion')
         observed=json.loads(Path(plan['outcome']).read_text())
-        if observed.get('execution')!=execution or observed.get('subject')!=plan['subject']:
-            raise ValueError('exit observer execution/subject mismatch')
+        if (observed.get('execution')!=execution or observed.get('subject')!=plan['subject']
+                or observed.get('snapshot_sha256')!=frozen['sha256']):
+            raise ValueError('exit observer execution/subject/snapshot mismatch')
         return observed
 
     def _observed_result(self, observed):
@@ -1024,35 +1155,9 @@ print('''+repr('NATIVE_DENIALS_VERIFIED '+marker)+''')
 
 
 def observe(plan_path):
-    """Trusted exit observer entry; the plan and completion live outside stage write scope."""
-    plan_path=Path(plan_path).resolve()
-    plan=json.loads(plan_path.read_text())
-    if plan_path.parent!=Path(plan['outcome']).resolve().parent or plan_path.parent.name!='observations':
-        raise ValueError('invalid observer control directory')
-    if sha(Path(plan['argv'][0]).resolve())!=plan['binary_sha256']:
-        raise ValueError('native binary changed before dispatch')
-    runtime=Runtime(plan['cwd'])
-    record={k:v for k,v in plan.items() if k!='prompt'}
-    record.update(exit_code=None,completed_at=None)
-    try:
-        launch=runtime._provider_launch(plan['change'],plan['actor'],plan['argv'],dict(os.environ)) if 'actor' in plan else contextlib.nullcontext((plan['argv'],dict(os.environ),{}))
-        with launch as (argv,env,provider_metadata):
-            record.update(argv=argv,provider_metadata=provider_metadata)
-            with Path(plan['raw_log']).open('x') as stdout,Path(plan['stderr']).open('x') as stderr:
-                result=subprocess.run(argv,input=plan['prompt'],text=True,cwd=plan['cwd'],env=env,stdout=stdout,stderr=stderr,timeout=plan.get('timeout'))
-                record['exit_code']=result.returncode
-    except Exception as error:
-        record['infrastructure_error']=type(error).__name__
-    record.update(after_subject=runtime._subject(),completed_at=now(),
-                  log_sha256=sha(plan['raw_log']) if Path(plan['raw_log']).is_file() else None,
-                  last_sha256=sha(plan['last']) if Path(plan['last']).is_file() else None)
-    temporary=Path(plan['outcome']+'.tmp')
-    with temporary.open('x') as stream:
-        json.dump(record,stream);stream.flush();os.fsync(stream.fileno())
-    os.replace(temporary,plan['outcome'])
+    """Programmatic compatibility entry. The frozen implementation imports no Runtime."""
+    return _FROZEN_HOST['observe'](plan_path)
 
 
 if __name__=='__main__':
-    if len(sys.argv)!=3 or sys.argv[1]!='observe':
-        raise SystemExit('trusted observer expects a protected launch plan')
-    observe(sys.argv[2])
+    raise SystemExit('use aef.py; privileged observers run only the prepared protected snapshot')
