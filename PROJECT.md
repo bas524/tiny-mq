@@ -74,7 +74,7 @@ Linux CI проверяет эти же файлы под GCC с `-Werror`.
 |---|---|---|
 | `HOT_PATHS` | Destination.*, DeliveryScheduler.*, Producer.*, Consumer.*, Session.*, Message.*, MessageProperty.*, Selector.*, LinearStorage.*, ConcurrentLinearStorage.*, TransactionBuffer.*; сетевой data plane после появления | перечень путей кода, изменение которых требует НФТ-шлюза |
 | `NFR_THRESHOLD` | регрессия CPU time/op свыше 5% по согласованному набору горячих путей | порог НФТ, при превышении которого шлюз возвращает `rejected` (например, регрессия > 5% по `медиане CPU time/op по 9 повторам, ABBA на одной машине`) |
-| `INHERITED_CONSTRAINTS` | ADR-0001–0009 и совместимость сохранённых записей. C++20 — текущий минимум, который можно повысить по INT-01. | Форматы данных, модель потоков, объектная модель, публичные контракты. Изменение инварианта оформляется ADR. |
+| `INHERITED_CONSTRAINTS` | ADR-0001–0010 и совместимость сохранённых записей. C++20 — текущий минимум, который можно повысить по INT-01. | Форматы данных, модель потоков, объектная модель, публичные контракты. Изменение инварианта оформляется ADR. |
 | `PAIRED_CHANGES` | кодер ↔ декодер; заголовки ↔ кешированные байты ADR-0008; MessageProperty ↔ PocoAnyVisitor; Destination::save ↔ Destination::deliverCommitted | пары артефактов, которые меняются только вместе (сериализация ↔ десериализация, реестр типов ↔ код их обхода) |
 | `RECURRING_DEFECTS` | исключения из деструктора (ADR-0006); регрессия кешированных заголовков (ADR-0008) | классы дефектов, уже повторявшиеся в проекте, с указанием ADR, который их закрепил как инвариант |
 | `DIAGRAM_FORMAT` | Mermaid | текстовый формат схем проекта (исходник версионируется рядом с кодом; изображения не принимаются) |
@@ -90,3 +90,18 @@ Linux CI проверяет эти же файлы под GCC с `-Werror`.
 Оценку повышения стандарта C++ и выбора библиотек проводи по этим ограничениям. Критерии
 поставки закреплены в [SDD 77](docs/jms-spec/77-jakarta-conformance-release.md) и
 [SDD 78](docs/jms-spec/78-jakarta-high-availability.md).
+
+## Обязательный CI и НФТ
+
+Защита `main`: `strict=true`, `enforce_admins=true`; обязательны шесть checks обычного CI:
+`ASan gate`, `Jakarta Messaging contract (Java)`, `Сборка и тесты (macos-latest)`,
+`Сборка и тесты (ubuntu-latest)`, `Дистрибутив (macos-latest)`, `Дистрибутив (ubuntu-latest)`.
+Основание: [снимок required checks](handoffs/current/72/logs/main-required-ci-checks.json)
+и решение Owner R1 от 2026-11-19. GitHub Performance не требуется: workflow отключён
+глобально и удалён по решению Owner.
+
+НФТ-бюджет +5%, CPU CV ≤5%, ABBA, девять повторов на сторону и учёт CPU storage workers
+сохраняются; методика — [nfr-gate](.claude/skills/nfr-gate/SKILL.md).
+Waiver разрешает только SDD 72 / PR №12 по обычному CI: REQ-72-9 остаётся открытым в
+[M-05](tasks/M-05-local-nightly-performance.md), технический performance verdict rejected.
+Локальный ночной job ещё не настроен; до согласования времени Owner расписание не создаётся.

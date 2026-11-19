@@ -1,7 +1,10 @@
 # ADR-0010: Решение локальной транзакции и восстановление доставки
 
-- Статус: proposed
+- Статус: accepted
 - Дата: 2026-11-16
+- Принято: 2026-11-19, Owner R1 closure SDD 72.
+- Review Date: 2026-11-19
+- Основание: [бриф приёмки](../docs/reviews/72-jakarta-delivery.brief.md), REQ-72-1…8 approved; REQ-72-9 deferred в M-05, performance pass не заявляется.
 
 ## Контекст
 

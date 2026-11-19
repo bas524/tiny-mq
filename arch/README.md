@@ -8,7 +8,8 @@
 
 tiny-mq — переосмысление [ivk-jsc/broker](https://github.com/ivk-jsc/broker) с
 целью получить брокер сообщений, поведенчески соответствующий спецификации
-Java Message Service (JMS 2.0), плюс нативную C++ клиентскую библиотеку.
+Jakarta Messaging 3.1 для приложений на разных языках, включая нативную C++ клиентскую библиотеку.
+Java SE, XA, Jakarta EE и HA входят в будущие профили выпуска по [INT-01](../requirements/intents/INT-01-jakarta-messaging.md).
 Решения, которые формируют облик системы, документируются здесь, чтобы их можно
 было пересмотреть осознанно.
 
@@ -32,7 +33,7 @@ Java Message Service (JMS 2.0), плюс нативную C++ клиентску
 | [0007](0007-delivery-scheduler-per-destination-lazy-thread.md) | Delivery delay — таймер на Destination, ленивый старт потока | accepted |
 | [0008](0008-header-and-cached-bytes-invariant.md) | Заголовки сообщения и `_cachedStorageBytes` меняются только вместе | accepted |
 | [0009](0009-destination-claim-and-ownership.md) | Атомарный claim и владение очередью подписки | accepted |
-| [0010](0010-atomic-local-delivery.md) | Решение локальной транзакции и восстановление доставки | proposed |
+| [0010](0010-atomic-local-delivery.md) | Решение локальной транзакции и восстановление доставки | accepted (Owner R1, 2026-11-19; [бриф](../docs/reviews/72-jakarta-delivery.brief.md)) |
 
 ## Шаблон нового ADR
 

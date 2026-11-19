@@ -82,6 +82,7 @@ python3 .claude/chain/openspec.py archive  <NN-slug>  # слияние дель�
 - [jakarta-destinations](specs/jakarta-destinations/spec.md)
 - [jakarta-message-contract](specs/jakarta-message-contract/spec.md)
 - [message-redelivery](specs/message-redelivery/spec.md)
+- [jakarta-session-delivery](specs/jakarta-session-delivery/spec.md)
 
 ## Поставка версиями
 

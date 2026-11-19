@@ -1,7 +1,7 @@
 # Явный toolchain сравнительного Linux-замера (M-04)
 
 - **Класс:** сопровождение, сборочная оснастка.
-- **Статус:** проверено локально; GitHub не принят.
+- **Статус:** closed — техническая сборочная задача решена в run `44475262358`; измерение rejected, НФТ не пройден.
 - **Autonomy Level:** подготовка R2, слияние R1.
 - **Заведено:** 2026-11-18 по PR №12.
 - **Owner:** Alexander B.
@@ -10,8 +10,8 @@
 
 [Broker hot paths на Ubuntu 24.04](https://github.com/bas524/tiny-mq/actions/runs/44364616253)
 не дошёл до замеров: линковка baseline `230eefe` с GCC 13 и LTO
-остановилась на `-Werror=maybe-uninitialized` в `std::optional` внутри
-тестов MessageContractTest. Полный журнал сохранён в
+остановилась на `-Werror=maybe-uninitialized` в `std::optional/variant`,
+`server/src/Selector.cpp:257`. Полный журнал сохранён в
 `handoffs/current/72/logs/github-ubuntu24-job-135014904620.log`.
 
 Повтор со штатным GCC 14 также остановил baseline main `230eefe` до измерений:
@@ -59,5 +59,11 @@ GNU14 LTO, `Selector.cpp:257`, `std::optional/variant`,
 
 - Исходные сбои приведены выше. Локальная готовность YAML/shell:
   `handoffs/current/72/logs/producer-i4-clang-ready.log`.
-- GitHub не запускался этой стадией; успешная Linux-сборка и результаты НФТ
-  ожидаются от оператора и независимого NFR. Независимый reviewer — отдельная стадия.
+- [Run 44475262358](https://github.com/bas524/tiny-mq/actions/runs/44475262358):
+  обе ревизии — main `230eefe8` и merge `35fac1e4` — построены Clang 18.1.3 / LLD 18.1.3
+  с прежними LTO и warning-as-error; выполнены все 15 сравнений.
+- [Независимый Reviewer](../docs/reviews/72-jakarta-delivery.review.md) approved;
+  [НФТ-пересчёт](../docs/reviews/72-jakarta-delivery.nfr.md) rejected:
+  AutoAck +6,59%, CV 0,57% / 1,73%. Успешная сборка не означает performance pass.
+- По решению Owner workflow удаляется из GitHub; история run и пакеты сохраняются.
+  Измерительный долг REQ-72-9 продолжает открытая [M-05](M-05-local-nightly-performance.md).

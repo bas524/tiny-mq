@@ -1,7 +1,7 @@
 # Удаление метаданных попытки через псевдоним корня хранилища (M-01)
 
 - **Класс:** сопровождение, дефект хранения.
-- **Статус:** в работе.
+- **Статус:** closed — исправлено в `ca7699547336a3d6177a2295034522e4f2e21b62`, принято Owner при closure SDD 72 (2026-11-19).
 - **Autonomy Level:** R2, слияние R1.
 - **Заведено:** 2026-11-18 по проверке кандидата SDD 72.
 - **Owner:** Alexander B.
@@ -39,8 +39,10 @@
   через псевдоним корня. Проверка работает на POSIX с временным симлинком.
 - Существующие защиты `decision` и `attempt-72` сохраняются при попытках
   подмены вложенного пути. Внешние файлы сохраняют содержимое.
-- Полный Debug и `clang-tidy`, матрица Release и Broker hot paths на
-  публикуемой редакции PR №12.
+- Полный Debug и `clang-tidy`, матрица Release на функциональной редакции PR №12.
+  Прежний критерий Broker hot paths заменён явным Owner waiver только для SDD 72:
+  «Влить по обычному CI, perf — отдельная задача». REQ-72-9 остаётся открытым в
+  [M-05](M-05-local-nightly-performance.md), measurement rejected, performance pass нет.
 
 ## Scope-lock
 
@@ -52,3 +54,11 @@
 ## Evidence
 
 - `handoffs/current/M-01/logs/repro-before.log`
+- [Security formal probe A–F](../handoffs/current/72/logs/security-formal-probe.log):
+  trusted root alias 1→0 attempt frames после ack; подмена decision/attempt-72,
+  FIFO, corruption и replay проверены без изменения внешних файлов.
+- [Reviewer Debug 180/180](../handoffs/current/72/logs/reviewer-clang-retry-verify-debug.log),
+  [Release DeliveryContractTest 8/8](../handoffs/current/72/logs/reviewer-clang-retry-release-delivery.log),
+  [clang-tidy](../handoffs/current/72/logs/reviewer-clang-retry-clang-tidy.log).
+- [Решение Owner и ограниченный waiver](../docs/reviews/72-jakarta-delivery.nfr.md),
+  [канонические результаты шлюзов](../docs/reviews/72-jakarta-delivery.gates.md).
