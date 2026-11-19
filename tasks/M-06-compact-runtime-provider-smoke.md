@@ -66,3 +66,13 @@ Evidence handoffs/current/79/logs/operator-mutable-observer-repro.json.
 REQ79-4: waiter обязан быть неизменным снимком control plane, недоступным модели,
 не импортировать изменяемые project-модули и сохранять подлинные exit/cleanup.
 Нужен постоянный регрессионный тест до исправления и независимая критика критерия.
+
+Дополнительный фактический repro загрузки существующего provider-layer:
+logs/operator-provider-layer-compat-r2.json — rejected без API. Доверенный
+профиль содержит штатное supports_websockets=false; whitelist/parser ошибочно
+его отвергает. Исправить stdlib-разбор/явную безопасную валидацию, сохраняя
+этот параметр в effective provider config и существующий auth-helper.
+Observer regression усилен по round4 и принят round5 content-clean: реальный
+child nonce/exit7, subject/execution/binary/log hash и cleanup private context.
+Proposal/design и бизнес-архитектура Owner не изменялись; это критерий исходного
+REQ79-4. Критерии фиксируются до зависимого исправления control plane.

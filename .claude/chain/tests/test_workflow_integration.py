@@ -154,6 +154,65 @@ main(['next','79-demo'],runtime=r)
 
 
 class NativeExecutionIntegrationTest(unittest.TestCase):
+    def test_mutable_controller_cannot_replace_observer(self):
+        """REQ-79-4: immutable control, actual exit/log provenance and auth cleanup."""
+        import importlib.util
+        import uuid
+        from unittest.mock import patch
+        f=WorkflowFixture();self.addCleanup(f.close)
+        chain=f.root/'.claude/chain'
+        names=('workflow_runtime.py','workflow_contract.py','workflow_policy.py')
+        for name in names:(chain/name).write_bytes((CHAIN/name).read_bytes())
+        config=f.root/'synthetic-provider';config.mkdir()
+        (config/'config.toml').write_text('[model_providers.deepseek]\nname="Direct DeepSeek"\nbase_url="https://api.deepseek.com/"\nwire_api="responses"\nsupports_websockets=false\n[model_providers.deepseek.auth]\ncommand="/usr/bin/true"\nargs=[]\n')
+        (config/'deepseek-pro.config.toml').write_text('model_provider="deepseek"\nmodel="deepseek-v4-pro"\n')
+        client=f.root/'synthetic-client.py'
+        client.write_text('import os,sys,json\nfrom pathlib import Path\nhome=Path(os.environ["CODEX_HOME"])\nPath(sys.argv[1]).write_text(json.dumps({"nonce":sys.argv[2],"private_home":str(home),"profile_present":(home/"deepseek-pro.config.toml").is_file()}))\nprint("OBSERVED_CHILD_"+sys.argv[2],flush=True)\nsys.exit(7)\n')
+        f.git('add','.');f.git('commit','-qm','pin trusted fixture controller')
+        def load(name):
+            spec=importlib.util.spec_from_file_location(name,chain/(name+'.py'))
+            module=importlib.util.module_from_spec(spec);sys.modules[name]=module
+            spec.loader.exec_module(module);return module
+        # Every controller import points at this candidate, never real project files.
+        with patch.dict(sys.modules),patch.dict(os.environ,{'CODEX_HOME':str(config)}):
+            load('workflow_policy');load('workflow_contract');module=load('workflow_runtime')
+            runtime=module.Runtime(f.root)
+            runtime.prepare('79-demo',targets=['.claude/chain/'+name for name in names])
+            state=runtime._read('79-demo');state['test_only']=True
+            marker=f.root/'outside-role-output-marker'
+            payload='from pathlib import Path\nPath('+repr(str(marker))+').write_text("UNTRUSTED_CONTROL_EXECUTED")\n'
+            for name in names:(chain/name).write_text(payload)
+            state['checkpoint']={'subject':runtime._subject()};runtime._save('79-demo',state)
+            output=Path(state['output'])/'observer';output.mkdir(parents=True,exist_ok=True)
+            effect=Path(runtime.policy('79-demo','reviewer')['output'])/'child-proof.json'
+            effect.parent.mkdir(parents=True,exist_ok=True)
+            nonce=uuid.uuid4().hex;raw=output/'raw.jsonl'
+            argv=[sys.executable,str(client),str(effect),nonce,'-']
+            observed=None
+            try:
+                observed=runtime._run_observed('79-demo','reviewer','observer-integrity',
+                    argv,runtime._tool_env(state,'reviewer'),'',raw,
+                    output/'last.json',output/'stderr.log')
+            except (InterruptedError,ValueError,OSError):
+                pass
+            self.assertFalse(marker.exists(),'mutable control-plane code executed outside actor scope')
+            self.assertTrue(effect.is_file(),'the real harmless child must execute')
+            child=json.loads(effect.read_text());self.assertEqual(child['nonce'],nonce)
+            self.assertTrue(child['profile_present'])
+            self.assertNotEqual(Path(child['private_home']),config)
+            self.assertFalse(Path(child['private_home']).exists(),'private auth context must be cleaned')
+            self.assertFalse(list((runtime._dir('79-demo')/'private').glob('provider-*')))
+            self.assertIsInstance(observed,dict)
+            self.assertEqual(observed['exit_code'],7)
+            self.assertEqual(observed['execution'],'observer-integrity')
+            self.assertEqual(observed['subject'],state['checkpoint']['subject'])
+            self.assertEqual(observed['raw_log'],str(raw))
+            self.assertEqual(raw.read_text(),'OBSERVED_CHILD_'+nonce+'\n')
+            self.assertEqual(observed['log_sha256'],hashlib.sha256(raw.read_bytes()).hexdigest())
+            self.assertEqual(observed['binary_sha256'],hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest())
+            self.assertEqual(observed['argv'][:4],argv[:4])
+            self.assertEqual(observed['provider'],'deepseek')
+
     @unittest.skipUnless(os.environ.get('AEF_NATIVE_SMOKE')=='1','Explicit native OS sandbox receipt required before cutover')
     def test_real_native_policy_denials(self):
         """REQ-79-4: actual OS refusal, with no secret bytes read."""

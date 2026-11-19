@@ -58,6 +58,11 @@ ID: `REQ-79-4`
 - Test: `.claude/chain/tests/test_workflow_integration.py::NativeExecutionIntegrationTest::test_real_native_policy_denials`
 - Test: `.claude/chain/tests/test_workflow_integration.py::NativeExecutionIntegrationTest::test_codex_exec_profiles_and_guard_observation`
 
+#### Scenario: Неизменный наблюдатель
+- **WHEN** разрешённая стадия меняет candidate runtime, contract или policy перед следующим trusted waiter
+- **THEN** waiter не исполняет и не импортирует изменяемый control plane, использует защищённый снимок; реальный дочерний процесс выполняется, его exit и лог связаны с execution, subject и хэшем бинарника; временный private auth-контекст удаляется и при ненулевом exit
+- Test: `.claude/chain/tests/test_workflow_integration.py::NativeExecutionIntegrationTest::test_mutable_controller_cannot_replace_observer`
+
 ### Requirement: Свежесть свидетельств
 Runtime SHALL связывать проверку с содержимым, тестами, зависимостями и окружением; применять собственные проверки проверяющего и повторять затронутые проверки.
 
