@@ -286,4 +286,32 @@ class LegacyPreservationIntegrationTest(unittest.TestCase):
         self.assertEqual(inp.returncode,0,inp.stdout+inp.stderr)
         data=json.loads(inp.stdout); self.assertTrue(data['sources']);self.assertIsNotNone(data['intent'])
 
+    def test_native_trace_roundtrips_legacy_admission(self):
+        """REQ-79-1/7: the full native contract binds reused admission without losing INT."""
+        from types import SimpleNamespace
+        import route
+        import admission
+        proposal='openspec/changes/79-aef-journey-harness/proposal.md'
+        raw=json.loads(subprocess.check_output([sys.executable,'-B',str(CHAIN/'trace.py'),'input',proposal],cwd=ROOT,text=True))
+        self.assertEqual(set(raw['intent']),{'goal','constraints','success_criteria','cancellation_criteria','expected_effect'})
+        with tempfile.TemporaryDirectory(prefix='aef-native-admission-') as folder:
+            ctx=SimpleNamespace(root=str(ROOT),sdd=proposal,child_env=dict(os.environ),outdir=folder,
+                spec='79',cfg={},pkg=str(Path(folder)/'critic.json'),digest='fixture',data={'verdict':'clean'})
+            route.record_critic_input(ctx)
+            record_path=Path(folder)/'critic.input.json'
+            record=json.loads(record_path.read_text())
+            self.assertTrue(admission.record_ok(record))
+            self.assertIsNone(record['admission'])
+            self.assertEqual(record['intent']['path'],proposal)
+            self.assertEqual(record['intent']['pinned'],raw['contract_hash'])
+            self.assertIsNone(route.check_critic_input(ctx,'explained'))
+            self.assertEqual(record['sources'],[{key:item[key] for key in ('ref','path','pinned')} for item in raw['sources']])
+            for field in ('intent','sdd_snapshot'):
+                tampered=copy.deepcopy(record)
+                if field=='intent':tampered['intent']['pinned']='0'*64
+                else:tampered['sdd_snapshot']='tree:'+'0'*64
+                record_path.write_text(json.dumps(tampered))
+                with self.subTest(tampered=field),self.assertRaises(route.StopChain):
+                    route.check_critic_input(ctx,'explained')
+
 if __name__=='__main__':unittest.main()
