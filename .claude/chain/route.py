@@ -689,9 +689,43 @@ def current_input(ctx):
             data = json.loads(r.stdout.decode("utf-8", "surrogateescape"))
         except ValueError:
             data = None
-    ok, snap = fingerprint(ctx, paths=[ctx.sdd]) if isinstance(data, dict) else (False, "")
+    paths = [ctx.sdd]
+    normalization_error = ""
+    if isinstance(data, dict):
+        try:
+            from workflow_contract import native, load_contract
+            path = Path(ctx.root) / ctx.sdd
+            if native(path):
+                # Native INT5 is content, not a legacy document identity. Verify
+                # the raw trace against live canonical inputs before adapting it.
+                contract = load_contract(path)
+                sources = list({item["ref"]: item for item in contract["sources"]}.values())
+                if (data.get("sdd") != ctx.sdd
+                        or any(data.get(key) != contract[key] for key in ("intent", "contract_hash", "files", "line_map"))
+                        or data.get("sources") != sources
+                        or not isinstance(data.get("contracts"), list)):
+                    raise ValueError("native trace does not match the complete canonical contract")
+                paths = list(contract["files"])
+                for key in ("sources", "contracts"):
+                    for document in data[key]:
+                        if (not isinstance(document, dict)
+                                or any(not isinstance(document.get(field), str) or not document[field]
+                                       for field in ("ref", "path", "pinned"))
+                                or "head" not in document):
+                            raise ValueError("native trace has an unknown source identity")
+                identity = {"ref": "native-contract:" + ctx.sdd, "path": ctx.sdd,
+                            "pinned": contract["contract_hash"], "head": contract["contract_hash"]}
+                # The legacy record schema remains unchanged. Full native INT5,
+                # coordinates and source records remain available to all callers.
+                data = dict(data, native_context=data, intent=identity)
+            elif "contract_hash" in data or "files" in data:
+                raise ValueError("native identity supplied for a non-native input")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            normalization_error = str(error)
+            data = None
+    ok, snap = fingerprint(ctx, paths=paths) if isinstance(data, dict) else (False, "")
     if not isinstance(data, dict) or not ok or not snap:
-        why = r.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[:200] or "снимок SDD не вычисляется"
+        why = normalization_error or r.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[:200] or "снимок SDD не вычисляется"
         stop(ctx, f"INPUT-UNREADABLE spec={ctx.spec} sdd={ctx.sdd}",
              f"вход разбора не прочитан ({why}): вердикт по нему не проверить -> запрет по умолчанию, остановка")
     return data, snap

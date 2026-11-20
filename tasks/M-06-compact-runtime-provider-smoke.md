@@ -132,3 +132,14 @@ R5 trace contract_hash и нынешний native contract_hash совпадаю
 ослаблять. Затем author5 и свежие independent review/security/conformance,
 актуальные applicability/docs/brief. Лимит18 исчерпан; новые CLI-стадии до
 отдельного Owner-разрешения не запускать.
+
+## Исправление5: проверен механический маршрут
+Изменён только route.current_input: native INT5 остаётся в raw trace и
+native_context, legacy identity привязана к хэшу полного канонического
+контракта; fingerprint охватывает все его файлы. Подмена/устаревание блокируются.
+Оператор повторил30 runtime/policy тестов (2 opt-in skipped), legacy2 и
+сквозной synthetic CLI-маршрут из30 команд до настоящего рубежа человека,
+с отрицательными случаями. Evidence logs/operator-r5/checks.json.
+Фикстура не импортируется как допуск. Реальный witness R5 admission:false
+остаётся неизменённым. Owner отдельно разрешил6й раунд только79 при общем26;
+ожидается новый действительный пакет критика, затем независимые проверки.
