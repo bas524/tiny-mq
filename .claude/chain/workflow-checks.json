@@ -155,5 +155,8 @@
         }
       ]
     }
+  },
+  "unavailable_profiles": {
+    "cpp": "unavailable: product build, NFR and isolation profile is not verified"
   }
 }

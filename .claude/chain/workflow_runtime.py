@@ -271,7 +271,11 @@ class Runtime:
         self.registry = json.loads(self.registry_path.read_text())
         if self.registry.get('version') != 1:
             raise ValueError('unsupported check registry')
-        self.profile = self.registry['profiles'][self.registry['default_profile']]
+        self.profile_name=self.registry.get('default_profile')
+        self.unavailable_profiles=self.registry.get('unavailable_profiles',{'cpp':'unavailable: product verification is not installed'})
+        if self.profile_name in self.unavailable_profiles or self.profile_name not in self.registry.get('profiles',{}):
+            raise ValueError('unknown or unavailable check profile')
+        self.profile = self.registry['profiles'][self.profile_name]
 
     def git(self, *args):
         result = subprocess.run(['git','-c','core.hooksPath=/dev/null',*args],cwd=self.root,capture_output=True,text=True,
@@ -325,6 +329,8 @@ class Runtime:
     def _pending(self, state, kind):
         card = {'kind':kind,'contract_hash':state['contract_hash'], 'action':{'business':'critic','architecture':'implement','acceptance':'accept','archive':'archive'}.get(kind,kind),
                 'requirement_ids':state['requirement_ids'], 'acceptance_hash':state.get('acceptance_hash'), 'code_subject':self._subject(), 'nonce':uuid.uuid4().hex}
+        if kind in ('acceptance','archive'):
+            card['material_hash']=load_contract(self._proposal(state['change']))['material_hash']
         return {'kind':kind,'subject':digest(card),'card':card,
                 'question':json.dumps(card,sort_keys=True,ensure_ascii=False)}
 
@@ -349,6 +355,16 @@ class Runtime:
             raise ValueError('target escapes root')
         return str(target)
 
+    def _covered_target(self, value):
+        target=Path(self._safe_target(value))
+        if target.suffix.lower() in ('.c','.cc','.cpp','.cxx','.h','.hh','.hpp','.hxx','.ixx','.tpp'):
+            raise ValueError('cpp profile unavailable; unchecked product target')
+        for name in self.profile.get('code_paths',[]):
+            base=self.root/name
+            if Path(name).is_absolute() or '..' in Path(name).parts:raise ValueError('invalid profile scope')
+            if target==base or base.is_dir() and target.is_relative_to(base):return str(target)
+        raise ValueError('target outside checked profile scope: '+value)
+
     def prepare(self, change, targets=None):
         contract = load_contract(self._proposal(change))
         if targets is None:
@@ -358,7 +374,7 @@ class Runtime:
             else:
                 scope_path = self.root / 'handoffs/current' / change.split('-')[0] / 'implementation-targets.json'
                 targets = json.loads(scope_path.read_text())['target_files']
-        safe_targets = [self._safe_target(t) for t in targets]
+        safe_targets = [self._covered_target(t) for t in targets]
         if not safe_targets or len(set(safe_targets)) != len(safe_targets):
             raise ValueError('empty/duplicate targets')
         with self._lock(change):
@@ -394,6 +410,7 @@ class Runtime:
         if state.get('audit_location')!=location:
             result['previous_audit_location']=state.get('audit_location')
         result['audit_location']=location
+        result['unavailable_profiles']=self.unavailable_profiles
         result['owner_interventions']=len(state['decisions'])
         result['technical_verdict']=state.get('technical_verdict','unobserved')
         result['transition']='owner_required' if state.get('pending_decision') else 'allowed' if state['state'] in ('ready','archive_ready','complete') else 'blocked'
@@ -412,7 +429,7 @@ class Runtime:
 
     def _fresh(self, state):
         for target in state['targets']:
-            self._safe_target(str(Path(target).relative_to(self.root)))
+            self._covered_target(str(Path(target).relative_to(self.root)))
         contract = load_contract(self._proposal(state['change']))
         if contract['contract_hash'] != state['contract_hash'] or sha(self.registry_path) != state['registry_hash']:
             raise ValueError('pinned contract/check policy changed')
@@ -432,6 +449,8 @@ class Runtime:
                 raise ValueError('decision does not bind pending Owner card')
             if pending['card'].get('code_subject')!=self._subject():
                 raise ValueError('pending decision code subject changed')
+            if decision['kind'] in ('acceptance','archive') and pending['card'].get('material_hash')!=load_contract(self._proposal(change))['material_hash']:
+                raise ValueError('pending decision material changed')
             source = self.source_reader(decision.get('source',{}))
             if not valid_source(source,decision['source']):
                 raise ValueError('unverified Owner source')
@@ -465,6 +484,7 @@ class Runtime:
                 if not self._acceptance_current(state) or not self._release_ready(state):
                     raise ValueError('acceptance checks incomplete')
                 state['accepted_subject']=self._subject()
+                state['accepted_material_hash']=load_contract(self._proposal(change))['material_hash']
                 state['pending_decision']=self._pending(state,'archive'); state['state']='waiting'
             self._event(state,'mechanical','owner_decision',decision_kind=decision['kind'],subject=decision['subject'])
             self._save(change,state)
@@ -643,6 +663,7 @@ class Runtime:
                             canonical=self._proposal(change).parent/'acceptance.md'
                             canonical.write_bytes(explanation.read_bytes())
                             state['acceptance_hash']=sha(canonical)
+                            state['acceptance_material_hash']=load_contract(self._proposal(change))['material_hash']
                         state['acceptance_verified']=self._acceptance_current(state)
                         state['pending_decision']=self._pending(state,'acceptance');state['state']='waiting';break
                     sequence=['producer','reviewer']+[g for g in self.profile['gates'] if g!='reviewer']+['docwriter','explainer']
@@ -708,6 +729,7 @@ class Runtime:
                     content[str(item.relative_to(self.root))]=[os.readlink(item),sha(item.resolve())]
                     continue
                 if item.is_file():
+                    if item.name=='acceptance.md':continue
                     content[str(item.relative_to(self.root))]=sha(item)
                 elif not item.exists():
                     raise ValueError('missing registered dependency: '+str(item))
@@ -782,7 +804,7 @@ class Runtime:
         if producer.startswith('deepseek')==reviewer.startswith('deepseek'):
             raise ValueError('producer/reviewer provider independence violated')
         output=Path(state['output'])/actor
-        writes=[self._safe_target(str(Path(target).relative_to(self.root))) for target in state['targets']] if actor=='producer' else []
+        writes=[self._covered_target(str(Path(target).relative_to(self.root))) for target in state['targets']] if actor=='producer' else []
         return {'actor':actor,'model':model,'provider':provider,'base_url':'https://api.deepseek.com/' if provider=='deepseek' else 'https://api.openai.com/v1/',
                 'profile':'deepseek-pro' if provider=='deepseek' and model!='deepseek-flash' else 'deepseek' if provider=='deepseek' else None,
                 'write_paths':writes+[str(output)], 'write_source_paths':writes,'output':str(output),
@@ -1106,7 +1128,7 @@ print('''+repr('NATIVE_DENIALS_VERIFIED '+marker)+''')
 
     def _acceptance_current(self, state):
         path=self._proposal(state['change']).parent/'acceptance.md'
-        return path.is_file() and not path.is_symlink() and sha(path)==state.get('acceptance_hash') and any(a.get('stage')=='explainer' and a.get('result',{}).get('exit_code')==0 for a in state['attempts'])
+        return path.is_file() and not path.is_symlink() and sha(path)==state.get('acceptance_hash') and load_contract(self._proposal(state['change']))['material_hash']==state.get('acceptance_material_hash') and any(a.get('stage')=='explainer' and a.get('result',{}).get('exit_code')==0 for a in state['attempts'])
 
     def _release_ready(self, state):
         if state['test_only'] or self.injected or not self._smokes_current(state):
@@ -1134,9 +1156,10 @@ print('''+repr('NATIVE_DENIALS_VERIFIED '+marker)+''')
             if not acquired:
                 raise ValueError('execution active')
             state=self._read(change);self._fresh(state)
-            if (not state.get('accepted_subject') or state['accepted_subject']!=self._subject()
+            contract=load_contract(self._proposal(change))
+            if (state.get('accepted_material_hash')!=contract['material_hash'] or not state.get('accepted_subject') or state['accepted_subject']!=self._subject()
                     or not self._release_ready(state) or not self._acceptance_current(state)
-                    or not any(d['kind']=='archive' and d['card']['code_subject']==self._subject() for d in state['decisions'])):
+                    or not any(d['kind']=='archive' and d['card']['code_subject']==self._subject() and d['card'].get('material_hash')==contract['material_hash'] for d in state['decisions'])):
                 raise ValueError('separate current acceptance, audit, archive decision and independent checks required')
             source=self._proposal(change).parent
             if validate_links(source):
@@ -1152,6 +1175,14 @@ print('''+repr('NATIVE_DENIALS_VERIFIED '+marker)+''')
             if any(p.is_symlink() for p in Path(state['output']).rglob('*')):
                 raise ValueError('audit refuses model-created symlinks')
             shutil.copytree(state['output'],audit/'logs',symlinks=False)
+            # Exact originals are retained independently of ignore rules and
+            # before any link/metadata relocation. These bytes are not projected.
+            originals={name:(self.root/name).read_bytes() for name in contract['files']}
+            explanation=self._proposal(change).parent/'acceptance.md'
+            if explanation.is_file():originals[str(explanation.relative_to(self.root))]=explanation.read_bytes()
+            for name,content in originals.items():
+                target=audit/'original'/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(content)
+            (audit/'original-material.json').write_text(json.dumps({'material_hash':contract['material_hash'],'files':{name:hashlib.sha256(content).hexdigest() for name,content in originals.items()}},sort_keys=True))
             snapshot=audit/'snapshot'
             for name in sorted(set(self.git('ls-files','-co','--exclude-standard','-z').split('\0'))-{''}):
                 if name.startswith('handoffs/'):continue

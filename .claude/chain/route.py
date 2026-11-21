@@ -701,10 +701,12 @@ def current_input(ctx):
                 contract = load_contract(path)
                 sources = list({item["ref"]: item for item in contract["sources"]}.values())
                 if (data.get("sdd") != ctx.sdd
-                        or any(data.get(key) != contract[key] for key in ("intent", "contract_hash", "files", "line_map"))
+                        or any(data.get(key) != contract[key] for key in ("intent", "contract_hash", "material_hash", "version", "projected_files", "files", "line_map", "read_only"))
                         or data.get("sources") != sources
                         or not isinstance(data.get("contracts"), list)):
                     raise ValueError("native trace does not match the complete canonical contract")
+                if contract["read_only"]:
+                    raise ValueError("historical input cannot grant active admission")
                 paths = list(contract["files"])
                 for key in ("sources", "contracts"):
                     for document in data[key]:
@@ -723,7 +725,11 @@ def current_input(ctx):
         except (OSError, ValueError, KeyError, TypeError) as error:
             normalization_error = str(error)
             data = None
-    ok, snap = fingerprint(ctx, paths=paths) if isinstance(data, dict) else (False, "")
+    if isinstance(data, dict) and "native_context" in data:
+        # Versioned plan identity, not the raw tasks/material fingerprint.
+        ok, snap = True, "planned-v2:" + data["contract_hash"]
+    else:
+        ok, snap = fingerprint(ctx, paths=paths) if isinstance(data, dict) else (False, "")
     if not isinstance(data, dict) or not ok or not snap:
         why = normalization_error or r.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[:200] or "снимок SDD не вычисляется"
         stop(ctx, f"INPUT-UNREADABLE spec={ctx.spec} sdd={ctx.sdd}",
@@ -773,6 +779,23 @@ def current_admission(ctx, data, critic=False):
 def record_critic_input(ctx):
     """critic.input.json at a clean or partial verdict, before the producer is dispatched (SDD 0003, E5)."""
     data, snap = current_input(ctx)
+    reviewed = ctx.data.get("reviewed_input")
+    if reviewed is not None and "native_context" in data:
+        raw = data["native_context"]
+        if (not isinstance(reviewed, dict) or set(reviewed)!={"version","files","projected_files","contract_hash","material_hash"} or reviewed.get("version") != 2
+                or reviewed.get("contract_hash") != raw["contract_hash"]
+                or reviewed.get("projected_files") != raw["projected_files"]
+                or not isinstance(reviewed.get("files"), dict)):
+            stop(ctx, f"INPUT-CHANGED spec={ctx.spec} what=reviewed_input",
+                 "reviewed input не подтверждает эту v2 постановку -> остановка")
+        # Raw files at the time of criticism remain immutable evidence. Current
+        # execution-only updates may differ, but the exact reviewed coordinate
+        # is required, not a guessed migration of an old critic's record.
+        if (not all(isinstance(value,str) and re.fullmatch(r"[0-9a-f]{64}",value) for value in reviewed["files"].values())
+                or set(reviewed["files"])!=set(raw["files"])
+                or any(reviewed["files"][name]!=value for name,value in reviewed["projected_files"].items() if name.rsplit("/",1)[-1]!="tasks.md")
+                or not isinstance(reviewed.get("material_hash"),str) or not re.fullmatch(r"[0-9a-f]{64}",reviewed["material_hash"])):
+            stop(ctx, f"INPUT-CHANGED spec={ctx.spec} what=reviewed_files", "неверные raw координаты reviewed input -> остановка")
     scope = current_admission(ctx, data, critic=True)
     rec = {"package": os.path.basename(ctx.pkg), "sdd": ctx.sdd, "sdd_snapshot": snap,
            "intent": _doc(data.get("intent")), "contracts": [_doc(c) for c in data.get("contracts", [])],

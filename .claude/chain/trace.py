@@ -656,7 +656,7 @@ def critic_input(sdd_path):
     out = {"sdd": str(sdd_path), "intent": None, "contracts": [], "sources": sources}
     if native(sdd_path):
         contract = load_contract(sdd_path)
-        out.update(intent=contract["intent"], contract_hash=contract["contract_hash"], line_map=contract["line_map"], files=contract["files"])
+        out.update({key:contract[key] for key in ("intent","contract_hash","material_hash","version","projected_files","line_map","files","read_only")})
     if errors or not (intents or refs):
         return (None if errors else out), errors
     try:

@@ -41,7 +41,7 @@ class WorkflowFixture:
             ''.join('MODEL_' + role.upper() + '=' + ('deepseek-flash' if role == 'explainer' else 'deepseek-v4-pro' if role in ('critic','reviewer','security','nfr') else 'gpt-6.1-sol') + '\n'
                     for role in ('critic','producer','reviewer','conformance','nfr','security','docwriter','explainer')))
         chain.joinpath('workflow-checks.json').write_text(json.dumps({'version':1,'default_profile':'harness','profiles':{'harness':{
-            'code_paths':['code.py','tests/DemoTest.cpp'], 'gates':['reviewer','conformance','security'],
+            'code_paths':['code.py','tests/DemoTest.cpp','.claude/chain'], 'gates':['reviewer','conformance','security'],
             'checks':[{'id':'fixture','argv':[sys.executable,'-c','print("FIXTURE_CHECK_OK")'],
                        'inputs':['code.py','tests/DemoTest.cpp'],'environment':[[sys.executable,'--version']]}]}}}))
         self.git('add', '.'); self.git('commit', '-qm', 'pin contract and criteria fixture')
