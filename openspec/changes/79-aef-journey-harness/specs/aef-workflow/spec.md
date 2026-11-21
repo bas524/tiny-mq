@@ -15,6 +15,13 @@ ID: `REQ-79-1`
 - Test: `.claude/chain/tests/test_workflow_contract.py::WorkflowContractTest::test_sources_and_late_acceptance`
 - Test: `.claude/chain/tests/test_workflow_integration.py::LegacyPreservationIntegrationTest::test_native_trace_preserves_sources_and_complete_contract`
 
+
+#### Scenario: Строгие поля и безопасные входы
+- **WHEN** вход содержит R9, заглушку, неверный реестр, дубликат, скрытый раздел, symlink либо лишнюю delta
+- **THEN** reader, trace и prepare отклоняют вход до модели; содержательный текст, обычный реестр и общий pinned INT принимаются
+- Test: `.claude/chain/tests/test_workflow_contract.py::WorkflowContractTest::test_strict_logical_fields`
+- Test: `.claude/chain/tests/test_workflow_contract.py::WorkflowContractTest::test_canonical_paths_and_shared_int`
+
 ### Requirement: Идемпотентное выполнение
 Runtime SHALL самостоятельно выполнять подготовку, проверки, переходы и ожидание; повтор/конкурентный next не дублирует execution, interruption и ожидания требуют применимого resume.
 
@@ -75,6 +82,14 @@ ID: `REQ-79-5`
 - Test: `.claude/chain/tests/test_workflow_runtime.py::WorkflowRuntimeTest::test_receipt_subject_and_environment`
 - Test: `.claude/chain/tests/test_workflow_runtime.py::WorkflowRuntimeTest::test_acceptance_does_not_invalidate_code`
 
+
+#### Scenario: Постановка отдельно от выполнения
+- **WHEN** меняются только Work checkbox, валидные Results/Owner decisions либо позднее объяснение
+- **THEN** planned допуск сохраняется, точный material hash меняется; изменение текста задачи/прав/источника/критерия снимает допуск, неверные исполнительные секции блокируются
+- Test: `.claude/chain/tests/test_workflow_contract.py::WorkflowContractTest::test_plan_and_material_projection`
+- Test: `.claude/chain/tests/test_workflow_runtime.py::WorkflowRuntimeTest::test_execution_metadata_and_material_cards`
+- Test: `.claude/chain/tests/test_workflow_integration.py::LegacyPreservationIntegrationTest::test_planned_admission_survives_only_execution_metadata`
+
 ### Requirement: Факт и доступный архив
 Runtime SHALL обновлять факт только по Owner-приёмке, сохранять историю и адресатов относительных ссылок после archive; аудит доступен вне временной рабочей копии.
 
@@ -86,6 +101,13 @@ ID: `REQ-79-6`
 - **THEN** ссылки разрешаются, факт и исторический контракт различимы, M05 остаётся открытой, исходные свидетельства сохранены
 - Test: `.claude/chain/tests/test_workflow_contract.py::WorkflowContractTest::test_archive_links_and_history`
 - Test: `.claude/chain/tests/test_workflow_runtime.py::WorkflowRuntimeTest::test_acceptance_and_audit_required`
+
+
+#### Scenario: Исторический читатель без допуска исполнения
+- **WHEN** архив содержит перенесённые ссылки/task_ref и исходные metadata либо повреждённый origin/source/audit
+- **THEN** исторический read-only режим разрешает чтение с сохранённым Git source, active reader и prepare архив не принимают; повреждение отклоняется, исходные raw байты сохраняются отдельно
+- Test: `.claude/chain/tests/test_workflow_contract.py::WorkflowContractTest::test_historical_archive_is_not_active_admission`
+- Test: `.claude/chain/tests/test_workflow_runtime.py::WorkflowRuntimeTest::test_archive_origin_and_audit_tamper`
 
 ### Requirement: Безопасное переключение
 Runtime SHALL сохранять прежние механизмы до независимой проверки замены и отдельного решения Owner; новая продуктовая разработка не начинается на старом входе.
@@ -100,6 +122,12 @@ ID: `REQ-79-7`
 - Test: `.claude/chain/tests/test_workflow_integration.py::LegacyPreservationIntegrationTest::test_existing_trace_admission_openspec_and_wrapper`
 - Test: `.claude/chain/tests/test_workflow_integration.py::LegacyPreservationIntegrationTest::test_old_entry_refuses_new_product_after_cutover`
 
+
+#### Scenario: Область проверенного профиля
+- **WHEN** harness prepare получает target вне code_paths либо C++ исходник server/clients
+- **THEN** стадия не запускается; C++ профиль явно unavailable, без fallback и неприменимого NFR-пропуска
+- Test: `.claude/chain/tests/test_workflow_runtime.py::WorkflowRuntimeTest::test_profile_scope_blocks_unchecked_product`
+
 ### Requirement: Полная наблюдаемость затрат
 Runtime SHALL сохранять все попытки, стоимость/неизвестный расход, вмешательства Owner и вид перехода; credits не представляются USD, экономия не объявляется по числу dispatch.
 
@@ -110,4 +138,3 @@ ID: `REQ-79-8`
 - **WHEN** проверка повторяется из-за дефекта либо среды, или процесс просто ожидается
 - **THEN** журнал различает содержательный возврат, инфраструктурный повтор и технический переход; ожидание не вызывает LLM-опрос
 - Test: `.claude/chain/tests/test_workflow_runtime.py::WorkflowRuntimeTest::test_accounting_and_transition_kinds`
-

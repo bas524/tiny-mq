@@ -314,4 +314,27 @@ class LegacyPreservationIntegrationTest(unittest.TestCase):
                 with self.subTest(tampered=field),self.assertRaises(route.StopChain):
                     route.check_critic_input(ctx,'explained')
 
+
+    def test_planned_admission_survives_only_execution_metadata(self):
+        """REQ-79-5: real reused admission compares the plan, not raw checkmarks."""
+        from types import SimpleNamespace
+        import route
+        f=WorkflowFixture();self.addCleanup(f.close)
+        chain=f.root/'.claude/chain'
+        for source in CHAIN.glob('*.py'):shutil.copyfile(source,chain/source.name)
+        f.git('add','.');f.git('commit','-qm','pin planned admission fixture')
+        h=f.root/'handoffs/current/79';h.mkdir(parents=True)
+        ctx=SimpleNamespace(root=str(f.root),sdd='openspec/changes/79-demo/proposal.md',child_env=dict(os.environ),
+            outdir=str(h),spec='79',cfg={},pkg=str(h/'critic.json'),digest='fixture-only',data={'verdict':'clean'},phase='check')
+        route.record_critic_input(ctx)
+        original=(f.change/'tasks.md').read_text()
+        for text in (original.replace('[ ]','[x]'),original.replace('"draft"','"verified"')):
+            (f.change/'tasks.md').write_text(text)
+            self.assertIsNone(route.check_critic_input(ctx,'explained'))
+        (f.change/'acceptance.md').write_text('Late explanation, no approval\n')
+        self.assertIsNone(route.check_critic_input(ctx,'explained'))
+        for text in (original.replace('implement step','implement different behavior'),original.replace('R1 decisions','R2 decisions')):
+            (f.change/'tasks.md').write_text(text)
+            with self.assertRaises(route.StopChain):route.check_critic_input(ctx,'explained')
+
 if __name__=='__main__':unittest.main()

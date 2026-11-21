@@ -198,4 +198,61 @@ class WorkflowRuntimeTest(unittest.TestCase):
         path.write_text('# Unknown\n## Spec ref\nREQ-79-1\n')
         self.assertNotEqual(self.runtime._debt({'path':'tasks/M-test.md'})['status'],'open')
 
+
+    def test_execution_metadata_and_material_cards(self):
+        """REQ-79-5: planned freshness survives progress; acceptance binds exact material."""
+        from workflow_contract import load_contract
+        initial=load_contract(self.f.proposal)
+        tasks=self.f.change/'tasks.md';tasks.write_text(tasks.read_text().replace('[ ]','[x]'))
+        state=self.runtime._read(self.change)
+        self.runtime._fresh(state)
+        changed=load_contract(self.f.proposal)
+        self.assertEqual(initial['contract_hash'],changed['contract_hash'])
+        self.assertNotEqual(initial['material_hash'],changed['material_hash'])
+        for kind in ('acceptance','archive'):
+            card=self.runtime._pending(state,kind)
+            self.assertEqual(card['card']['material_hash'],changed['material_hash'])
+        tasks.write_text(tasks.read_text().replace('implement step','implement different behavior'))
+        with self.assertRaises(ValueError):self.runtime._fresh(state)
+        self.assertEqual(self.calls,[])
+
+    def test_profile_scope_blocks_unchecked_product(self):
+        """REQ-79-7 C5: production registry never treats C++ as checked harness."""
+        module=importlib.import_module('workflow_runtime')
+        root=Path(__file__).resolve().parents[3]
+        for name in ('server/product.cpp','clients/python/client.py','other.py'):
+            with self.subTest(target=name):
+                f=WorkflowFixture();self.addCleanup(f.close)
+                product=f.root/name;product.parent.mkdir(parents=True,exist_ok=True);product.write_text('synthetic\n')
+                registry=f.root/'.claude/chain/workflow-checks.json'
+                registry.write_bytes((root/'.claude/chain/workflow-checks.json').read_bytes())
+                f.git('add','.');f.git('commit','-qm','unvalidated product profile')
+                r=module.Runtime(f.root)
+                with self.assertRaisesRegex(ValueError,'profile|scope|unavailable|unchecked'):
+                    r.prepare('79-demo',targets=[name])
+                self.assertFalse((r._dir('79-demo')/'state.json').exists())
+        status=self.runtime.status(self.change)
+        self.assertIn('cpp',status['unavailable_profiles'])
+        self.assertEqual(self.calls,[])
+
+    def test_archive_origin_and_audit_tamper(self):
+        """REQ-79-6: exact originals precede relocation; corrupt audit is rejected."""
+        from workflow_contract import load_contract,rebase_archive_links
+        original={str(p.relative_to(self.f.change)):p.read_bytes() for p in self.f.change.rglob('*') if p.is_file()}
+        contract=load_contract(self.f.proposal)
+        destination=self.f.change.parent/'archive/2026-11-21-79-demo'
+        rebase_archive_links(self.f.change,destination)
+        self.assertEqual(original,{str(p.relative_to(self.f.change)):p.read_bytes() for p in self.f.change.rglob('*') if p.is_file()})
+        self.assertTrue(contract['material_hash'])
+        directory=self.runtime._audit_directory(self.change);directory.mkdir(parents=True)
+        from workflow_runtime import sha
+        (directory/'raw-input.txt').write_bytes(original['tasks.md'])
+        manifest={'raw-input.txt':sha(directory/'raw-input.txt')}
+        (directory/'manifest.json').write_text(json.dumps(manifest))
+        self.assertEqual(self.runtime.audit(self.change)['technical_verdict'],'passed')
+        (directory/'raw-input.txt').write_text('corrupted original\n')
+        with self.assertRaises(ValueError):self.runtime.audit(self.change)
+        with self.assertRaises(ValueError):self.runtime.archive(self.change)
+        self.assertTrue(self.f.change.is_dir());self.assertFalse(destination.exists())
+
 if __name__ == '__main__': unittest.main()
