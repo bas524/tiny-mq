@@ -1,6 +1,6 @@
 # M-06 — реальное исполнение provider smoke сокращённой оснастки
 
-Статус: OPEN. Задача сопровождения по независимым review/security и реальным
+Статус: OPEN для C++ профиля. Задача сопровождения по review/security и реальным
 операторским проверкам change79. Продуктовый код не затрагивается.
 
 ## Проверка evidence наблюдённого результата
@@ -277,3 +277,65 @@ native_context, legacy identity привязана к хэшу полного к
 Фикстура не импортируется как допуск. Реальный witness R5 admission:false
 остаётся неизменённым. Owner отдельно разрешил6й раунд только79 при общем26;
 ожидается новый действительный пакет критика, затем независимые проверки.
+
+
+## Актуальный технический итог на 2026-11-21
+
+Код `5f87b6b8fd67f9753faf74064bdc0abbeea5f67d`; текущий planned-v2
+`dd1997d47da08e63b77cbaec8aa1efa0262b70bd759068b3989125ee3bdfec76`.
+Предыдущие разделы сохраняют последовательность отказов и исправлений.
+Старые owner-review a62…, acceptance/patch99a… и readiness от 20 ноября
+заменены текущим предметом проверки; текущей Owner-приёмкой они не являются.
+
+Author6 действительно остановился на observer fixture: разрешённая область
+не включала существующие harness targets. Координатор исправил только input
+coverage fixture; production code и assertions не менялись. Модель Author6
+не выдавала completed: raw paused/failed evidence сохранены, нового author
+iteration/модельного запуска для механического завершения не было.
+[Поправка](../handoffs/current/79/fixture-correction.json),
+[raw Author6](../handoffs/current/79/author-r6-output/implementation-report.json),
+[механическое завершение](../handoffs/current/79/author6-mechanical-completion.json),
+[операторские argv/exit/logs](../handoffs/current/79/logs/operator-r6/checks.json)
+различают исходный failed probe и исправленный fixture setup без смены assertions.
+Независимый [Reviewer](../handoffs/current/79/reviewer-r5-output/report.md)
+одобрил эту поправку и повторил проверки самостоятельно.
+
+Текущие [NFR](../handoffs/current/79/nfr-r3-output/report.md),
+[Conformance](../handoffs/current/79/conformance-r4-output/report.md) и
+[Security5](../handoffs/current/79/security-r5-output/report.md) approved,
+findings пусты. NFR — scope not_applicable, без продуктового измерения.
+Security raw approved сохранён; в каноническом пакете только пустой успешный
+git-diff log заменён раскрытой
+[structured receipt](../handoffs/current/79/logs/operator-r6/security-evidence-normalization.json),
+оригинальные raw файлы не переписаны. Opt-in skips не считаются native pass.
+Реальные OpenAI/direct DeepSeek Pro guard smoke подтверждены отдельно:
+[result](../handoffs/current/79/logs/real-probes-20261121T092325Z/result.json),
+passed, source_unchanged=true, private_contexts_remaining=[]. Это синтетический
+transport/isolation QA, не production archive и не продуктовый C++ прогон.
+
+Runtime проверяет подлинный user source по thread/message/turn/точному тексту,
+редакции и provenance, а не по заявлению модели. Автор и Reviewer независимы
+по провайдерам; проверяющие имеют чистый контекст и защищённые inputs.
+Неизменный observer сохраняет фактический exit, command/binary/log hashes и cleanup.
+Control и audit разделены по hash worktree root внутри git-common-dir;
+общий change в двух worktrees не получает общий namespace.
+
+[Closing preflight](../handoffs/current/79/logs/operator-r6/closing-preflight.json):
+native state79 отсутствует; legacy native archive отказывает по дизайну.
+Bootstrap использовал legacy guarded roles, receipts не импортированы.
+Полный production native archive journey не заявлен. DocWriter3 получил stale r2
+контекст и отказал до записи: это инфраструктурный резерв, не docs approval.
+M-06 остаётся OPEN до актуальной Owner-приёмки, внешней проверки raw audit,
+применимого archive и отдельного переключения Root. Существующие подлинные
+Owner sources сохранены; новые approval не сочиняются. Глобальные лимиты и
+COMPACT_RUNTIME здесь не меняются. C++ остаётся unavailable по плану выше;
+M-05 не закрыта, её waiver не переносится. Новых performance jobs/расписаний
+и подтверждённой числовой экономии нет.
+
+## Закрытие миграции 79
+
+Owner принял `889d1be` и разрешил разовое архивирование,
+активацию и публикацию. [Архив](../openspec/changes/archive/2026-11-23-79-aef-journey-harness/acceptance.md) и
+[факт OpenSpec](../openspec/specs/aef-workflow/spec.md) фиксируют результат. Исходные свидетельства и
+проверяемый источник решения хранятся в общем Git-каталоге `aef-audit/bootstrap-79/`.
+Новый Runtime активирован для `harness`. Остаток M‑06 — проверка профиля C++.

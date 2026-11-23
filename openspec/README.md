@@ -107,3 +107,28 @@ python3 .claude/chain/openspec.py archive  <NN-slug>  # слияние дель�
 
 SDD, закрытые до появления спецификаций-фактов, описываются садовником по отчётам ревью и коду,
 по одной возможности за проход (задача сопровождения).
+
+
+## Нативный комплект и архив
+
+[Change 79](changes/archive/2026-11-23-79-aef-journey-harness/proposal.md) хранит постановку и дельту в архиве.
+Действующее поведение оснастки описано в [спецификации-факте](specs/aef-workflow/spec.md).
+`load_contract(path, historical=False)` строго проверяет именованные поля,
+видимое непустое содержание, Entity inventory по PROJECT, источники, ID,
+Scenario/Test и обычные безопасные пути без symlink, дубликатов и лишних specs.
+
+В v2 `contract_hash` фиксирует план: только Work checkbox и валидные typed JSON
+тела Results/Owner decisions исключаются из содержательного сравнения tasks.
+`files` и `material_hash` сохраняют точные материалы; поздний acceptance также
+меняет material hash. Эти исполнительные поля не удостоверяют решение Owner
+и не импортируются в trusted state. Acceptance/archive требуют текущих материалов.
+
+Архивный комплект читается только явно через `load_contract(path, historical=True)`
+с `read_only=true`; это исторический контекст, не active admission/prepare.
+Native archive выполняется доверенным Runtime после применимых решений Owner;
+legacy `openspec.py archive` намеренно отказывает для native. До перемещения
+нужны исходные raw canonical/evidence, manifest и независимая проверка аудита
+вне worktree. Перебазированные ссылки не заменяют исходные свидетельства.
+При первой установке change 79 был закрыт разовым архивированием по решению
+Owner. История прежнего маршрута хранится в локальном аудите. Для новых
+изменений действует штатный Runtime archive и его проверки допуска.

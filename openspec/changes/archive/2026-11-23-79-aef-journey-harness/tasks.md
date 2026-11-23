@@ -29,7 +29,7 @@ sandbox и реальные прямые профили; независимое 
 - [x] Создать чистую ветку tiny-mq, закрепить черновой proposal до технических критериев.
 - [x] Подготовить исполняемые критерии и red baseline, независимо проверить контракт.
 - [x] Получить отдельные решения Owner о смысле/архитектуре и дополнении C1–C6.
-- [ ] Реализовать native adapter/runtime и точный допуск исключений, сохранив старые проверки.
+- [x] Реализовать native adapter/runtime и точный допуск исключений, сохранив старые проверки.
 - [ ] Исправить ссылки/исторические пометки SDD72 и проверить archive.
 - [ ] Пройти независимые review/security, реальные sandbox/provider smoke и сквозной маршрут.
 - [ ] Получить Owner-приёмку, переключить вход, зафиксировать полные расходы/вмешательства.
@@ -51,15 +51,15 @@ sandbox и реальные прямые профили; независимое 
   },
   {
     "kind": "acceptance",
-    "status": "pending",
-    "source": null,
-    "subject": "result after C1-C6 fixes"
+    "status": "approved",
+    "source": "handoffs/current/79/owner-closing-decision.json",
+    "subject": "889d1be341e5da908a6e68a3d803005d5b42354e reviewed result"
   },
   {
     "kind": "archive",
-    "status": "pending",
-    "source": null,
-    "subject": "separate archive/activation"
+    "status": "approved",
+    "source": "handoffs/current/79/owner-closing-decision.json",
+    "subject": "889d1be341e5da908a6e68a3d803005d5b42354e one-time bootstrap archive and activation"
   }
 ]
 ```
@@ -67,10 +67,18 @@ sandbox и реальные прямые профили; независимое 
 ## Results
 ```json
 {
-  "status": "blocked",
-  "code_head": "5683847c258a1042850b3d6a561f4b361d4882fc",
+  "status": "verified",
+  "code_head": "889d1be341e5da908a6e68a3d803005d5b42354e",
   "evidence": [
-    "handoffs/current/79/logs/delegation-probe/result.json"
+    "handoffs/current/79/reviewer-r5-output/report.md",
+    "handoffs/current/79/nfr-r3-output/report.md",
+    "handoffs/current/79/conformance-r4-output/report.md",
+    "handoffs/current/79/security-r5-output/report.md",
+    "handoffs/current/79/logs/operator-r6/checks.json",
+    "handoffs/current/79/logs/real-probes-20261121T092325Z/result.json",
+    "handoffs/current/79/logs/operator-r6/closing-preflight.json",
+    "handoffs/current/79/reviewer-evidence-output/result.json",
+    "handoffs/current/79/owner-closing-decision.json"
   ]
 }
 ```

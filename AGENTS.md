@@ -22,6 +22,8 @@
 или профиль `deepseek`/`deepseek-pro` для `api.deepseek.com`. CLI `-p` означает
 профиль, а `-p PROMPT` на входе проектной обёртки — аргумент с промптом кита.
 
+### История ручной цепочки
+
 Перед критикой выполни `python3 -B .claude/chain/trace.py sdd <путь-SDD>` и
 `python3 -B .claude/chain/trace.py input <путь-SDD>`. Критик читает постановку,
 INT, закреплённые фрагменты и применимые контракты. Раскладку пакета задаёт
@@ -35,8 +37,22 @@ INT, закреплённые фрагменты и применимые кон�
 артефакты и повтори вызов маршрутизатора. Рабочие пакеты пишутся в `handoffs/current/`.
 У критика и автора разные провайдеры. Рецензент начинает новую сессию и повторяет проверки сам.
 
+## Проверки изменений
+
 Для изменения объяви `target_files` до редактирования. Чистая база рабочей копии нужна для
 сравнения изменений с HEAD. Для сборки и тестов соблюдай [PROJECT.md](PROJECT.md), для
 горячего пути также [baseline](benchmarks/baseline.md) и [nfr-gate](.claude/skills/nfr-gate/SKILL.md).
 Сценарии записи и доставки проверяй с persistent и non-persistent сообщениями, включая
 обычную отправку и commit. Политика архивирования и проверки допуска — в [OpenSpec](openspec/README.md).
+
+## Native Runtime
+
+Для новых изменений используй `python3 -B .claude/chain/aef.py <operation> <change>`.
+Начни с валидного комплекта OpenSpec и `prepare`. `status` показывает состояние,
+`next` выполняет разрешённый шаг, `record-decision` регистрирует решение Owner.
+Технические операции: `verify`, `resume`, `archive`, `audit`, `provider-probe`,
+`request-exception`. Правила ручной цепочки выше описывают прежний маршрут
+и остаются справкой для исторических пакетов.
+
+Доступен профиль `harness` для `.claude/chain`. Для C++ нужен отдельный проверенный
+профиль по PROJECT.md. Контракт и ограничения описаны в [архиве change 79](openspec/changes/archive/2026-11-23-79-aef-journey-harness/design.md).

@@ -105,3 +105,19 @@ Linux CI проверяет эти же файлы под GCC с `-Werror`.
 Waiver разрешает только SDD 72 / PR №12 по обычному CI: REQ-72-9 остаётся открытым в
 [M-05](tasks/M-05-local-nightly-performance.md), технический performance verdict rejected.
 Локальный ночной job ещё не настроен; до согласования времени Owner расписание не создаётся.
+
+
+## Проверенный профиль native Runtime
+
+Текущий `workflow-checks.json` регистрирует только `harness` с
+`code_paths=[".claude/chain"]`; NFR `not_applicable` относится к этой области.
+Профиль `cpp` unavailable до реальных проверок продуктовых команд, NFR и
+изоляции. Harness не покрывает C++, не заменяет сборки, ASan, шесть required CI
+checks и не переносит waiver SDD72 на новую работу. Для записи/доставки нужны
+persistent и non-persistent сообщения, обычная отправка и commit; для горячих
+путей сохраняются baseline и nfr-gate. M-05/REQ-72-9 остаются открытыми.
+
+Публичный CLI и ограничения переключения — [AGENTS](AGENTS.md), план проверки
+C++ профиля — [M-06](tasks/M-06-compact-runtime-provider-smoke.md).
+Нового performance job или расписания change79 не вводит; числовая экономия
+времени/стоимости не измерена. Функция продукта и доменная модель не меняются.

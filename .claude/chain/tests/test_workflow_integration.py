@@ -255,6 +255,43 @@ print('NATIVE_DENIALS_VERIFIED')
 
 
 class LegacyPreservationIntegrationTest(unittest.TestCase):
+    def native_trace_root(self):
+        proposal = 'openspec/changes/79-aef-journey-harness/proposal.md'
+        if (ROOT / proposal).is_file():
+            return ROOT, proposal
+        # Replay the accepted active inputs in a disposable checkout. Archived
+        # proposals must stay unavailable to trace input and legacy admission.
+        checkout = tempfile.TemporaryDirectory(prefix='aef79-trace-history-')
+        self.addCleanup(checkout.cleanup)
+        root = Path(checkout.name).resolve()
+        git = ['git', '-c', 'core.hooksPath=/dev/null']
+        subprocess.run([*git, 'clone', '-q', '--shared', '--no-checkout', str(ROOT), str(root)],
+                       check=True, timeout=30)
+        subprocess.run([*git, 'checkout', '-q', '--detach',
+                        '889d1be341e5da908a6e68a3d803005d5b42354e'],
+                       cwd=root, check=True, timeout=30)
+        return root, proposal
+
+    def test_archived_contract_retains_criteria(self):
+        from workflow_contract import load_contract
+        from trace import requirement_blocks, block_id, test_exists, test_texts, text_lines
+
+        archives = list((ROOT / 'openspec/changes/archive').glob('*-79-aef-journey-harness'))
+        self.assertEqual(len(archives), 1)
+        proposal = archives[0] / 'proposal.md'
+        result = load_contract(proposal, historical=True)
+        self.assertTrue(result['read_only'])
+        with self.assertRaisesRegex(ValueError, 'historical archive'):
+            load_contract(proposal)
+        fact = ROOT / 'openspec/specs/aef-workflow/spec.md'
+        lines = text_lines(fact.read_text())
+        self.assertEqual({r['id'] for r in result['requirements']},
+                         {block_id(lines[start+1:end]) for _, start, end in requirement_blocks(lines)})
+        texts = test_texts(CHAIN / 'tests')
+        for requirement in result['requirements']:
+            for criterion in requirement['tests']:
+                self.assertTrue(test_exists(criterion, texts), criterion)
+
     def test_existing_trace_admission_openspec_and_wrapper(self):
         """REQ-79-7: actual legacy checks remain usable after replacement."""
         import admission
@@ -279,10 +316,11 @@ class LegacyPreservationIntegrationTest(unittest.TestCase):
 
     def test_native_trace_preserves_sources_and_complete_contract(self):
         """REQ-79-1: shared trace validates native inputs rather than empty source lists."""
-        proposal='openspec/changes/79-aef-journey-harness/proposal.md'
-        sdd=subprocess.run([sys.executable,'-B',str(CHAIN/'trace.py'),'sdd',proposal],cwd=ROOT,capture_output=True,text=True,timeout=20)
+        root, proposal = self.native_trace_root()
+        trace = root / '.claude/chain/trace.py'
+        sdd=subprocess.run([sys.executable,'-B',str(trace),'sdd',proposal],cwd=root,capture_output=True,text=True,timeout=20)
         self.assertEqual(sdd.returncode,0,sdd.stdout+sdd.stderr)
-        inp=subprocess.run([sys.executable,'-B',str(CHAIN/'trace.py'),'input',proposal],cwd=ROOT,capture_output=True,text=True,timeout=20)
+        inp=subprocess.run([sys.executable,'-B',str(trace),'input',proposal],cwd=root,capture_output=True,text=True,timeout=20)
         self.assertEqual(inp.returncode,0,inp.stdout+inp.stderr)
         data=json.loads(inp.stdout); self.assertTrue(data['sources']);self.assertIsNotNone(data['intent'])
 
@@ -291,11 +329,12 @@ class LegacyPreservationIntegrationTest(unittest.TestCase):
         from types import SimpleNamespace
         import route
         import admission
-        proposal='openspec/changes/79-aef-journey-harness/proposal.md'
-        raw=json.loads(subprocess.check_output([sys.executable,'-B',str(CHAIN/'trace.py'),'input',proposal],cwd=ROOT,text=True))
+        root, proposal = self.native_trace_root()
+        trace = root / '.claude/chain/trace.py'
+        raw=json.loads(subprocess.check_output([sys.executable,'-B',str(trace),'input',proposal],cwd=root,text=True))
         self.assertEqual(set(raw['intent']),{'goal','constraints','success_criteria','cancellation_criteria','expected_effect'})
         with tempfile.TemporaryDirectory(prefix='aef-native-admission-') as folder:
-            ctx=SimpleNamespace(root=str(ROOT),sdd=proposal,child_env=dict(os.environ),outdir=folder,
+            ctx=SimpleNamespace(root=str(root),sdd=proposal,child_env=dict(os.environ),outdir=folder,
                 spec='79',cfg={},pkg=str(Path(folder)/'critic.json'),digest='fixture',data={'verdict':'clean'})
             route.record_critic_input(ctx)
             record_path=Path(folder)/'critic.input.json'
