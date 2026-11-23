@@ -634,8 +634,9 @@ def contract_refs(text):
 def critic_input(sdd_path):
     """trace.py input: вход разбора критика (SDD 0003, E1) — (объект, [ошибки])."""
     try:
-        text = Path(sdd_path).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
+        from workflow_contract import contract_view, native, load_contract
+        text = contract_view(sdd_path)
+    except (OSError, UnicodeDecodeError, ValueError) as e:
         return None, [f"{sdd_path}: SDD не читается: {e}"]
     lead = []
     for ln in [ln for ln in (section(text_lines(text), "Problem") or []) if ln.strip()]:
@@ -653,6 +654,9 @@ def critic_input(sdd_path):
     sources, source_errors = requirement_sources(sdd_path, criteria)
     errors += source_errors
     out = {"sdd": str(sdd_path), "intent": None, "contracts": [], "sources": sources}
+    if native(sdd_path):
+        contract = load_contract(sdd_path)
+        out.update({key:contract[key] for key in ("intent","contract_hash","material_hash","version","projected_files","line_map","files","read_only")})
     if errors or not (intents or refs):
         return (None if errors else out), errors
     try:
@@ -935,7 +939,8 @@ def lines_of(path):
     """Строки файла. Блок кода и комментарий HTML, который открывает строку (`<!--` в её начале) и длится до строки
     с `-->`, дают пустые строки: внутри них заголовки и ограничители не действуют. `<!--` в середине строки — текст
     (SDD 0002, Constraints)."""
-    return text_lines(Path(path).read_text(encoding="utf-8"))
+    from workflow_contract import contract_view
+    return text_lines(contract_view(path))
 
 
 
@@ -970,8 +975,15 @@ def requirements(lines):
 
 
 def check_sdd(path):
-    errors, lines = [], lines_of(path)
-    errors += [f"{path}: {e}" for e in metadata_errors(Path(path).read_text(encoding="utf-8"))]
+    from workflow_contract import contract_view
+    try:
+        text = contract_view(path)
+    except (ValueError, OSError) as error:
+        return [str(error)], []
+    errors, lines = [], text_lines(text)
+    from workflow_contract import native
+    if not native(path):
+        errors += [f"{path}: {e}" for e in metadata_errors(text)]
     problem = section(lines, "Problem")
     if problem is None:
         errors.append(f"{path}: нет '## Problem', а её открывает строка источника (Стандарт 3)")
@@ -1048,6 +1060,12 @@ def known_ids(sdd_path):
     """IDs of every SDD next to this one, every main spec and every open delta."""
     ids = set()
     files = list(Path(sdd_path).resolve().parent.glob("*.md"))
+    from workflow_contract import native
+    if native(sdd_path):
+        spec_dir = chain_env_value("SPEC_DIR") or "docs/jms-spec"
+        if not safe_path(spec_dir):
+            raise ValueError("SPEC_DIR must remain inside component")
+        files += list((ROOT / spec_dir).glob("*.md"))
     openspec = ROOT / openspec_dir()
     if openspec.is_dir():
         files += [p for p in openspec.glob("specs/*/spec.md")]

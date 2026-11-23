@@ -24,6 +24,7 @@ import re
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 import time
 
 # Python 3.9 or newer is required. The check comes first, and the module keeps a grammar Python 3.6 parses,
@@ -688,9 +689,49 @@ def current_input(ctx):
             data = json.loads(r.stdout.decode("utf-8", "surrogateescape"))
         except ValueError:
             data = None
-    ok, snap = fingerprint(ctx, paths=[ctx.sdd]) if isinstance(data, dict) else (False, "")
+    paths = [ctx.sdd]
+    normalization_error = ""
+    if isinstance(data, dict):
+        try:
+            from workflow_contract import native, load_contract
+            path = Path(ctx.root) / ctx.sdd
+            if native(path):
+                # Native INT5 is content, not a legacy document identity. Verify
+                # the raw trace against live canonical inputs before adapting it.
+                contract = load_contract(path)
+                sources = list({item["ref"]: item for item in contract["sources"]}.values())
+                if (data.get("sdd") != ctx.sdd
+                        or any(data.get(key) != contract[key] for key in ("intent", "contract_hash", "material_hash", "version", "projected_files", "files", "line_map", "read_only"))
+                        or data.get("sources") != sources
+                        or not isinstance(data.get("contracts"), list)):
+                    raise ValueError("native trace does not match the complete canonical contract")
+                if contract["read_only"]:
+                    raise ValueError("historical input cannot grant active admission")
+                paths = list(contract["files"])
+                for key in ("sources", "contracts"):
+                    for document in data[key]:
+                        if (not isinstance(document, dict)
+                                or any(not isinstance(document.get(field), str) or not document[field]
+                                       for field in ("ref", "path", "pinned"))
+                                or "head" not in document):
+                            raise ValueError("native trace has an unknown source identity")
+                identity = {"ref": "native-contract:" + ctx.sdd, "path": ctx.sdd,
+                            "pinned": contract["contract_hash"], "head": contract["contract_hash"]}
+                # The legacy record schema remains unchanged. Full native INT5,
+                # coordinates and source records remain available to all callers.
+                data = dict(data, native_context=data, intent=identity)
+            elif "contract_hash" in data or "files" in data:
+                raise ValueError("native identity supplied for a non-native input")
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            normalization_error = str(error)
+            data = None
+    if isinstance(data, dict) and "native_context" in data:
+        # Versioned plan identity, not the raw tasks/material fingerprint.
+        ok, snap = True, "planned-v2:" + data["contract_hash"]
+    else:
+        ok, snap = fingerprint(ctx, paths=paths) if isinstance(data, dict) else (False, "")
     if not isinstance(data, dict) or not ok or not snap:
-        why = r.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[:200] or "снимок SDD не вычисляется"
+        why = normalization_error or r.stderr.decode("utf-8", "replace").strip().replace("\n", " ")[:200] or "снимок SDD не вычисляется"
         stop(ctx, f"INPUT-UNREADABLE spec={ctx.spec} sdd={ctx.sdd}",
              f"вход разбора не прочитан ({why}): вердикт по нему не проверить -> запрет по умолчанию, остановка")
     return data, snap
@@ -738,6 +779,23 @@ def current_admission(ctx, data, critic=False):
 def record_critic_input(ctx):
     """critic.input.json at a clean or partial verdict, before the producer is dispatched (SDD 0003, E5)."""
     data, snap = current_input(ctx)
+    reviewed = ctx.data.get("reviewed_input")
+    if reviewed is not None and "native_context" in data:
+        raw = data["native_context"]
+        if (not isinstance(reviewed, dict) or set(reviewed)!={"version","files","projected_files","contract_hash","material_hash"} or reviewed.get("version") != 2
+                or reviewed.get("contract_hash") != raw["contract_hash"]
+                or reviewed.get("projected_files") != raw["projected_files"]
+                or not isinstance(reviewed.get("files"), dict)):
+            stop(ctx, f"INPUT-CHANGED spec={ctx.spec} what=reviewed_input",
+                 "reviewed input не подтверждает эту v2 постановку -> остановка")
+        # Raw files at the time of criticism remain immutable evidence. Current
+        # execution-only updates may differ, but the exact reviewed coordinate
+        # is required, not a guessed migration of an old critic's record.
+        if (not all(isinstance(value,str) and re.fullmatch(r"[0-9a-f]{64}",value) for value in reviewed["files"].values())
+                or set(reviewed["files"])!=set(raw["files"])
+                or any(reviewed["files"][name]!=value for name,value in reviewed["projected_files"].items() if name.rsplit("/",1)[-1]!="tasks.md")
+                or not isinstance(reviewed.get("material_hash"),str) or not re.fullmatch(r"[0-9a-f]{64}",reviewed["material_hash"])):
+            stop(ctx, f"INPUT-CHANGED spec={ctx.spec} what=reviewed_files", "неверные raw координаты reviewed input -> остановка")
     scope = current_admission(ctx, data, critic=True)
     rec = {"package": os.path.basename(ctx.pkg), "sdd": ctx.sdd, "sdd_snapshot": snap,
            "intent": _doc(data.get("intent")), "contracts": [_doc(c) for c in data.get("contracts", [])],
@@ -1573,6 +1631,9 @@ def main():
     lock = None
     try:
         ctx.cfg, ctx.child_env = load_env(os.path.join(ctx.root, ".claude", "chain", "chain.env"), dict(os.environ))
+        if ctx.cfg.get("COMPACT_RUNTIME") == "1":
+            print("compact runtime active: use python3 -B .claude/chain/aef.py status <change>", file=sys.stderr)
+            return 1
         chain_dir = ctx.cfg.get("CHAIN_DIR") or f"{ctx.root}/{ctx.cfg.get('HANDOFF_DIR') or 'handoffs'}"
         if not os.path.isdir(chain_dir):
             return 0
@@ -1588,6 +1649,15 @@ def main():
             return 0
         # The bytes checked against the markers are the ones parsed and marked: no second read (M-27).
         pkg, raw = chosen
+        migration = Path(ctx.root) / "openspec/changes/79-aef-journey-harness/proposal.md"
+        try:
+            candidate = json.loads(raw)
+        except (ValueError, TypeError):
+            candidate = {}
+        spec = str(candidate.get("spec", ""))
+        if migration.is_file() and spec.isdigit() and int(spec) not in (72, 79):
+            print("new product waits for compact runtime: use python3 -B .claude/chain/aef.py status <change>", file=sys.stderr)
+            return 1
         ctx.pkg, ctx.outdir, ctx.phase = pkg, os.path.dirname(pkg), "check"
         ctx.raw, ctx.digest = raw, hashlib.sha256(raw).hexdigest()
         route(ctx)

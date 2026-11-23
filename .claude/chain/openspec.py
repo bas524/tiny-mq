@@ -276,7 +276,14 @@ def check_archive_admission(change_id):
         raise ValueError("нужна одна строка task_ref: <путь постановки> в .openspec.yaml")
     ref = values[0].strip("'\"")
     path = (ROOT / ref).resolve()
-    if not admission.safe_path(ref) or not path.is_relative_to(ROOT.resolve()) or not path.is_file() or path.stem != change_id:
+    if not admission.safe_path(ref) or not path.is_relative_to(ROOT.resolve()) or not path.is_file():
+        raise ValueError("task_ref должен указывать на постановку этого change-id внутри компонента")
+    from workflow_contract import native
+    if native(path):
+        if path.parent != change_dir(change_id).resolve():
+            raise ValueError("native task_ref must belong to this change")
+        raise ValueError("native archive requires trusted runtime: .claude/chain/aef.py archive " + change_id)
+    if path.stem != change_id:
         raise ValueError("task_ref должен указывать на постановку этого change-id внутри компонента")
     text = path.read_text(encoding="utf-8")
     headings = {line[3:].strip() for line in text_lines(text) if line.startswith("## ")}

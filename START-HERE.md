@@ -1,6 +1,6 @@
 # tiny-mq
 
-Класс K2. Состояние на 2026-11-19.
+Класс K2. Состояние на 2026-11-23.
 
 - [INT-01](requirements/intents/INT-01-jakarta-messaging.md) — семантика JMS для приложений на разных языках.
 - [Карта Jakarta Messaging 3.1](docs/jms-spec/README.md) — SDD 70–78, включая критерии выпуска и профиль высокой доступности.
@@ -13,3 +13,9 @@
 хранилище, ack/recover, сериализованные callbacks, атомарный commit/replay и C++ тесты. Сетевой брокер, Java-провайдер, XA, Jakarta EE и кластерный профиль внесены в постановки.
 [OpenSpec](openspec/README.md) фиксирует принятые факты. [ADR](arch/README.md) задают
 ограничения дизайна и условия пересмотра.
+
+## Оснастка AEF
+
+Единый вход `python3 -B .claude/chain/aef.py <operation> <change>` активирован.
+Доступен профиль `harness`, подготовка C++ профиля остаётся в [M-06](tasks/M-06-compact-runtime-provider-smoke.md).
+[Контракт](openspec/changes/archive/2026-11-23-79-aef-journey-harness/proposal.md) · [Спецификация-факт](openspec/specs/aef-workflow/spec.md).

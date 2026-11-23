@@ -1,0 +1,7 @@
+schema: aef
+task_ref: openspec/changes/archive/2026-11-23-79-aef-journey-harness/proposal.md
+status: draft
+version: 0.1
+review_date: 2026-11-19
+origin_task_ref: openspec/changes/79-aef-journey-harness/proposal.md
+origin_material_hash: e097e45dd3a1ea3f150223c3c1501eca0588c007b53da741e81449c89baa01b6
