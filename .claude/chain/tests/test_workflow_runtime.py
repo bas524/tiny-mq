@@ -8,8 +8,105 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_workflow_contract import WorkflowFixture
+
+
+class ObservedEvidenceTest(unittest.TestCase):
+    def run_observed_critic(self, case, recover, *, remove_after_resume=False):
+        from workflow_runtime import Runtime, sha
+
+        fixture = WorkflowFixture()
+        self.addCleanup(fixture.close)
+        role = fixture.root / '.claude/agents/spec-critic.md'
+        role.parent.mkdir()
+        role.write_text('Fixture critic\n')
+        change = '79-demo'
+        source = {'role': 'user', 'provenance': 'user', 'thread_id': 'fixture-thread',
+                  'message_id': 'fixture-owner', 'text': 'Approve fixture business scope'}
+        runtime = Runtime(fixture.root, source_reader=lambda ref: source)
+        pending = runtime.prepare(change)['pending_decision']
+        runtime.record_decision(change, {'kind': pending['kind'], 'subject': pending['subject'],
+            'owner': 'Owner', 'source': {**source, 'quote': source['text']}})
+        output = Path(runtime.policy(change, 'critic')['output'])
+        output.mkdir(parents=True)
+        report = output / 'report.log'
+        report.write_text('fixture evidence\n')
+        empty = output / 'empty.log'
+        empty.touch()
+        (output / 'file-link').symlink_to(report)
+        (output / 'dir-link').symlink_to(output, target_is_directory=True)
+        options = {
+            'valid': ['report.log', str(report)],
+            'missing': ['missing.log'],
+            'malformed': 'report.log',
+            'null': None,
+            'blank': [' '],
+            'not-string': [1],
+            'empty-file': ['empty.log'],
+            'directory': [str(output)],
+            'external': [str(fixture.proposal)],
+            'traversal': ['../critic/report.log'],
+            'file-link': ['file-link'],
+            'dir-link': ['dir-link/report.log'],
+        }
+        claim = {'technical_verdict': 'passed', 'questions': []}
+        if case != 'omitted':
+            claim['evidence'] = options[case]
+
+        def observe(change, actor, execution, command, env, prompt, raw, last, stderr):
+            raw.write_text('{"type":"thread.started"}\n{"type":"turn.completed"}\n')
+            last.write_text(json.dumps(claim))
+            observed = {'execution': execution, 'subject': runtime._subject(), 'argv': command,
+                        'provider': 'deepseek', 'exit_code': 0, 'raw_log': str(raw),
+                        'log_sha256': sha(raw), 'binary_sha256': sha(command[0]),
+                        'last': str(last), 'last_sha256': sha(last)}
+            if recover:
+                receipt = runtime._dir(change) / 'observations' / (execution + '.json')
+                receipt.parent.mkdir(exist_ok=True)
+                receipt.write_text(json.dumps(observed))
+                raise InterruptedError('fixture lost coordinator after observation')
+            return observed
+
+        valid = case in ('valid', 'omitted')
+        with (patch.object(runtime, '_run_observed', side_effect=observe) as execution,
+              patch.object(runtime, '_smokes_current', return_value=True),
+              patch.object(runtime, '_codex_command', return_value=[sys.executable])):
+            state = runtime.next(change)
+            if recover:
+                self.assertEqual(state['state'], 'interrupted')
+                if valid:
+                    self.assertEqual(runtime.resume(change, 'Reconcile fixture')['state'], 'ready')
+                    if remove_after_resume:
+                        report.unlink()
+                    state = runtime.next(change)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'role evidence'):
+                        runtime.resume(change, 'Reconcile fixture')
+                    state = runtime.next(change)
+                    self.assertEqual(state['state'], 'interrupted')
+            self.assertEqual(state['dispatches'], 1)
+            execution.assert_called_once()
+            if valid and not remove_after_resume:
+                self.assertEqual(state['pending_decision']['kind'], 'architecture')
+            else:
+                self.assertIsNone(state['pending_decision'])
+                self.assertEqual(state['stage'], 'critic')
+                if not recover or remove_after_resume:
+                    self.assertIn('role evidence', state['attempts'][-1]['error'])
+
+    def test_observed_role_evidence(self):
+        for case in ('valid', 'omitted', 'missing', 'malformed', 'null', 'blank', 'not-string',
+                     'empty-file', 'directory', 'external', 'traversal', 'file-link', 'dir-link'):
+            with self.subTest(case=case):
+                self.run_observed_critic(case, recover=False)
+
+    def test_recovered_role_evidence(self):
+        for case in ('valid', 'missing', 'external', 'dir-link'):
+            with self.subTest(case=case):
+                self.run_observed_critic(case, recover=True)
+        self.run_observed_critic('valid', recover=True, remove_after_resume=True)
 
 
 class WorkflowRuntimeTest(unittest.TestCase):

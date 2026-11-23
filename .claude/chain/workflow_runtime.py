@@ -8,11 +8,12 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
 from pathlib import Path
-from workflow_contract import load_contract, digest, validate_links, rebase_archive_links
+from workflow_contract import _safe_path, load_contract, digest, validate_links, rebase_archive_links
 from workflow_policy import resolve_codex_source, valid_source, evaluate_gate
 
 ROLES = ('critic','producer','reviewer','conformance','nfr','security','docwriter','explainer')
@@ -580,7 +581,8 @@ class Runtime:
                     self._event(state,'infrastructure','provider_qa_reconciled_without_admission',execution=execution,reason=reason)
                     self._save(change,state)
                     return self._public(state)
-                state['recovered_result']=self._observed_result(observed)
+                output = Path(self.policy(change, checkpoint['stage'])['output'])
+                state['recovered_result'] = self._observed_result(observed, output)
                 self._event(state,'infrastructure','execution_reconciled',execution=execution,reason=reason)
             if state.get('wait_reason') == 'budget_limit' and (state['dispatches']>=12 or state['rounds']>5):
                 raise ValueError('budget checkpoint cannot be reset by resume')
@@ -616,6 +618,7 @@ class Runtime:
                 request={'change':change,'execution':execution,'policy':self.policy(change,stage),'contract':str(self._proposal(change)), 'output':str(Path(state['output'])/execution)}
                 try:
                     if recovered:
+                        self._check_role_evidence(recovered, Path(request['policy']['output']))
                         result=recovered
                     else:
                         with self._execution_streams(state,execution):
@@ -896,13 +899,16 @@ class Runtime:
             prompt+='\nWrite the independent explanation to '+str(output/'acceptance.md')+'. Checks and observed results: '+json.dumps(state['receipts'],ensure_ascii=False)
         prompt+='\nRegistered gate applicability: '+json.dumps(self.profile.get('gate_applicability',{}))
         prompt+='\nOnly write your role outputs under '+str(output)+'. Return JSON with technical_verdict, questions, summary. Runtime controls transitions and receipts.'
+        prompt += (' Optional evidence must be an array of paths to nonempty files in your output '
+                   'directory. Use paths relative to that directory or absolute paths within it. '
+                   'Do not use symlinks.')
         observer=Path(state['output'])/'observer';observer.mkdir(exist_ok=True)
         last=observer/(request['execution']+'-last.json'); raw=observer/(request['execution']+'.jsonl')
         command=self._codex_command(change,actor,last)
         env=self._tool_env(state,actor)
         observation=self._run_observed(change,actor,request['execution'],command,env,prompt,raw,last,
                                        observer/(request['execution']+'.stderr'))
-        return self._observed_result(observation)
+        return self._observed_result(observation, output)
 
     def _install_observer(self, change):
         if sys.version_info<(3,11):
@@ -966,7 +972,26 @@ class Runtime:
             raise ValueError('exit observer execution/subject/snapshot mismatch')
         return observed
 
-    def _observed_result(self, observed):
+    @staticmethod
+    def _check_role_evidence(claim, output):
+        if not isinstance(claim, dict):
+            raise ValueError('native final claim must be an object')
+        evidence = claim.get('evidence', [])
+        if not isinstance(evidence, list):
+            raise ValueError('role evidence must be an array of paths')
+        for name in evidence:
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError('invalid role evidence path')
+            path = Path(name)
+            try:
+                relative = path.relative_to(output) if path.is_absolute() else name
+                mode = _safe_path(output, str(relative)).lstat()
+                if not stat.S_ISREG(mode.st_mode) or mode.st_size == 0:
+                    raise ValueError('expected a nonempty regular file')
+            except (OSError, ValueError) as error:
+                raise ValueError(f'invalid role evidence {name!r}: {error}') from error
+
+    def _observed_result(self, observed, output):
         if observed.get('infrastructure_error'):
             return {'technical_verdict':'unobserved','wait_reason':'environment','error_type':observed['infrastructure_error'],'exit_code':observed.get('exit_code')}
         if (observed.get('binary_sha256')!=sha(Path(observed['argv'][0]).resolve())
@@ -984,6 +1009,7 @@ class Runtime:
         if sha(observed['last'])!=observed['last_sha256']:
             raise ValueError('native final claim changed')
         claim=json.loads(Path(observed['last']).read_text())
+        self._check_role_evidence(claim, output)
         return {**claim,**actual}
 
     def _guard_script(self, change, actor, marker):
