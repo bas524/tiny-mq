@@ -370,7 +370,7 @@ class Runtime:
         target=Path(self._safe_target(value))
         cpp = target.suffix.lower() in ('.c','.cc','.cpp','.cxx','.h','.hh','.hpp','.hxx','.ixx','.tpp')
         if cpp and self.profile_name != 'cpp':
-            raise ValueError('cpp profile unavailable; unchecked product target')
+            raise ValueError('C++ target requires explicit cpp profile')
         if self.profile_name == 'cpp' and not cpp:
             raise ValueError('cpp profile accepts only C/C++ source and header targets')
         for name in self.profile.get('code_paths',[]):

@@ -25,7 +25,8 @@
 Сборка, профильные команды, допуск и следы проверки описаны в [PROJECT.md](../PROJECT.md)
 и [AGENTS.md](../AGENTS.md).
 
-Оснастка change 79 активирована для `harness`. История решения и проверок
-сохранена в [архиве](../openspec/changes/archive/2026-11-23-79-aef-journey-harness/acceptance.md). Перед продуктовой разработкой на
-новой оснастке подготовить и проверить C++ профиль по [M-06](M-06-compact-runtime-provider-smoke.md).
-M-05 и требования к продуктовой производительности остаются открытыми.
+Оснастка change 79 сохраняет `harness` профилем по умолчанию.
+Для нового C/C++ изменения в `server/src` используй явный `--profile cpp`
+после активации по [M-06](M-06-compact-runtime-provider-smoke.md).
+Первая продуктовая постановка для профиля — [SDD 73](../docs/jms-spec/73-jakarta-broker-transport.md).
+[Baseline M‑05](../benchmarks/baseline.md) принят для текущей машины.

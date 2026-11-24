@@ -551,20 +551,34 @@ class WorkflowRuntimeTest(unittest.TestCase):
         """REQ-79-7 C5: production registry never treats C++ as checked harness."""
         module=importlib.import_module('workflow_runtime')
         root=Path(__file__).resolve().parents[3]
-        for name in ('server/product.cpp','clients/python/client.py','other.py'):
+        supported = 'server/src/product.cpp'
+        for name in (supported, 'server/product.cpp', 'clients/python/client.py', 'other.py'):
             with self.subTest(target=name):
-                f=WorkflowFixture();self.addCleanup(f.close)
-                product=f.root/name;product.parent.mkdir(parents=True,exist_ok=True);product.write_text('synthetic\n')
-                registry=f.root/'.claude/chain/workflow-checks.json'
-                registry.write_bytes((root/'.claude/chain/workflow-checks.json').read_bytes())
-                f.git('add','.');f.git('commit','-qm','unvalidated product profile')
-                r=module.Runtime(f.root)
-                with self.assertRaisesRegex(ValueError,'profile|scope|unavailable|unchecked'):
-                    r.prepare('79-demo',targets=[name])
-                self.assertFalse((r._dir('79-demo')/'state.json').exists())
-        status=self.runtime.status(self.change)
-        self.assertIn('cpp',status['unavailable_profiles'])
-        self.assertEqual(self.calls,[])
+                fixture = WorkflowFixture()
+                self.addCleanup(fixture.close)
+                product = fixture.root / name
+                product.parent.mkdir(parents=True, exist_ok=True)
+                product.write_text('synthetic\n')
+                registry = fixture.root / '.claude/chain/workflow-checks.json'
+                registry.write_bytes((root / '.claude/chain/workflow-checks.json').read_bytes())
+                fixture.git('add', '.')
+                fixture.git('commit', '-qm', 'Pin fixture with the active profiles')
+                harness = module.Runtime(fixture.root)
+                self.assertEqual(harness.profile_name, 'harness')
+                with self.assertRaisesRegex(ValueError, 'profile|scope'):
+                    harness.prepare('79-demo', targets=[name])
+                self.assertFalse((harness._dir('79-demo') / 'state.json').exists())
+                cpp = module.Runtime(fixture.root, profile='cpp')
+                if name == supported:
+                    state = cpp.prepare('79-demo', targets=[name])
+                    self.assertEqual(state['profile'], 'cpp')
+                    self.assertEqual(state['pending_decision']['kind'], 'business')
+                    self.assertEqual(module.Runtime(fixture.root, change='79-demo').profile_name, 'cpp')
+                else:
+                    with self.assertRaisesRegex(ValueError, 'profile|scope'):
+                        cpp.prepare('79-demo', targets=[name])
+                    self.assertFalse((cpp._dir('79-demo') / 'state.json').exists())
+        self.assertEqual(self.calls, [])
 
     def test_archive_origin_and_audit_tamper(self):
         """REQ-79-6: exact originals precede relocation; corrupt audit is rejected."""

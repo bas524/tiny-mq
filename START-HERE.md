@@ -17,5 +17,5 @@
 ## Оснастка AEF
 
 Единый вход `python3 -B .claude/chain/aef.py <operation> <change>` активирован.
-Доступен профиль `harness`, подготовка C++ профиля остаётся в [M-06](tasks/M-06-compact-runtime-provider-smoke.md).
+По умолчанию используется `harness`. Профиль `cpp` для `server/src` выбирается явно. [Приёмка M‑06](tasks/M-06-compact-runtime-provider-smoke.md).
 [Контракт](openspec/changes/archive/2026-11-23-79-aef-journey-harness/proposal.md) · [Спецификация-факт](openspec/specs/aef-workflow/spec.md).

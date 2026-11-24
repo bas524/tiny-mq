@@ -210,7 +210,5 @@
       ]
     }
   },
-  "unavailable_profiles": {
-    "cpp": "unavailable: candidate; needs verified product isolation, NFR integration and Owner activation"
-  }
+  "unavailable_profiles": {}
 }
