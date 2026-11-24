@@ -117,9 +117,10 @@ change79 и M-06. Новые зависимости и продуктовые и
   Проверить symlink/atomic replace, генераторы и побочные записи configure/build.
 - Горячие пути: baseline и candidate на одной локальной машине, один toolchain,
   ABBA, 9 повторов, CPU median/op +5%, CPU CV≤5%, CPU storage workers;
-  persistent/non-persistent, обычная отправка и commit. По PROJECT/nfr-gate и
-  M-05: тихое окно ещё не согласовано, ночной job не настроен, GitHub perf
-  отключён. Waiver SDD72 не переносить. Непригодный/непроведённый замер — не pass.
+  persistent/non-persistent, обычная отправка и commit. Расписание локальных
+  замеров и данные см. в [M-05](M-05-local-nightly-performance.md). GitHub perf
+  отключён. Для профиля нужны валидные замеры в пределах бюджета, waiver SDD72
+  действует только для PR №12.
 - До реальных собственных прогонов/изоляционных проверок и Owner-решения
   профиль остаётся unavailable; изменения C++ не запускаются через harness.
 

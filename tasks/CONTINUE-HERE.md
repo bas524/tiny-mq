@@ -13,7 +13,7 @@
    C++ доставку, ack, локальные tx и callbacks. REQ-72-9 открыт в
    [M-05](M-05-local-nightly-performance.md), технический perf rejected; исключение Owner
    разрешает PR №12 по обычному CI и не означает NFR done.
-5. Дальше — M-05 (ночное окно ещё задаёт Owner; job не настроен) и
+5. Дальше — валидные ночные замеры по [M-05](M-05-local-nightly-performance.md) и
    [SDD 73](../docs/jms-spec/73-jakarta-broker-transport.md) по зависимостям 70–72.
    Сеть, Java, XA, Jakarta EE и HA остаются будущими SDD 73–78.
 6. Для [SDD 78](../docs/jms-spec/78-jakarta-high-availability.md) и

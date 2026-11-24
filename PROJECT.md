@@ -104,7 +104,7 @@ Linux CI проверяет эти же файлы под GCC с `-Werror`.
 сохраняются; методика — [nfr-gate](.claude/skills/nfr-gate/SKILL.md).
 Waiver разрешает только SDD 72 / PR №12 по обычному CI: REQ-72-9 остаётся открытым в
 [M-05](tasks/M-05-local-nightly-performance.md), технический performance verdict rejected.
-Локальный ночной job ещё не настроен; до согласования времени Owner расписание не создаётся.
+Расписание и свидетельства локальных ночных замеров ведутся в [M-05](tasks/M-05-local-nightly-performance.md).
 
 
 ## Проверенный профиль native Runtime

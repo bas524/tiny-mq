@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """REQ-72-9: NfrGateTest.DeliveryHotPathBudget."""
 import argparse
+import json
 import os
 from pathlib import Path
 import statistics
@@ -79,6 +80,7 @@ def main():
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--smoke", action="store_true")
+    parser.add_argument("--summary", type=Path)
     args = parser.parse_args()
     if args.baseline.resolve() == args.candidate.resolve():
         parser.error("baseline and candidate must be separate binaries")
@@ -91,6 +93,7 @@ def main():
     reps, minimum, warmup = (2, "0.05s", 0) if args.smoke else (9, "1.2s", 2)
     registered = registrations(args.baseline)
     passed = True
+    results = {}
     for name in (*DESTINATION_PATHS, *DELIVERY_PATHS):
         baseline_name = name
         if name not in registered and args.smoke:
@@ -99,24 +102,40 @@ def main():
         if baseline_name not in registered:
             parser.error(f"missing comparable baseline benchmark: {baseline_name}")
         directory = args.out / name.replace("/", "-")
-        stable, within_budget = compare(args, name, reps, minimum, warmup, directory, baseline_name)
+        first = {}
+        results[name] = [first]
+        stable, within_budget = compare(args, name, reps, minimum, warmup, directory,
+                                        baseline_name, report=first)
         if not stable and not args.smoke:
             persistent_tx = (name == "Transacted_Persistent_RoundTrip/process_time"
                              or name.startswith("Transacted_Batch_Persistent/"))
             retry_minimum = "12s" if persistent_tx else minimum
             print(f"{name}: repeating once because CPU CV exceeded 5% (minimum {retry_minimum})", flush=True)
+            retry = {}
+            results[name].append(retry)
             stable, within_budget = compare(args, name, reps, retry_minimum, warmup,
-                                            directory.with_name(directory.name + "-repeat"))
+                                            directory.with_name(directory.name + "-repeat"),
+                                            report=retry)
         passed &= stable and within_budget
 
     names = (*DESTINATION_PROFILES, *PROFILES)
     profiles = run(args.candidate, names, reps, minimum, warmup, args.out / "profiles.json")
+    profile_medians = {}
     for name in names:
         cpu, real = zip(*profiles[name])
-        print(f"{name}: CPU median {statistics.median(cpu):.1f} ns/op, "
-              f"real median {statistics.median(real):.1f} ns/op", flush=True)
+        cpu_median, real_median = statistics.median(cpu), statistics.median(real)
+        profile_medians[name] = dict(cpu_median=cpu_median, real_median=real_median)
+        print(f"{name}: CPU median {cpu_median:.1f} ns/op, "
+              f"real median {real_median:.1f} ns/op", flush=True)
     if args.smoke:
-        print("Smoke completed. The performance verdict requires the comparable GitHub run.")
+        print("Smoke completed. Run without --smoke for the gate.")
+    if args.summary:
+        verdict = "passed" if passed else "rejected"
+        report = dict(verdict="smoke" if args.smoke else verdict, repetitions=reps,
+                      measurement_unit="ns/delivery", paths=results, profiles=profile_medians)
+        with args.summary.open("x") as output:
+            json.dump(report, output, indent=2, allow_nan=False)
+            output.write("\n")
     return 0 if args.smoke or passed else 1
 
 
