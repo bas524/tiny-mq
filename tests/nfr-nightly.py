@@ -188,7 +188,7 @@ def quiet(args, night):
         return "outside the approved window"
     if power() != "Now drawing from 'AC Power'":
         return "external power unavailable"
-    if idle_seconds() < args.idle_minutes * 60:
+    if args.idle_minutes and idle_seconds() < args.idle_minutes * 60:
         return "recent user activity"
     return None
 
@@ -267,8 +267,8 @@ def run(args):
         return 0
     with lock(args.store):
         now = datetime.now().astimezone()
-        if args.smoke:
-            runs = args.store / "smoke"
+        if args.smoke or args.manual:
+            runs = args.store / ("manual" if args.manual else "smoke")
             runs.mkdir(exist_ok=True)
             out = Path(tempfile.mkdtemp(prefix=f"{now.date()}-", dir=runs))
         else:
@@ -276,7 +276,11 @@ def run(args):
             if out.exists():
                 return 0
             out.mkdir(parents=True)
-        result = dict(started=now.isoformat(), finished=None, machine=machine(),
+        mode = "manual" if args.manual else "smoke" if args.smoke else "nightly"
+        if args.manual:
+            print(f"started manual: {out}", flush=True)
+        result = dict(mode=mode, started=now.isoformat(), finished=None, machine=machine(),
+                      idle_minimum_seconds=args.idle_minutes * 60,
                       ac=power(), idle_seconds=idle_seconds(), load=os.getloadavg(),
                       harness_sha256={name: digest(ROOT / "tests" / name)
                                       for name in ("nfr-nightly.py", "nfr71.py", "nfr72.py")},
@@ -290,6 +294,8 @@ def run(args):
             result["error"] = str(error)
         finally:
             result["finished"] = datetime.now().astimezone().isoformat()
+            if args.manual:
+                result["final_load"] = os.getloadavg()
             write_json(out / "result.json", result)
             print(f"{result['verdict']}: {out}", flush=True)
         return 0 if result["verdict"] in ("smoke", "passed") else 1
@@ -345,20 +351,25 @@ def main():
     commands.add_parser("launch-agent", parents=[conditions])
     nightly = commands.add_parser("run", parents=[conditions])
     nightly.add_argument("--pair", choices=PAIRS, action="append")
-    nightly.add_argument("--smoke", action="store_true")
+    mode = nightly.add_mutually_exclusive_group()
+    mode.add_argument("--smoke", action="store_true")
+    mode.add_argument("--manual", action="store_true")
     args = parser.parse_args()
     args.store = args.store.resolve()
     try:
         if args.command == "prepare":
             prepare(args)
             return 0
-        if args.start == args.end or args.idle_minutes < 1:
-            parser.error("require a nonempty window and at least one minute of idle time")
+        minimum_idle = 0 if getattr(args, "manual", False) else 1
+        if args.start == args.end or args.idle_minutes < minimum_idle:
+            parser.error(f"require a nonempty window and at least {minimum_idle} idle minutes")
         if args.command == "launch-agent":
             launch_agent(args)
             return 0
-        if args.pair and not args.smoke:
+        if args.pair and not (args.smoke or args.manual):
             parser.error("nightly mode measures both pairs")
+        if args.pair and len(set(args.pair)) != len(args.pair):
+            parser.error("pairs must be unique")
         return run(args)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(str(error), file=sys.stderr)
