@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <dirent.h>
 #include <fcntl.h>
+#include <iterator>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -161,8 +162,9 @@ class Descriptor {
   throw Poco::DataFormatException("unsafe delivery metadata entry", name);
 }
 
-int openDirectory(int parent, const char* name, bool optional = false, bool create = false) {
-  constexpr int flags = O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
+int openDirectory(int parent, const char* name, bool optional = false, bool create = false,
+                  int access = O_RDONLY) {
+  const int flags = access | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC;
   int fd = ::openat(parent, name, flags);
   if (fd < 0 && errno == ENOENT && create) {
     if (::mkdirat(parent, name, 0700) < 0 && errno != EEXIST) throw Poco::CreateFileException(name);
@@ -175,12 +177,15 @@ int openDirectory(int parent, const char* name, bool optional = false, bool crea
 
 // Walk one component at a time so swapping any opened path for a link cannot
 // redirect later operations. The caller owns the starting descriptor.
-int openDirectoryPath(int parent, const fs::path& path, bool optional = false) {
+int openDirectoryPath(int parent, const fs::path& path, bool optional = false,
+                      int ancestorAccess = O_RDONLY) {
   Descriptor directory;
-  for (const auto& part : path) {
+  for (auto it = path.begin(); it != path.end(); ++it) {
+    const auto& part = *it;
     if (part.empty() || part == ".") continue;
     if (part == ".." || part.has_root_path()) unsafeEntry(part.c_str());
-    directory.reset(openDirectory(parent, part.c_str(), optional));
+    const int access = ancestorAccess == O_RDONLY || std::next(it) == path.end() ? O_RDONLY : ancestorAccess;
+    directory.reset(openDirectory(parent, part.c_str(), optional, false, access));
     parent = directory.get();
     if (parent < 0) return -1;
   }
@@ -188,9 +193,18 @@ int openDirectoryPath(int parent, const fs::path& path, bool optional = false) {
 }
 
 int openAbsoluteDirectory(const fs::path& path, bool optional = false) {
+#ifdef O_SEARCH
+  if (path == path.root_path()) return openDirectory(AT_FDCWD, "/");
+  // Intermediate directories need search permission only. The final directory
+  // is still opened for reading, including paths with a trailing separator.
+  Descriptor root(openDirectory(AT_FDCWD, "/", false, false, O_SEARCH));
+  const auto relative = (path.has_filename() ? path : path.parent_path()).relative_path();
+  return openDirectoryPath(root.get(), relative, optional, O_SEARCH);
+#else
   Descriptor root(openDirectory(AT_FDCWD, "/"));
   if (path == path.root_path()) return root.release();
   return openDirectoryPath(root.get(), path.relative_path(), optional);
+#endif
 }
 
 int openFile(int directory, const char* name, int flags, bool optional = false) {
