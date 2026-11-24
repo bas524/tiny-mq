@@ -101,7 +101,9 @@ def main():
         directory = args.out / name.replace("/", "-")
         stable, within_budget = compare(args, name, reps, minimum, warmup, directory, baseline_name)
         if not stable and not args.smoke:
-            retry_minimum = "12s" if name.startswith("Transacted_Batch_Persistent/") else minimum
+            persistent_tx = (name == "Transacted_Persistent_RoundTrip/process_time"
+                             or name.startswith("Transacted_Batch_Persistent/"))
+            retry_minimum = "12s" if persistent_tx else minimum
             print(f"{name}: repeating once because CPU CV exceeded 5% (minimum {retry_minimum})", flush=True)
             stable, within_budget = compare(args, name, reps, retry_minimum, warmup,
                                             directory.with_name(directory.name + "-repeat"))

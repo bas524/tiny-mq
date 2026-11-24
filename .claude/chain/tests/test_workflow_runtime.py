@@ -2,6 +2,7 @@
 import copy
 import importlib
 import json
+import shutil
 import sys
 import subprocess
 import threading
@@ -126,6 +127,239 @@ class WorkflowRuntimeTest(unittest.TestCase):
         pending = self.runtime.status(self.change)['pending_decision']
         self.runtime.record_decision(self.change, {'kind': pending['kind'], 'subject': pending['subject'],
              'owner': 'Owner', 'source': {'thread_id': 'human-thread', 'message_id': 'human-1', 'quote': self.source['text']}})
+
+    def cpp_fixture(self):
+        from workflow_runtime import Runtime
+
+        root = self.f.root
+        source = root / 'server/src/demo.cpp'
+        source.parent.mkdir(parents=True)
+        source.write_text('int fixture() { return 0; }\n')
+        registry = root / '.claude/chain/workflow-checks.json'
+        data = json.loads(registry.read_text())
+        data['profiles']['cpp'] = {
+            'code_paths': ['server/src'],
+            'gates': ['reviewer', 'nfr', 'conformance', 'security'],
+            'checks': [{'id': 'cpp-fixture', 'argv': [sys.executable, '-c', 'print("cpp check")'],
+                        'actors': ['reviewer']}],
+        }
+        data['unavailable_profiles'] = {'cpp': 'fixture disabled'}
+        registry.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, 'unavailable'):
+            Runtime(root, profile='cpp')
+        data['unavailable_profiles'] = {}
+        registry.write_text(json.dumps(data))
+        return Runtime(root, profile='cpp', executor=self.execute,
+                       source_reader=lambda ref: self.source), source
+
+    def test_cpp_profile_is_pinned_and_confined(self):
+        from workflow_runtime import Runtime
+
+        runtime, source = self.cpp_fixture()
+        # Scope checks run before any provider or business action.
+        self.assertEqual(runtime._covered_target('server/src/demo.cpp'), str(source))
+        for name in ('code.py', 'server/src/notes.md', 'CMakeLists.txt', 'tests/new.cpp'):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                runtime._covered_target(name)
+        # Older harness checkpoints remain valid and cannot switch profiles.
+        self.assertEqual(Runtime(self.f.root, change=self.change).profile_name, 'harness')
+        with self.assertRaisesRegex(ValueError, 'differs from pinned'):
+            runtime.status(self.change)
+        change = '80-cpp-demo'
+        proposal = self.f.change.with_name(change)
+        shutil.copytree(self.f.change, proposal)
+        metadata = proposal / '.openspec.yaml'
+        metadata.write_text(metadata.read_text().replace('79-demo', change))
+        state = runtime.prepare(change, targets=['server/src/demo.cpp'])
+        self.assertEqual(state['profile'], 'cpp')
+        self.assertEqual(state['dispatches'], 0)
+        self.assertEqual(Runtime(self.f.root, change=change).status(change)['profile'], 'cpp')
+
+    def test_cpp_missing_nfr_measurement_cannot_advance(self):
+        from workflow_runtime import sha
+
+        runtime, source = self.cpp_fixture()
+        state = self.runtime._read(self.change)
+        state.update(profile='cpp', registry_hash=sha(runtime.registry_path),
+                     stage='nfr', pending_decision=None, state='ready')
+        state['targets'] = [str(source)]
+        runtime._save(self.change,state)
+        result = runtime.next(self.change)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(result['dispatches'], 0)
+        self.assertEqual(result['stage'], 'nfr')
+        self.assertEqual(result['gate_results']['nfr']['transition'], 'blocked')
+        self.assertEqual(result['gate_results']['nfr']['technical_verdict'], 'unobserved')
+        with patch('workflow_cpp.toolchain_identity', return_value={'test_only': True}):
+            receipt = runtime.verify(self.change, actor='nfr')
+        self.assertEqual(receipt['technical_verdict'], 'unobserved')
+
+    def cpp_nfr_fixture(self):
+        from workflow_runtime import Runtime, sha
+
+        runtime, source = self.cpp_fixture()
+        registry = json.loads(runtime.registry_path.read_text())
+        registry['profiles']['cpp']['checks'].append({
+            'id': 'cpp-nfr', 'actors': ['nfr'], 'argv': [sys.executable, '-c', 'pass'],
+        })
+        runtime.registry_path.write_text(json.dumps(registry))
+        runtime.git('add', str(runtime.registry_path))
+        runtime.git('commit', '-m', 'Install test profile')
+        runtime = Runtime(self.f.root, profile='cpp', executor=self.execute)
+        state = self.runtime._read(self.change)
+        state.update(profile='cpp', registry_hash=sha(runtime.registry_path),
+                     base=runtime.git('rev-parse', 'HEAD').strip(),
+                     stage='nfr', pending_decision=None, state='waiting', wait_reason='environment',
+                     targets=[str(source)],
+                     gate_results={'nfr': {'technical_verdict': 'unobserved', 'transition': 'blocked'}})
+        runtime._save(self.change, state)
+        return runtime, source
+
+    def cpp_nfr_samples(self, mode):
+        def command(change, state, check, scratch):
+            from workflow_cpp import source_files, source_identity
+            from workflow_nfr import ORDER, PATHS, PROFILES, file_hash
+
+            def write(path, names, repetitions, side):
+                entries = []
+                for name in names:
+                    for repetition in range(repetitions):
+                        cpu = 100
+                        if side == 'candidate' and name == PATHS[0]:
+                            if mode == 'regression':
+                                cpu = 106
+                            elif mode == 'noisy' and repetition == 0:
+                                cpu = 145
+                        entries.append(dict(run_type='iteration', run_name='BenchmarkFixture/' + name,
+                                            repetitions=repetitions, repetition_index=repetition,
+                                            cpu_time=cpu, real_time=cpu, time_unit='ns'))
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({'benchmarks': entries}))
+
+            raw = scratch / 'raw'
+            for name in PATHS:
+                folders = [name.replace('/', '-')]
+                if mode == 'noisy' and name == PATHS[0]:
+                    folders.append(folders[0] + '-repeat')
+                for folder in folders:
+                    for step, (side, count) in enumerate(ORDER, 1):
+                        write(raw / folder / f'{step}-{side}.json', (name,), count, side)
+            write(raw / 'profiles.json', PROFILES, 9, 'candidate')
+            if mode == 'truncated':
+                (raw / PATHS[0].replace('/', '-') / '4-baseline.json').write_text('{}')
+            binaries = {}
+            for side in ('baseline', 'candidate'):
+                binary = scratch / (side + '-build') / 'tiny_mq'
+                binary.parent.mkdir()
+                binary.write_text(side)
+                binaries[side] = file_hash(binary)
+            identity = source_identity(source_files(self.f.root), self.f.root)
+            (scratch / 'nfr-build.json').write_text(json.dumps({
+                'base': 'incorrect' if mode == 'wrong-base' else state['base'],
+                'candidate_sources': identity, 'baseline_sources': 'fixture-base',
+                'binary_sha256': binaries, 'configuration': 'RelWithDebInfo',
+            }))
+            return {'argv': check['argv'], 'exit': int(mode in ('regression', 'noisy')),
+                    'stdout': '', 'stderr': ''}
+        return command
+
+    def test_cpp_nfr_audits_and_reuses_registered_observation(self):
+        runtime, _ = self.cpp_nfr_fixture()
+
+        def executor(stage, request):
+            if stage == 'nfr':
+                return self.execute(stage, request)
+            return {'technical_verdict': 'unobserved', 'wait_reason': 'environment'}
+
+        runtime.executor = executor
+        with (patch('workflow_cpp.toolchain_identity', return_value={'test_only': True}),
+              patch.object(runtime, '_cpp_nfr_command', side_effect=self.cpp_nfr_samples('pass')) as run):
+            receipt = runtime.verify(self.change, actor='nfr')
+            self.assertEqual(receipt['technical_verdict'], 'passed')
+            self.assertEqual(runtime.status(self.change)['state'], 'ready')
+            result = runtime.next(self.change)
+            self.assertEqual(result['stage'], 'conformance')
+            self.assertEqual(result['gate_results']['nfr']['receipt_hash'], receipt['receipt_hash'])
+            self.assertEqual(self.calls, ['nfr'])
+            run.assert_called_once()
+
+    def test_cpp_nfr_stale_or_changed_samples_block_dispatch(self):
+        runtime, source = self.cpp_nfr_fixture()
+        with (patch('workflow_cpp.toolchain_identity', return_value={'test_only': True}),
+              patch.object(runtime, '_cpp_nfr_command', side_effect=self.cpp_nfr_samples('pass'))):
+            for invalidation in ('source', 'raw'):
+                with self.subTest(invalidation=invalidation):
+                    receipt = runtime.verify(self.change, actor='nfr')
+                    if invalidation == 'source':
+                        source.write_text(source.read_text() + '// changed after measurement\n')
+                    else:
+                        evidence = self.f.root / receipt['measurement']['path']
+                        manifest = json.loads(evidence.read_text())['files']
+                        (evidence.parent / next(name for name in manifest if name.startswith('raw/'))).write_text('{}')
+                    result = runtime.next(self.change)
+                    self.assertEqual(result['technical_verdict'], 'unobserved')
+                    self.assertEqual(result['gate_results']['nfr']['transition'], 'blocked')
+                    self.assertEqual(self.calls, [])
+
+    def test_cpp_nfr_distinguishes_inconclusive_measurements_from_regression(self):
+        runtime, _ = self.cpp_nfr_fixture()
+        with patch('workflow_cpp.toolchain_identity', return_value={'test_only': True}):
+            for mode in ('wrong-base', 'truncated', 'noisy'):
+                with self.subTest(mode=mode), patch.object(
+                    runtime, '_cpp_nfr_command', side_effect=self.cpp_nfr_samples(mode),
+                ):
+                    receipt = runtime.verify(self.change, actor='nfr')
+                    self.assertEqual(receipt['technical_verdict'], 'unobserved')
+                    self.assertEqual(runtime.next(self.change)['state'], 'waiting')
+                    self.assertEqual(self.calls, [])
+            with patch.object(runtime, '_cpp_nfr_command', side_effect=self.cpp_nfr_samples('regression')):
+                receipt = runtime.verify(self.change, actor='nfr')
+                self.assertEqual(receipt['technical_verdict'], 'rejected')
+                runtime.executor = lambda stage, request: {
+                    'technical_verdict': 'passed', 'performance_verdict': 'passed', 'wait_reason': 'environment',
+                }
+                result = runtime.next(self.change)
+                self.assertEqual(result['gate_results']['nfr']['technical_verdict'], 'rejected')
+                self.assertEqual(result['gate_results']['nfr']['performance_verdict'], 'rejected')
+                self.assertEqual(result['gate_results']['nfr']['transition'], 'blocked')
+                self.assertEqual(result['stage'], 'producer')
+
+    def test_cpp_nfr_archive_works_without_tarfile_data_filter(self):
+        import io
+        import tarfile
+        from workflow_cpp import extract_baseline
+
+        archive = self.f.root / 'baseline.tar'
+        output = self.f.root / 'baseline'
+        output.mkdir()
+        with tarfile.open(archive, 'w') as sources:
+            file = tarfile.TarInfo('server/src/sample.cpp')
+            value = b'int sample;\n'
+            file.size = len(value)
+            sources.addfile(file, io.BytesIO(value))
+        with patch.object(tarfile, 'data_filter', None, create=True):
+            extract_baseline(archive, output)
+            self.assertEqual((output / 'server/src/sample.cpp').read_bytes(), value)
+            with tarfile.open(archive, 'w') as sources:
+                link = tarfile.TarInfo('outside')
+                link.type = tarfile.SYMTYPE
+                link.linkname = '../outside'
+                sources.addfile(link)
+            with self.assertRaisesRegex(ValueError, r'invalid C\+\+ baseline archive member'):
+                extract_baseline(archive, output)
+
+    def test_cpp_nfr_rejects_empty_power_response(self):
+        from workflow_runtime import Runtime
+
+        with (patch('workflow_runtime.sys.platform', 'darwin'),
+              patch.object(Runtime, '_tool_env', return_value={}),
+              patch.object(Runtime, 'sandbox_command', return_value=['unused']),
+              patch('workflow_runtime.subprocess.check_output', return_value=''),
+              patch('workflow_runtime.subprocess.Popen') as spawn):
+            with self.assertRaisesRegex(ValueError, 'external power'):
+                self.runtime._cpp_nfr_command(self.change, {'base': 'fixture'},
+                                              {'timeout': 30, 'argv': []}, self.f.root)
+            spawn.assert_not_called()
 
     def test_concurrent_next(self):
         """REQ-79-2: simultaneous continuation launches exactly one critic."""

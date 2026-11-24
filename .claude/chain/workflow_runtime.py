@@ -8,12 +8,15 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 import uuid
 from pathlib import Path
-from workflow_contract import _safe_path, load_contract, digest, validate_links, rebase_archive_links
+from workflow_contract import _no_links, _safe_path, load_contract, digest, validate_links, rebase_archive_links
 from workflow_policy import resolve_codex_source, valid_source, evaluate_gate
 
 ROLES = ('critic','producer','reviewer','conformance','nfr','security','docwriter','explainer')
@@ -251,7 +254,7 @@ def now():
 
 
 class Runtime:
-    def __init__(self, root, executor=None, source_reader=None, check_runner=None):
+    def __init__(self, root, executor=None, source_reader=None, check_runner=None, *, change=None, profile=None):
         self.root = Path(root).resolve()
         self.injected = any(x is not None for x in (executor, source_reader, check_runner))
         self.executor = executor or self._execute
@@ -272,7 +275,11 @@ class Runtime:
         self.registry = json.loads(self.registry_path.read_text())
         if self.registry.get('version') != 1:
             raise ValueError('unsupported check registry')
-        self.profile_name=self.registry.get('default_profile')
+        if profile is None and change is not None:
+            checkpoint = self._dir(change) / 'state.json'
+            if checkpoint.is_file():
+                profile = json.loads(checkpoint.read_text()).get('profile', 'harness')
+        self.profile_name = self.registry.get('default_profile') if profile is None else profile
         self.unavailable_profiles=self.registry.get('unavailable_profiles',{'cpp':'unavailable: product verification is not installed'})
         if self.profile_name in self.unavailable_profiles or self.profile_name not in self.registry.get('profiles',{}):
             raise ValueError('unknown or unavailable check profile')
@@ -301,7 +308,10 @@ class Runtime:
         return self.root / 'openspec/changes' / self._name(change) / 'proposal.md'
 
     def _read(self, change):
-        return json.loads((self._dir(change) / 'state.json').read_text())
+        state = json.loads((self._dir(change) / 'state.json').read_text())
+        if state.get('profile', 'harness') != self.profile_name:
+            raise ValueError('check profile differs from pinned checkpoint')
+        return state
 
     def _save(self, change, state):
         directory = self._dir(change)
@@ -358,8 +368,11 @@ class Runtime:
 
     def _covered_target(self, value):
         target=Path(self._safe_target(value))
-        if target.suffix.lower() in ('.c','.cc','.cpp','.cxx','.h','.hh','.hpp','.hxx','.ixx','.tpp'):
+        cpp = target.suffix.lower() in ('.c','.cc','.cpp','.cxx','.h','.hh','.hpp','.hxx','.ixx','.tpp')
+        if cpp and self.profile_name != 'cpp':
             raise ValueError('cpp profile unavailable; unchecked product target')
+        if self.profile_name == 'cpp' and not cpp:
+            raise ValueError('cpp profile accepts only C/C++ source and header targets')
         for name in self.profile.get('code_paths',[]):
             base=self.root/name
             if Path(name).is_absolute() or '..' in Path(name).parts:raise ValueError('invalid profile scope')
@@ -391,6 +404,7 @@ class Runtime:
             output = self.root/'handoffs/current'/change.split('-')[0]/'runtime-output'
             output.mkdir(parents=True,exist_ok=True)
             state = {'change':change,'state':'waiting','contract_hash':contract['contract_hash'],'contract_files':contract['files'],
+                     'profile':self.profile_name,
                      'requirement_ids':[r['id'] for r in contract['requirements']], 'targets':safe_targets,
                      'base':self.git('rev-parse','HEAD').strip(), 'registry_hash':sha(self.registry_path),
                      'models':{r:self.config.get('MODEL_'+r.upper()) for r in ROLES},
@@ -608,6 +622,17 @@ class Runtime:
                     state.update(state='waiting',wait_reason='budget_limit'); break
                 recovered=state.pop('recovered_result',None)
                 stage=state['stage']; execution=state['checkpoint']['execution'] if recovered else uuid.uuid4().hex
+                nfr_receipt = None
+                if self.profile_name == 'cpp' and stage == 'nfr':
+                    nfr_receipt = self._current_cpp_nfr(change, state)
+                    if nfr_receipt is None:
+                        state.update(state='waiting', wait_reason='environment', technical_verdict='unobserved')
+                        state.setdefault('gate_results', {})['nfr'] = {
+                            'technical_verdict': 'unobserved', 'transition': 'blocked',
+                            'reason': 'C++ NFR requires a current paired measurement',
+                        }
+                        self._event(state, 'infrastructure', 'cpp_measurement_required')
+                        break
                 state.update(state='running',checkpoint={'subject':self._subject(),'execution':execution,'stage':stage,'time':now()})
                 if recovered:
                     attempt=next(a for a in state['attempts'] if a.get('execution')==execution)
@@ -635,10 +660,15 @@ class Runtime:
                     verdict=evaluate_gate({**result,'gate':stage},{})['technical_verdict']
                     if result.get('questions'):
                         verdict='rejected'
+                    if nfr_receipt is not None and nfr_receipt['technical_verdict'] == 'rejected':
+                        verdict = 'rejected'
                     if result.get('wait_reason') and verdict!='rejected':
                         state.update(state='waiting',wait_reason=result['wait_reason']); attempt['kind']='infrastructure'; break
-                    receipt=None
-                    if stage in ('reviewer','conformance','nfr','security'):
+                    receipt = nfr_receipt
+                    if receipt is not None:
+                        if not self.receipt_current(change, receipt):
+                            raise ValueError('C++ NFR measurement changed during review')
+                    elif stage in ('reviewer','conformance','nfr','security'):
                         receipt=self._verify(change,stage,state)
                         if receipt['technical_verdict']=='rejected':verdict='rejected'
                     state['technical_verdict']=verdict
@@ -646,7 +676,9 @@ class Runtime:
                     state.setdefault('gate_results',{})[stage]={'technical_verdict':verdict,
                         'transition':'allowed' if verdict=='passed' or permitted_na else 'blocked',
                         'execution':execution,'receipt_hash':receipt['receipt_hash'] if receipt else None}
-                    if 'performance_verdict' in result:
+                    if nfr_receipt is not None:
+                        state['gate_results'][stage]['performance_verdict'] = nfr_receipt['technical_verdict']
+                    elif 'performance_verdict' in result:
                         state['gate_results'][stage]['performance_verdict']=result['performance_verdict']
                     if verdict!='passed' and not permitted_na:
                         state.update(state='waiting',wait_reason='no_progress')
@@ -745,6 +777,9 @@ class Runtime:
             if not executable:raise ValueError('missing check tool: '+argv[0])
             binaries[argv[0]]=sha(Path(executable).resolve())
         data={'python':sys.version,'platform':list(os.uname()),'inputs':self._input_hash(),'binaries':binaries,'registry':sha(self.registry_path), 'env':{k:os.environ.get(k) for k in ('PATH','LANG','LC_ALL','CXX','CC','CMAKE_BUILD_TYPE')}}
+        if self.profile_name == 'cpp':
+            from workflow_cpp import toolchain_identity
+            data['cpp_toolchain'] = toolchain_identity(self.root)
         return digest(data)
 
     def _checks(self):
@@ -753,34 +788,190 @@ class Runtime:
         for check in checks:
             if check['id'] in seen or not check.get('argv') or not all(isinstance(x,str) for x in check['argv']):
                 raise ValueError('invalid registered check')
+            actors = check.get('actors')
+            if actors is not None and (not isinstance(actors,list) or not actors or any(a not in ROLES for a in actors)):
+                raise ValueError('invalid registered check actors')
+            timeout = check.get('timeout', 600)
+            maximum = 3600 if self.profile_name == 'cpp' and check['id'] == 'cpp-nfr' else 1800
+            if type(timeout) is not int or not 1 <= timeout <= maximum:
+                raise ValueError('invalid registered check timeout')
             seen.add(check['id'])
         return checks
 
     def verify(self, change, actor='reviewer'):
         with self._lock(change):
             state=self._read(change);self._fresh(state)
-            receipt=self._verify(change,actor,state);self._save(change,state)
+            if self.profile_name == 'cpp' and actor == 'nfr' and self._checks_for(actor):
+                if (state['stage'] != 'nfr' or state['state'] not in ('ready', 'waiting')
+                        or state.get('pending_decision')):
+                    raise ValueError('C++ NFR measurement requires a change at the NFR stage')
+                receipt = self._verify_cpp_nfr(change, state)
+                if (receipt['technical_verdict'] in ('passed', 'rejected')
+                        and state.get('wait_reason') == 'environment'
+                        and state.get('gate_results', {}).get('nfr', {}).get('technical_verdict') == 'unobserved'):
+                    state.update(state='ready', wait_reason=None)
+            else:
+                receipt = self._verify(change,actor,state)
+            self._save(change,state)
             return receipt
+
+    def _checks_for(self, actor):
+        return [check for check in self._checks() if actor in check.get('actors', ROLES)]
+
+    def _missing_cpp_measurement(self, actor):
+        return self.profile_name == 'cpp' and actor == 'nfr' and not self._checks_for(actor)
+
+    def _current_cpp_nfr(self, change, state):
+        receipt = next((entry for entry in reversed(state['receipts']) if entry['actor'] == 'nfr'), None)
+        if (receipt and receipt.get('measurement') and receipt['technical_verdict'] in ('passed', 'rejected')
+                and (state['test_only'] or not receipt['test_only']) and self.receipt_current(change, receipt)):
+            return receipt
+        return None
+
+    def _cpp_nfr_command(self, change, state, check, scratch):
+        on_mac = sys.platform == 'darwin'
+        deadline = time.monotonic() + check['timeout']
+
+        def external_power():
+            return (not on_mac or subprocess.check_output(['/usr/bin/pmset', '-g', 'batt'], text=True)
+                    .splitlines()[:1] == ["Now drawing from 'AC Power'"])
+
+        def run(argv, output, extra_env):
+            if not external_power():
+                raise ValueError('C++ NFR requires external power')
+            env = self._tool_env(state, 'nfr', check_output=output)
+            command = self.sandbox_command(change, 'nfr', argv, check_output=output)
+            with subprocess.Popen(command, cwd=self.root, env={**env, **extra_env},
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, start_new_session=True) as task:
+                wake = None
+                try:
+                    if on_mac:
+                        wake = subprocess.Popen(['/usr/bin/caffeinate', '-is', '-w', str(task.pid)])
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        try:
+                            wait = min(10, remaining) if on_mac else remaining
+                            stdout, stderr = task.communicate(timeout=max(0, wait))
+                            break
+                        except subprocess.TimeoutExpired:
+                            if time.monotonic() >= deadline:
+                                raise
+                            if not external_power():
+                                raise ValueError('external power lost during C++ NFR')
+                finally:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(task.pid, signal.SIGKILL)
+                    if wake is not None:
+                        if wake.poll() is None:
+                            wake.terminate()
+                        wake.wait()
+            if not external_power():
+                raise ValueError('external power lost during C++ NFR')
+            return task.returncode, stdout, stderr
+
+        build_exit, build_stdout, build_stderr = run(check['argv'], scratch, {'AEF_NFR_BASE': state['base']})
+        result = {'argv': check['argv'], 'build_exit': build_exit, 'exit': None,
+                  'stdout': build_stdout, 'stderr': build_stderr}
+        if build_exit != 0:
+            return result
+
+        # Benchmark workers can write samples and temporary broker data.
+        # Both binaries and the build manifest lie outside that write grant.
+        raw = scratch / 'raw'
+        raw.mkdir()
+        benchmark = ['python3', '-B', 'tests/nfr72.py',
+                     '--baseline', str(scratch / 'baseline-build/tiny_mq'),
+                     '--candidate', str(scratch / 'candidate-build/tiny_mq'),
+                     '--out', str(raw)]
+        code, stdout, stderr = run(benchmark, raw, {})
+        result.update(exit=code, benchmark_argv=benchmark,
+                      stdout=build_stdout + stdout, stderr=build_stderr + stderr)
+        return result
+
+    def _verify_cpp_nfr(self, change, state):
+        from workflow_cpp import source_files, source_identity
+        from workflow_nfr import machine_lock, retain
+
+        checks = self._checks_for('nfr')
+        if len(checks) != 1 or checks[0]['id'] != 'cpp-nfr':
+            raise ValueError('invalid C++ NFR check registration')
+        self._check_source_scope(state)
+        subject, environment = self._subject(), self._environment()
+        candidate = source_identity(source_files(self.root), self.root)
+        operator_output = _no_links(Path(state['output']))
+        if not operator_output.is_relative_to(self.root / 'handoffs/current'):
+            raise ValueError('invalid C++ NFR output scope')
+        execution = uuid.uuid4().hex
+        log = operator_output / ('check-' + execution + '.json')
+        verdict, measurement = 'unobserved', None
+        result = {'argv': checks[0]['argv'], 'exit': None, 'stdout': '', 'stderr': ''}
+        with machine_lock(), tempfile.TemporaryDirectory(prefix='nfr-build-', dir=operator_output) as work:
+            try:
+                scratch = Path(work)
+                result = self._cpp_nfr_command(change, state, checks[0], scratch)
+                if (result['exit'] not in (0, 1) or subject != self._subject()
+                        or environment != self._environment()):
+                    raise ValueError('C++ NFR command or input validation failed')
+                measurement, verdict = retain(scratch, operator_output / ('nfr-' + execution),
+                                              state['base'], candidate, result['exit'])
+                measurement['path'] = str(Path(measurement['path']).relative_to(self.root))
+            except subprocess.TimeoutExpired as error:
+                result['stdout'] = (error.stdout or b'').decode(errors='replace')
+                result['stderr'] = (error.stderr or b'').decode(errors='replace') + '\nC++ NFR timed out'
+            except (OSError, ValueError, KeyError, TypeError, ArithmeticError, subprocess.SubprocessError) as error:
+                result['stderr'] += '\n' + str(error)
+                verdict, measurement = 'unobserved', None
+        log.write_text(json.dumps([result], ensure_ascii=False, indent=2) + '\n')
+        receipt = {'actor': 'nfr', 'subject': subject, 'environment_hash': environment, 'log_path': str(log),
+                   'log_sha256': sha(log), 'technical_verdict': verdict, 'observed_at': now(),
+                   'requirement_ids': state['requirement_ids'], 'test_only': self.injected or state['test_only'],
+                   'measurement': measurement}
+        receipt['receipt_hash'] = digest(receipt)
+        state['receipts'].append(receipt)
+        self._event(state, 'mechanical', 'verified', actor='nfr', receipt=receipt['receipt_hash'])
+        return receipt
 
     def _verify(self, change, actor, state):
         if actor not in ROLES:
             raise ValueError('unknown checker')
         subject=self._subject(); environment=self._environment(); results=[]
         log=Path(state['output'])/('check-'+uuid.uuid4().hex+'.json')
-        for check in self._checks():
-            for argv in check.get('environment',[])+[check['argv']]:
-                if self.check_runner:
-                    result=self.check_runner(argv,cwd=self.root)
-                else:
-                    command=self.sandbox_command(change,actor,argv)
-                    result=subprocess.run(command,cwd=self.root,env=self._tool_env(state),capture_output=True,text=True,timeout=600)
-                results.append({'argv':argv,'exit':result.returncode,'stdout':result.stdout,'stderr':result.stderr})
+        checks = self._checks_for(actor)
+        # Product builds use fresh scratch space inaccessible to the model's
+        # write policy. NFR requires its own registered measurement.
+        missing_measurement = self._missing_cpp_measurement(actor)
+        if missing_measurement:
+            results.append({'argv': [], 'exit': 1, 'stdout': '',
+                            'stderr': 'C++ NFR requires a registered comparable measurement'})
+        with contextlib.ExitStack() as cleanup:
+            scratch = None
+            if self.profile_name == 'cpp' and checks and self.check_runner is None:
+                scratch = Path(cleanup.enter_context(tempfile.TemporaryDirectory(
+                    prefix='verification-', dir=state['output'])))
+            for check in checks:
+                for argv in check.get('environment',[])+[check['argv']]:
+                    try:
+                        if self.check_runner:
+                            result=self.check_runner(argv,cwd=self.root)
+                        else:
+                            command=self.sandbox_command(change,actor,argv,check_output=scratch)
+                            result=subprocess.run(command,cwd=self.root,env=self._tool_env(state, actor, check_output=scratch),
+                                                  capture_output=True,text=True,timeout=check.get('timeout', 600))
+                        results.append({'argv':argv,'exit':result.returncode,'stdout':result.stdout,'stderr':result.stderr})
+                    except subprocess.TimeoutExpired as error:
+                        def output(value):
+                            return value.decode(errors='replace') if isinstance(value, bytes) else value or ''
+                        results.append({'argv':argv,'exit':None,'stdout':output(error.stdout),
+                                        'stderr':output(error.stderr)+'\nVerification timed out'})
         log.write_text(json.dumps(results,ensure_ascii=False,indent=2)+'\n')
         receipt={'actor':actor,'subject':subject,'environment_hash':environment,'log_path':str(log),'log_sha256':sha(log),
                  'technical_verdict':'passed' if results and all(r['exit']==0 for r in results) and subject==self._subject() and environment==self._environment() else 'rejected',
                  'observed_at':now(),'requirement_ids':state['requirement_ids'],'test_only':self.injected or state['test_only']}
         if receipt['technical_verdict']=='passed' and self.profile.get('gate_applicability',{}).get(actor)=='not_applicable':
             receipt['technical_verdict']='not_applicable'
+        if missing_measurement:
+            receipt['technical_verdict']='unobserved'
         receipt['receipt_hash']=digest(receipt); state['receipts'].append(receipt)
         self._event(state,'mechanical','verified',actor=actor,receipt=receipt['receipt_hash'])
         return receipt
@@ -788,9 +979,16 @@ class Runtime:
     def receipt_current(self, change, receipt):
         try:
             state=self._read(change);self._fresh(state)
-            return (receipt in state['receipts'] and receipt['subject']==self._subject()
-                    and receipt['environment_hash']==self._environment() and sha(receipt['log_path'])==receipt['log_sha256'])
-        except (ValueError,OSError):
+            if (receipt not in state['receipts'] or receipt['subject'] != self._subject()
+                    or receipt['environment_hash'] != self._environment()
+                    or sha(_no_links(receipt['log_path'])) != receipt['log_sha256']):
+                return False
+            if self.profile_name == 'cpp' and receipt['actor'] == 'nfr':
+                from workflow_nfr import current
+                evidence = receipt.get('measurement')
+                return bool(evidence and evidence['base'] == state['base'] and current(self.root, evidence))
+            return True
+        except (ValueError, OSError, KeyError, TypeError):
             return False
 
     def policy(self, change, actor):
@@ -813,31 +1011,36 @@ class Runtime:
                 'write_paths':writes+[str(output)], 'write_source_paths':writes,'output':str(output),
                 'fresh_session':True,'network_enabled':False,'mcp_enabled':False,'proxy_enabled':False,'approval_escalation':False}
 
-    def _permissions(self, change, actor):
+    def _permissions(self, change, actor, check_output=None):
         policy=self.policy(change,actor)
         rights={':minimal':'read',str(self.root):'read',str(self.common):'read',
                 '/Library/Developer/CommandLineTools':'read','/opt/homebrew':'read',
                 str(self.common/'aef'):'deny',str(self.common/'aef-audit'):'deny',
                 str(Path.home()/'.codex'):'deny',str(Path.home()/'.ssh'):'deny',str(Path.home()/'.config/gh'):'deny'}
-        for path in policy['write_paths']:
+        for path in ([str(check_output)] if check_output is not None else policy['write_paths']):
             rights[path]='write'
         return 'permissions.aef_stage={filesystem={'+','.join(json.dumps(k)+'='+json.dumps(v) for k,v in rights.items())+'},network={enabled=false}}'
 
-    def _tool_env(self, state, actor='reviewer'):
-        output=Path(state['output'])/actor;output.mkdir(parents=True,exist_ok=True)
+    def _tool_env(self, state, actor='reviewer', check_output=None):
+        output=check_output if check_output is not None else Path(state['output'])/actor
+        output.mkdir(parents=True,exist_ok=True)
         tmp=output/'tmp';tmp.mkdir(exist_ok=True)
         env={k:v for k,v in os.environ.items() if k in ('PATH','HOME','LANG','LC_ALL','SHELL','USER','LOGNAME','CODEX_HOME')}
         env.update(TMPDIR=str(tmp),TEMP=str(tmp),TMP=str(tmp),PYTHONDONTWRITEBYTECODE='1',GIT_CONFIG_GLOBAL='/dev/null',GIT_CONFIG_NOSYSTEM='1')
+        if check_output is not None:
+            env['AEF_CHECK_OUTPUT'] = str(check_output)
+            if 'AEF_CPP_SDK' in os.environ:
+                env['AEF_CPP_SDK'] = os.environ['AEF_CPP_SDK']
         return env
 
-    def sandbox_command(self, change, actor, argv):
+    def sandbox_command(self, change, actor, argv, *, check_output=None):
         """Real native Codex sandbox, with managed policy included. No model call."""
         if not argv or not all(isinstance(a,str) for a in argv):
             raise ValueError('argv array required')
         binary=shutil.which('codex')
         if not binary:
             raise ValueError('codex unavailable; sandbox cannot be widened')
-        return [binary,'sandbox','--include-managed-config','-P','aef_stage','-c',self._permissions(change,actor),'-C',str(self.root),'--',*argv]
+        return [binary,'sandbox','--include-managed-config','-P','aef_stage','-c',self._permissions(change,actor,check_output),'-C',str(self.root),'--',*argv]
 
     def _load_provider_layer(self, profile, config_home=None):
         return _FROZEN_HOST['load_provider_layer'](profile,config_home)
@@ -897,6 +1100,14 @@ class Runtime:
             prompt+='\nIndependent findings to correct:\n'+json.dumps(state['findings'],ensure_ascii=False)
         if actor=='explainer':
             prompt+='\nWrite the independent explanation to '+str(output/'acceptance.md')+'. Checks and observed results: '+json.dumps(state['receipts'],ensure_ascii=False)
+        if actor == 'nfr' and self.profile_name == 'cpp':
+            measurement = self._current_cpp_nfr(change, state)
+            if measurement is None:
+                raise ValueError('C++ NFR measurement disappeared before dispatch')
+            prompt += '\nObserved comparison: ' + json.dumps({
+                'technical_verdict': measurement['technical_verdict'],
+                **measurement['measurement'],
+            }, ensure_ascii=False)
         prompt+='\nRegistered gate applicability: '+json.dumps(self.profile.get('gate_applicability',{}))
         prompt+='\nOnly write your role outputs under '+str(output)+'. Return JSON with technical_verdict, questions, summary. Runtime controls transitions and receipts.'
         prompt += (' Optional evidence must be an array of paths to nonempty files in your output '
@@ -1160,6 +1371,12 @@ print('''+repr('NATIVE_DENIALS_VERIFIED '+marker)+''')
         if state['test_only'] or self.injected or not self._smokes_current(state):
             return False
         for gate in self.profile['gates']:
+            if self.profile_name == 'cpp' and gate == 'nfr':
+                receipt = self._current_cpp_nfr(state['change'], state)
+                if (not receipt or receipt['technical_verdict'] != 'passed'
+                        or state.get('gate_results', {}).get('nfr', {}).get('receipt_hash') != receipt['receipt_hash']
+                        or state['gate_results']['nfr']['transition'] != 'allowed'):
+                    return False
             if state.get('gate_results',{}).get(gate,{}).get('transition')=='blocked':
                 return False
             if not any(r['actor']==gate and not r['test_only'] and r['technical_verdict'] in ('passed','not_applicable') and self.receipt_current(state['change'],r) for r in state['receipts']):
