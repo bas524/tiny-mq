@@ -2,10 +2,13 @@
 """REQ-71-7: NfrGateTest.DestinationHotPathBudget."""
 import argparse
 import collections
+import contextlib
 import json
+import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import statistics
 import subprocess
 import tempfile
@@ -22,6 +25,28 @@ PROFILES = (
     "Destination_Fanout/4",
 )
 NANOSECONDS = {"ns": 1, "us": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
+
+
+
+@contextlib.contextmanager
+def machine_lock():
+    """Serialize broker measurements for this user, across Git checkouts."""
+    import fcntl
+
+    path = Path('/tmp').resolve() / f'tiny-mq-nfr-{os.getuid()}.lock'
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or info.st_mode & 0o077):
+            raise ValueError('unsafe machine NFR lock')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('another local NFR measurement is active') from None
+        yield
+    finally:
+        os.close(fd)
 
 
 def run(binary, names, repetitions, minimum, warmup, output):

@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 
-from nfr71 import HOT_PATHS, PROFILES as DESTINATION_PROFILES
+from nfr71 import HOT_PATHS, PROFILES as DESTINATION_PROFILES, machine_lock
 from nfr72 import DELIVERY_PATHS, PROFILES, registrations
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,7 +50,7 @@ def read_json(path):
 @contextmanager
 def lock(store):
     store.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with (store / "lock").open("a") as stream:
+    with machine_lock(), (store / "lock").open("a") as stream:
         fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
 
