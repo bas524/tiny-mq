@@ -6,7 +6,8 @@
 
 ## Baseline main от 24.11.2026
 
-Статус — передан на приёмку. Замерен `main` `2c3e80355bca795976b914f414dbc56037c36a5f`
+Owner принял таблицу из локального коммита `bef6548` 24.11.2026
+ответом «принимаю» в чате. Замерен `main` `2c3e80355bca795976b914f414dbc56037c36a5f`
 в паре с pre-M‑07 `0dc8995f107ad8746d72cd0aa5555da235817e23` на Mac16,8 (arm64), macOS 27.2.1,
 Apple clang version 21.0.0 (clang-2100.4.1.1), RelWithDebInfo. vcpkg `cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3`.
 SHA-256 бинарника main `2da430f6c3ea967ec7659894e0f58e80b42bd86a9c2ff91a274228dc3d599090`.
