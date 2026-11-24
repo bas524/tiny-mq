@@ -54,7 +54,7 @@ def run(binary, names, repetitions, minimum, warmup, output):
     return results
 
 
-def compare(args, name, repetitions, minimum, warmup, directory, baseline_name=None):
+def compare(args, name, repetitions, minimum, warmup, directory, baseline_name=None, *, report=None):
     directory.mkdir(exist_ok=True)
     samples = {"baseline": [], "candidate": []}
     first = repetitions // 2
@@ -76,14 +76,19 @@ def compare(args, name, repetitions, minimum, warmup, directory, baseline_name=N
         100 * statistics.stdev(values) / statistics.mean(values)
         for values in (baseline, candidate)
     )
+    real_medians = [statistics.median(values) for values in (baseline_real, candidate_real)]
     delta = 100 * (after / before - 1)
     stable = max(cv_baseline, cv_candidate) <= 5.0
     within_budget = after * 20 <= before * 21
     label = "noisy"
     if stable:
         label = "within budget" if within_budget else "regression"
+    if report is not None:
+        report.update(cpu_median=[before, after], real_median=real_medians,
+                      cpu_cv=[cv_baseline, cv_candidate], delta_percent=delta,
+                      stable=stable, within_budget=within_budget, samples=directory.name)
     print(f"{name}: CPU median {before:.1f} -> {after:.1f} ns/op ({delta:+.2f}%), "
-          f"real median {statistics.median(baseline_real):.1f} -> {statistics.median(candidate_real):.1f} ns/op, "
+          f"real median {real_medians[0]:.1f} -> {real_medians[1]:.1f} ns/op, "
           f"CPU CV {cv_baseline:.2f}% / {cv_candidate:.2f}% ({label})", flush=True)
     return stable, within_budget
 
