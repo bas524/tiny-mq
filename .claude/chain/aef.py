@@ -14,10 +14,13 @@ def main(argv=None, runtime=None):
     parser.add_argument('change')
     parser.add_argument('--decision',help='trusted coordinator JSON file; no model flags')
     parser.add_argument('--reason')
+    parser.add_argument('--profile', help='select a check profile when preparing a change')
     parser.add_argument('--actor',default='reviewer')
     args=parser.parse_args(argv)
     try:
-        runtime=runtime or Runtime(Path(__file__).resolve().parents[2])
+        if args.profile is not None and args.operation != 'prepare':
+            raise ValueError('--profile applies only to prepare')
+        runtime=runtime or Runtime(Path(__file__).resolve().parents[2], change=args.change, profile=args.profile)
         if args.operation in ('record-decision','request-exception'):
             if not args.decision: raise ValueError('--decision required')
             result=getattr(runtime,args.operation.replace('-','_'))(args.change,json.loads(Path(args.decision).read_text()))

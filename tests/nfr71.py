@@ -2,10 +2,13 @@
 """REQ-71-7: NfrGateTest.DestinationHotPathBudget."""
 import argparse
 import collections
+import contextlib
 import json
+import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import statistics
 import subprocess
 import tempfile
@@ -22,6 +25,28 @@ PROFILES = (
     "Destination_Fanout/4",
 )
 NANOSECONDS = {"ns": 1, "us": 1_000, "ms": 1_000_000, "s": 1_000_000_000}
+
+
+
+@contextlib.contextmanager
+def machine_lock():
+    """Serialize broker measurements for this user, across Git checkouts."""
+    import fcntl
+
+    path = Path('/tmp').resolve() / f'tiny-mq-nfr-{os.getuid()}.lock'
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_nlink != 1 or info.st_mode & 0o077):
+            raise ValueError('unsafe machine NFR lock')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('another local NFR measurement is active') from None
+        yield
+    finally:
+        os.close(fd)
 
 
 def run(binary, names, repetitions, minimum, warmup, output):
@@ -54,7 +79,7 @@ def run(binary, names, repetitions, minimum, warmup, output):
     return results
 
 
-def compare(args, name, repetitions, minimum, warmup, directory, baseline_name=None):
+def compare(args, name, repetitions, minimum, warmup, directory, baseline_name=None, *, report=None):
     directory.mkdir(exist_ok=True)
     samples = {"baseline": [], "candidate": []}
     first = repetitions // 2
@@ -76,14 +101,19 @@ def compare(args, name, repetitions, minimum, warmup, directory, baseline_name=N
         100 * statistics.stdev(values) / statistics.mean(values)
         for values in (baseline, candidate)
     )
+    real_medians = [statistics.median(values) for values in (baseline_real, candidate_real)]
     delta = 100 * (after / before - 1)
     stable = max(cv_baseline, cv_candidate) <= 5.0
     within_budget = after * 20 <= before * 21
     label = "noisy"
     if stable:
         label = "within budget" if within_budget else "regression"
+    if report is not None:
+        report.update(cpu_median=[before, after], real_median=real_medians,
+                      cpu_cv=[cv_baseline, cv_candidate], delta_percent=delta,
+                      stable=stable, within_budget=within_budget, samples=directory.name)
     print(f"{name}: CPU median {before:.1f} -> {after:.1f} ns/op ({delta:+.2f}%), "
-          f"real median {statistics.median(baseline_real):.1f} -> {statistics.median(candidate_real):.1f} ns/op, "
+          f"real median {real_medians[0]:.1f} -> {real_medians[1]:.1f} ns/op, "
           f"CPU CV {cv_baseline:.2f}% / {cv_candidate:.2f}% ({label})", flush=True)
     return stable, within_budget
 

@@ -128,8 +128,9 @@ ID: `REQ-79-7`
 
 
 #### Scenario: Область проверенного профиля
-- **WHEN** harness prepare получает target вне code_paths либо C++ исходник server/clients
-- **THEN** стадия не запускается; C++ профиль явно unavailable, без fallback и неприменимого NFR-пропуска
+- **WHEN** `prepare` получает target вне области выбранного профиля
+- **THEN** Runtime блокирует подготовку. Для объявленного C/C++ файла в
+  `server/src` оператор явно выбирает `cpp`. Подготовленная задача закрепляет этот профиль и применяет его NFR.
 - Test: `.claude/chain/tests/test_workflow_runtime.py::WorkflowRuntimeTest::test_profile_scope_blocks_unchecked_product`
 
 ### Requirement: Полная наблюдаемость затрат

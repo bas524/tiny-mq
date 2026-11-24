@@ -104,20 +104,29 @@ Linux CI проверяет эти же файлы под GCC с `-Werror`.
 сохраняются; методика — [nfr-gate](.claude/skills/nfr-gate/SKILL.md).
 Waiver разрешает только SDD 72 / PR №12 по обычному CI: REQ-72-9 остаётся открытым в
 [M-05](tasks/M-05-local-nightly-performance.md), технический performance verdict rejected.
-Локальный ночной job ещё не настроен; до согласования времени Owner расписание не создаётся.
+Расписание и свидетельства локальных ночных замеров ведутся в [M-05](tasks/M-05-local-nightly-performance.md).
 
 
-## Проверенный профиль native Runtime
+## Проверенные профили native Runtime
 
-Текущий `workflow-checks.json` регистрирует только `harness` с
-`code_paths=[".claude/chain"]`; NFR `not_applicable` относится к этой области.
-Профиль `cpp` unavailable до реальных проверок продуктовых команд, NFR и
-изоляции. Harness не покрывает C++, не заменяет сборки, ASan, шесть required CI
-checks и не переносит waiver SDD72 на новую работу. Для записи/доставки нужны
-persistent и non-persistent сообщения, обычная отправка и commit; для горячих
-путей сохраняются baseline и nfr-gate. M-05/REQ-72-9 остаются открытыми.
+Профиль по умолчанию `harness` работает в `.claude/chain`. Для C/C++ исходников
+и заголовков в `server/src` доступен явный выбор `prepare <change> --profile cpp`.
+Подготовленная задача закрепляет профиль. Автор пишет только объявленные
+C/C++ файлы. Проверяющие используют отдельные каталоги сборки и вывода.
 
-Публичный CLI и ограничения переключения — [AGENTS](AGENTS.md), план проверки
-C++ профиля — [M-06](tasks/M-06-compact-runtime-provider-smoke.md).
-Нового performance job или расписания change79 не вводит; числовая экономия
-времени/стоимости не измерена. Функция продукта и доменная модель не меняются.
+Для проверок `cpp` подготовь vcpkg `2026.06.24` и установленные зависимости
+под `handoffs/toolchains/cpp/{vcpkg,installed}` в рабочей копии задачи.
+`AEF_CPP_SDK` задаёт другой каталог внутри `handoffs/` той же копии.
+Reviewer выполняет Debug, clang-tidy, тесты и Release, Security — ASan,
+Conformance — Debug и тесты.
+
+На стадии `nfr` оператор выполняет `verify <change> --actor nfr` в
+согласованное окно. Runtime проверяет 15 парных серий по [nfr-gate](.claude/skills/nfr-gate/SKILL.md).
+Наблюдение привязывается к точным исходникам и окружению. Стабильная регрессия
+блокирует переход. При неполном, шумном или устаревшем замере стадия ждёт данные.
+Для публикации действуют все шесть обязательных CI checks. Исключение SDD 72
+ограничено PR №12. Для записи и доставки проверяй persistent и non-persistent
+сообщения, обычный send и commit.
+
+[Baseline main](benchmarks/baseline.md) · [CLI](AGENTS.md) ·
+[Приёмка и активация M‑06](tasks/M-06-compact-runtime-provider-smoke.md).

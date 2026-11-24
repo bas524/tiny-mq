@@ -24,7 +24,9 @@
 ## Активный вход
 
 `COMPACT_RUNTIME=1` переключает вход на `aef.py` по решению Owner о change 79.
-Профиль `harness` и его проверки заданы в [workflow-checks.json](workflow-checks.json).
+Профиль по умолчанию `harness` и явно выбираемый `cpp` описаны в
+[workflow-checks.json](workflow-checks.json). Решение об активации `cpp`
+зафиксировано в [M-06](../../tasks/M-06-compact-runtime-provider-smoke.md).
 Пороги прежней цепочки сохранены для истории и отката.
 
 ## Пороги

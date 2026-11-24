@@ -54,5 +54,8 @@ INT, закреплённые фрагменты и применимые кон�
 `request-exception`. Правила ручной цепочки выше описывают прежний маршрут
 и остаются справкой для исторических пакетов.
 
-Доступен профиль `harness` для `.claude/chain`. Для C++ нужен отдельный проверенный
-профиль по PROJECT.md. Контракт и ограничения описаны в [архиве change 79](openspec/changes/archive/2026-11-23-79-aef-journey-harness/design.md).
+По умолчанию используется профиль `harness` для `.claude/chain`. Для изменений C/C++
+в `server/src` укажи `prepare <change> --profile cpp`. При переходе на `nfr`
+запусти `verify <change> --actor nfr` в согласованное окно замера. Область записи,
+SDK и проверки описаны в [PROJECT.md](PROJECT.md), приёмка профиля — в
+[M-06](tasks/M-06-compact-runtime-provider-smoke.md).

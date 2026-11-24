@@ -13,7 +13,7 @@
    C++ доставку, ack, локальные tx и callbacks. REQ-72-9 открыт в
    [M-05](M-05-local-nightly-performance.md), технический perf rejected; исключение Owner
    разрешает PR №12 по обычному CI и не означает NFR done.
-5. Дальше — M-05 (ночное окно ещё задаёт Owner; job не настроен) и
+5. Дальше — валидные ночные замеры по [M-05](M-05-local-nightly-performance.md) и
    [SDD 73](../docs/jms-spec/73-jakarta-broker-transport.md) по зависимостям 70–72.
    Сеть, Java, XA, Jakarta EE и HA остаются будущими SDD 73–78.
 6. Для [SDD 78](../docs/jms-spec/78-jakarta-high-availability.md) и
@@ -25,7 +25,8 @@
 Сборка, профильные команды, допуск и следы проверки описаны в [PROJECT.md](../PROJECT.md)
 и [AGENTS.md](../AGENTS.md).
 
-Оснастка change 79 активирована для `harness`. История решения и проверок
-сохранена в [архиве](../openspec/changes/archive/2026-11-23-79-aef-journey-harness/acceptance.md). Перед продуктовой разработкой на
-новой оснастке подготовить и проверить C++ профиль по [M-06](M-06-compact-runtime-provider-smoke.md).
-M-05 и требования к продуктовой производительности остаются открытыми.
+Оснастка change 79 сохраняет `harness` профилем по умолчанию.
+Для нового C/C++ изменения в `server/src` используй явный `--profile cpp`
+после активации по [M-06](M-06-compact-runtime-provider-smoke.md).
+Первая продуктовая постановка для профиля — [SDD 73](../docs/jms-spec/73-jakarta-broker-transport.md).
+[Baseline M‑05](../benchmarks/baseline.md) принят для текущей машины.

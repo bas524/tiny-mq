@@ -124,9 +124,91 @@
           "environment": []
         }
       ]
+    },
+    "cpp": {
+      "code_paths": [
+        "server/src"
+      ],
+      "gates": [
+        "reviewer",
+        "nfr",
+        "conformance",
+        "security"
+      ],
+      "checks": [
+        {
+          "id": "cpp-reviewer",
+          "actors": [
+            "reviewer"
+          ],
+          "argv": [
+            "python3",
+            "-B",
+            ".claude/chain/workflow_cpp.py",
+            "reviewer"
+          ],
+          "inputs": [
+            "server",
+            "clients",
+            "tests",
+            "external",
+            "CMakeLists.txt",
+            "CMakePresets.json",
+            "vcpkg.json",
+            ".claude/chain/workflow_cpp.py"
+          ],
+          "environment": [],
+          "timeout": 1500
+        },
+        {
+          "id": "cpp-conformance",
+          "actors": [
+            "conformance"
+          ],
+          "argv": [
+            "python3",
+            "-B",
+            ".claude/chain/workflow_cpp.py",
+            "conformance"
+          ],
+          "inputs": [],
+          "environment": [],
+          "timeout": 1500
+        },
+        {
+          "id": "cpp-security",
+          "actors": [
+            "security"
+          ],
+          "argv": [
+            "python3",
+            "-B",
+            ".claude/chain/workflow_cpp.py",
+            "security"
+          ],
+          "inputs": [],
+          "environment": [],
+          "timeout": 1500
+        },
+        {
+          "id": "cpp-nfr",
+          "actors": [
+            "nfr"
+          ],
+          "argv": [
+            "python3",
+            "-B",
+            ".claude/chain/workflow_cpp.py",
+            "nfr-build"
+          ],
+          "inputs": [
+            ".claude/chain/workflow_nfr.py"
+          ],
+          "environment": [],
+          "timeout": 3600
+        }
+      ]
     }
   },
-  "unavailable_profiles": {
-    "cpp": "unavailable: product build, NFR and isolation profile is not verified"
-  }
+  "unavailable_profiles": {}
 }
