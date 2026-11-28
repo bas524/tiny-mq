@@ -132,6 +132,7 @@ if (ENABLE_TESTS)
                  tests/SelectorTest.cpp
                  tests/SelectorTest.h
                  tests/DeliveryContractTest.cpp
+                 tests/WireContractTest.cpp
                  tests/DestinationContractTest.cpp
                  tests/DurableSubscriberTest.cpp
                  tests/DurableSubscriberTest.h

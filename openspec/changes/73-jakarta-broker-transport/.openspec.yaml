@@ -1,0 +1,5 @@
+schema: aef
+task_ref: openspec/changes/73-jakarta-broker-transport/proposal.md
+status: draft
+version: 0.11
+review_date: 2026-11-28
