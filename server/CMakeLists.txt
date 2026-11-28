@@ -1,5 +1,12 @@
 target_sources(tiny_mq PRIVATE
   src/main.cpp
+  src/BrokerServer.cpp
+  src/BrokerServer.h
+  src/StompCodec.cpp
+  src/StompCodec.h
+  src/StompConnection.cpp
+  src/StompConnection.h
+  src/WireConnection.h
   src/Exchange.cpp
   src/Exchange.h
   src/DestinationType.h
